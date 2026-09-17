@@ -1,0 +1,4 @@
+client3ds/build/
+client3ds/dist/
+logs/
+__pycache__/
