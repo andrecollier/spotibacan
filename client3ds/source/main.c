@@ -692,10 +692,41 @@ static void clock_text(char *out, size_t n, float secs)
 	snprintf(out, n, "%d:%02d", t / 60, t % 60);
 }
 
+#define TH_Y 26.0f
+#define TH_H 31.0f
+#define TH_PAGE 6
+
+static void draw_theme_panel(const Skin *sk)
+{
+	char head[40];
+	snprintf(head, sizeof(head), "THEMES  (%d)", theme_count);
+	text_at(head, 12, 5, 0.38f, sk->dim, 0);
+	int first = (theme_sel / TH_PAGE) * TH_PAGE;
+	for (int i = first; i < theme_count && i < first + TH_PAGE; i++) {
+		float y = TH_Y + (i - first) * TH_H;
+		const Skin *t = &themes[i];
+		bool on = (i == theme_sel);
+		if (on) C2D_DrawRectSolid(8, y, 0.0f, BOT_W - 16, TH_H - 4, sk->accent);
+		// Swatches: pick by eye without having to apply each one first.
+		C2D_DrawRectSolid(14, y + 5, 0.1f, 15, TH_H - 15, t->top_bg);
+		C2D_DrawRectSolid(31, y + 5, 0.1f, 15, TH_H - 15, t->accent);
+		C2D_DrawRectSolid(48, y + 5, 0.1f, 15, TH_H - 15, t->panel);
+		text_at(t->name, 72, y + 2, 0.38f, on ? sk->on_accent : sk->text, 0);
+		if (t->author[0])
+			text_at(t->author, 72, y + 16, 0.26f, on ? sk->on_accent : sk->dim, 0);
+		text_at(t->dark ? "art" : "list", BOT_W - 14, y + 8, 0.28f,
+		        on ? sk->on_accent : sk->dim, C2D_AlignRight);
+	}
+	text_at("Up/Down pick   A apply   B back", BOT_W / 2, SCR_H - 15, 0.32f,
+	        sk->dim, C2D_AlignCenter);
+}
+
 static void draw_bottom(const Skin *sk, const Button *buttons, int count,
                         u32 used, bool buffering, int flash)
 {
-	if (lib.open) {
+	if (theme_open) {
+		draw_theme_panel(sk);
+	} else if (lib.open) {
 		C2D_DrawRectSolid(LIST_X + LIST_W + 4, 8, 0.0f, 1, SCR_H - 16, sk->meter);
 		draw_list_panel(sk);
 	} else {
@@ -846,6 +877,21 @@ int main(void)
 		bool touch_used = false;
 		if (down & KEY_TOUCH) hidTouchRead(&touch);
 
+		if (theme_open) {
+			if (down & KEY_DUP)   theme_sel = (theme_sel + theme_count - 1) % theme_count;
+			if (down & KEY_DDOWN) theme_sel = (theme_sel + 1) % theme_count;
+			if (down & KEY_TOUCH) {
+				int first = (theme_sel / TH_PAGE) * TH_PAGE;
+				int row = (int)((touch.py - TH_Y) / TH_H);
+				if (row >= 0 && row < TH_PAGE && first + row < theme_count) {
+					theme_sel = first + row;
+					skin = theme_sel;
+				}
+			}
+			if (down & KEY_A) skin = theme_sel;
+			if (down & (KEY_B | KEY_X | KEY_SELECT)) theme_open = false;
+			goto skip_input;
+		}
 		if (lib.open) {
 			if (down & KEY_DUP)   lib.sel = (lib.sel + lib.count - 1) % (lib.count ?: 1);
 			if (down & KEY_DDOWN) lib.sel = (lib.sel + 1) % (lib.count ?: 1);
@@ -904,7 +950,7 @@ int main(void)
 			case B_NEXT: pending_cmd = "/control/next"; break;
 			case B_PLAY: pending_cmd = "/control/toggle"; break;
 			case B_MUTE: toggle_mute = true; break;
-			case B_SKIN: skin ^= 1; break;
+			case B_SKIN: theme_open = true; theme_sel = skin; break;
 			case B_LIST:
 				lib.open = !lib.open;
 				if (lib.open) { lib.offset = lib.sel = 0; lib_reload = true; }
@@ -937,6 +983,7 @@ int main(void)
 			mix[0] = mix[1] = muted ? 0.0f : 1.0f;
 			ndspChnSetMix(0, mix);
 		}
+skip_input:
 		if (flash_ttl > 0 && --flash_ttl == 0) flash = -1;
 
 		// GPU calls belong to this thread, so the fetcher only stages bytes.
