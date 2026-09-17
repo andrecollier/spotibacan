@@ -138,6 +138,7 @@ static C3D_Tex backdrop_tex;
 static bool backdrop_ready = false;
 static int backdrop_w = 0, backdrop_h = 0;
 static char backdrop_name[48] = "";
+static char backdrop_status[64] = "no backdrop";
 
 // Offset of (x, y) inside an 8x8 tile: the PICA200 stores textures that way and
 // citro3d has no linear-to-tiled helper.
@@ -167,12 +168,12 @@ static bool backdrop_load(const char *file)
 	bool flip = h > 0;
 	if (h < 0) h = -h;
 	if (w <= 0 || w > BD_TEX || h <= 0 || h > BD_TEX_H ||
-	    (bpp != 24 && bpp != 32 && bpp != 8)) {
+	    (bpp != 24 && bpp != 32 && bpp != 8 && bpp != 1)) {
 		fclose(f); return false;
 	}
 
 	u8 palette[1024] = {0};
-	if (bpp == 8) {
+	if (bpp == 8 || bpp == 1) {
 		fseek(f, 14 + info_len, SEEK_SET);
 		fread(palette, 1, sizeof(palette), f);
 	}
@@ -188,7 +189,12 @@ static bool backdrop_load(const char *file)
 		if (fread(row, 1, stride, f) != (size_t)stride) break;
 		for (int x = 0; x < w; x++) {
 			u8 r, g, b;
-			if (bpp == 8) {
+			if (bpp == 1) {
+				// Monochrome: eight pixels per byte, most significant first.
+				int bit = (row[x >> 3] >> (7 - (x & 7))) & 1;
+				const u8 *p = palette + bit * 4;
+				b = p[0]; g = p[1]; r = p[2];
+			} else if (bpp == 8) {
 				const u8 *p = palette + row[x] * 4;
 				b = p[0]; g = p[1]; r = p[2];
 			} else {
@@ -219,10 +225,17 @@ static void backdrop_apply(const Skin *sk)
 {
 	if (!strcmp(backdrop_name, sk->backdrop)) return;   // already current
 	snprintf(backdrop_name, sizeof(backdrop_name), "%s", sk->backdrop);
-	if (!sk->backdrop[0] || !backdrop_load(sk->backdrop)) {
-		if (backdrop_ready) C3D_TexDelete(&backdrop_tex);
-		backdrop_ready = false;
+	if (!sk->backdrop[0]) {
+		snprintf(backdrop_status, sizeof(backdrop_status), "theme declares none");
+	} else if (backdrop_load(sk->backdrop)) {
+		snprintf(backdrop_status, sizeof(backdrop_status), "%s %dx%d",
+		         sk->backdrop, backdrop_w, backdrop_h);
+		return;
+	} else {
+		snprintf(backdrop_status, sizeof(backdrop_status), "%s NOT FOUND", sk->backdrop);
 	}
+	if (backdrop_ready) C3D_TexDelete(&backdrop_tex);
+	backdrop_ready = false;
 }
 
 // Cover, not stretch: scale until the screen is filled and centre the
@@ -233,7 +246,7 @@ static void draw_backdrop(float screen_w, float screen_h)
 	if (!backdrop_ready || backdrop_w <= 0 || backdrop_h <= 0) return;
 	float sx = screen_w / backdrop_w, sy = screen_h / backdrop_h;
 	float sc = sx > sy ? sx : sy;
-	Tex3DS_SubTexture sub = {BD_TEX, BD_TEX_H, 0.0f, 1.0f,
+	Tex3DS_SubTexture sub = {(u16)backdrop_w, (u16)backdrop_h, 0.0f, 1.0f,
 	                         (float)backdrop_w / BD_TEX,
 	                         1.0f - (float)backdrop_h / BD_TEX_H};
 	C2D_Image img = {&backdrop_tex, &sub};
@@ -879,6 +892,7 @@ static void draw_bottom(const Skin *sk, const Button *buttons, int count,
 		if (buttons[i].w > 0.0f)
 			draw_button(sk, &buttons[i], i == flash, buttons[i].h * 0.44f);
 	text_at("build " BUILD_STAMP, BOT_W - 4, SCR_H - 11, 0.28f, sk->dim, C2D_AlignRight);
+	text_at(backdrop_status, 4, SCR_H - 11, 0.28f, sk->dim, 0);
 }
 
 enum { B_PREV, B_PLAY, B_NEXT, B_MUTE, B_LIST, B_SKIN, B_SEARCH, B_COUNT };

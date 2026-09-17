@@ -8,6 +8,7 @@ fonts and layouts are left where they are; only the palette travels.
 """
 import argparse
 import re
+import struct
 import shutil
 from pathlib import Path
 
@@ -16,9 +17,23 @@ OUT = DIST / "themes"
 BACKDROPS = DIST / "backdrops"
 # "Author: X" is explicit; a bare "by X" is a guess, so it comes second and
 # gets cut at the first sign it has run into the rest of the sentence.
+BACKDROP_TAG = re.compile(r"%X\(([^)]*)\)")
 AUTHOR_EXPLICIT = re.compile(r"author\s*:?\s+(.+)", re.I)
 AUTHOR_LOOSE = re.compile(r"(?:^|[\s_#*-])by\s+(.+)", re.I)
 STOP = re.compile(r"\s*(?:[(<,.;]|\bbased\b|\bwhich\b|\band spinoffs\b|\d{4})")
+
+
+def flat(path):
+    """True when an image is a near-solid fill: those add nothing as a backdrop
+    and would otherwise win on filename alone."""
+    try:
+        data = path.read_bytes()
+        start = struct.unpack("<I", data[10:14])[0]
+        pixels = data[start:]
+    except Exception:
+        return False
+    step = max(3, (len(pixels) // 4000) * 3)
+    return len({pixels[i:i+3] for i in range(0, len(pixels) - 3, step)}) < 8
 
 
 def rgb(text, fallback):
@@ -84,16 +99,36 @@ def convert(cfg: Path):
     on_accent = rgb(settings.get("line selector text color"), bg)
     dark = luma(bg) < 0.5
 
-    # A theme's backdrop is a plain image the player loads at runtime; copy the
-    # one this theme points at so the palette and the picture stay together.
+    # Ask the theme instead of guessing: a .wps/.sbs declares its full-screen
+    # backdrop with %X(file). Picking by size or filename kept choosing USB
+    # splash screens and solid fills.
     backdrop = ""
+    root = cfg.parent.parent
+    wanted = []
+    for key in ("sbs", "wps"):
+        ref = settings.get(key, "")
+        if not ref:
+            continue
+        skin = root / ref.lstrip("/").replace(".rockbox/", "")
+        if not skin.is_file():
+            continue
+        for m in BACKDROP_TAG.finditer(skin.read_text(errors="replace")):
+            name = m.group(1).strip()
+            if name and name.lower() != "d":      # %X(d) disables the backdrop
+                wanted.append((skin.parent, name))
     declared = settings.get("backdrop", "")
     if declared:
-        src = cfg.parent.parent / declared.lstrip("/").replace(".rockbox/", "")
-        if src.is_file():
-            BACKDROPS.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, BACKDROPS / src.name)
-            backdrop = src.name
+        wanted.append((root, declared.lstrip("/").replace(".rockbox/", "")))
+
+    for base, name in wanted:
+        for src in (base / name, base / cfg.stem / name, root / "backdrops" / name):
+            if src.is_file() and not flat(src):
+                BACKDROPS.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, BACKDROPS / src.name)
+                backdrop = src.name
+                break
+        if backdrop:
+            break
 
     return {
         "name": cfg.stem[:22],
