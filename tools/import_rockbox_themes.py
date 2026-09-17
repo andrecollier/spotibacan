@@ -15,6 +15,7 @@ from pathlib import Path
 
 DIST = Path(__file__).resolve().parents[1] / "client3ds/dist/3ds/audio3ds"
 OUT = DIST / "themes"
+WPS = DIST / "wps"
 BACKDROPS = DIST / "backdrops"
 # "Author: X" is explicit; a bare "by X" is a guess, so it comes second and
 # gets cut at the first sign it has run into the rest of the sentence.
@@ -166,6 +167,20 @@ def convert(cfg: Path):
         if backdrop:
             break
 
+    # The .wps is the layout its author drew; it and the images it names travel
+    # together, exactly as they sit in a Rockbox install.
+    wps_name = ""
+    ref = settings.get("wps", "")
+    if ref:
+        src = root / ref.lstrip("/").replace(".rockbox/", "")
+        if src.is_file():
+            WPS.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, WPS / f"{cfg.stem}.wps")
+            wps_name = f"{cfg.stem}.wps"
+            art = src.parent / src.stem
+            if art.is_dir():
+                shutil.copytree(art, WPS / cfg.stem, dirs_exist_ok=True)
+
     return {
         "name": cfg.stem[:22],
         "author": find_author(cfg),
@@ -179,6 +194,7 @@ def convert(cfg: Path):
         "meter": mix(bg, fg, 0.28),
         "layout": "art" if dark else "list",
         "backdrop": backdrop,
+        "wps": wps_name,
     }
 
 
@@ -207,7 +223,7 @@ def main():
         lines = lines[:3] + [""] + [f"{k}: {v}" for k, v in t.items() if v]
         (OUT / f"{t['name']}.cfg").write_text("\n".join(lines) + "\n")
         credit = "by " + t["author"] if t["author"] else "(author not stated)"
-        print(f"  {t['name']:22} {credit:32}{'  + backdrop' if t['backdrop'] else ''}")
+        print(f"  {t['name']:22} {credit:32}{'  +bd' if t['backdrop'] else ''}{'  +wps' if t['wps'] else ''}")
     print(f"\n{len(found)} themes written to {OUT}")
 
 

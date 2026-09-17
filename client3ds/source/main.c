@@ -7,6 +7,8 @@
 
 #include <3ds.h>
 #include <citro2d.h>
+
+#include "wps.h"
 #include <arpa/inet.h>
 #include <ctype.h>
 #include <dirent.h>
@@ -76,6 +78,7 @@ typedef struct {
 	char name[24];
 	char author[32];
 	char backdrop[48];
+	char wps[48];
 	u32 top_bg, bottom_bg, panel, accent, on_accent, text, dim, meter;
 	bool dark;   // layout: art-forward (true) or framed list (false)
 } Skin;
@@ -126,6 +129,7 @@ static void theme_parse(const char *path, Skin *sk)
 		else if (!strcmp(key, "meter"))     sk->meter     = theme_colour(val, sk->meter);
 		else if (!strcmp(key, "layout"))    sk->dark      = (strstr(val, "art") != NULL);
 		else if (!strcmp(key, "backdrop"))  snprintf(sk->backdrop, sizeof(sk->backdrop), "%s", val);
+		else if (!strcmp(key, "wps"))       snprintf(sk->wps, sizeof(sk->wps), "%s", val);
 	}
 	fclose(f);
 }
@@ -221,6 +225,28 @@ static bool backdrop_load(const char *file)
 	return backdrop_ready;
 }
 
+#define WPS_DIR "sdmc:/3ds/audio3ds/wps"
+
+static char wps_loaded_for[24] = "";
+
+// A theme may ship a Rockbox .wps: the layout its author drew. When one loads,
+// it replaces our own now-playing screen; otherwise we fall back to ours.
+static void wps_apply(const Skin *sk)
+{
+	if (!strcmp(wps_loaded_for, sk->name)) return;
+	snprintf(wps_loaded_for, sizeof(wps_loaded_for), "%s", sk->name);
+	wps_unload();
+	if (!sk->wps[0]) return;
+	char file[256], dir[224];
+	snprintf(file, sizeof(file), WPS_DIR "/%s", sk->wps);
+	char stem[64];
+	snprintf(stem, sizeof(stem), "%s", sk->wps);
+	char *dot = strrchr(stem, '.');
+	if (dot) *dot = 0;
+	snprintf(dir, sizeof(dir), WPS_DIR "/%s", stem);
+	wps_load(file, dir);
+}
+
 static void backdrop_apply(const Skin *sk)
 {
 	if (!strcmp(backdrop_name, sk->backdrop)) return;   // already current
@@ -257,9 +283,9 @@ static void draw_backdrop(float screen_w, float screen_h)
 static void themes_load(void)
 {
 	// Built-ins, so the player still looks right on a card with no theme files.
-	themes[0] = (Skin){"Verde", "", "", 0xFF121212, 0xFF0A0A0A, 0xFF242424, 0xFF54CE72,
+	themes[0] = (Skin){"Verde", "", "", "", 0xFF121212, 0xFF0A0A0A, 0xFF242424, 0xFF54CE72,
 	                   0xFF0A0A0A, 0xFFFFFFFF, 0xFF9A9A9A, 0xFF3A3A3A, true};
-	themes[1] = (Skin){"Clasica", "", "", 0xFFF4F2EF, 0xFFE9E6E2, 0xFFFFFFFF, 0xFFD67B2B,
+	themes[1] = (Skin){"Clasica", "", "", "", 0xFFF4F2EF, 0xFFE9E6E2, 0xFFFFFFFF, 0xFFD67B2B,
 	                   0xFFFFFFFF, 0xFF1A1A1A, 0xFF7A7A7A, 0xFFCFCBC6, false};
 	theme_count = 2;
 
@@ -273,7 +299,7 @@ static void themes_load(void)
 		snprintf(path, sizeof(path), THEME_DIR "/%s", entry->d_name);
 		Skin sk = themes[0];                    // inherit, then override
 		snprintf(sk.name, sizeof(sk.name), "%.*s", (int)(dot - entry->d_name), entry->d_name);
-		sk.author[0] = sk.backdrop[0] = 0;
+		sk.author[0] = sk.backdrop[0] = sk.wps[0] = 0;
 		theme_parse(path, &sk);
 		themes[theme_count++] = sk;
 	}
@@ -892,7 +918,7 @@ static void draw_bottom(const Skin *sk, const Button *buttons, int count,
 		if (buttons[i].w > 0.0f)
 			draw_button(sk, &buttons[i], i == flash, buttons[i].h * 0.44f);
 	text_at("build " BUILD_STAMP, BOT_W - 4, SCR_H - 11, 0.28f, sk->dim, C2D_AlignRight);
-	text_at(backdrop_status, 4, SCR_H - 11, 0.28f, sk->dim, 0);
+	text_at(wps_ready() ? wps_status() : backdrop_status, 4, SCR_H - 11, 0.28f, sk->dim, 0);
 }
 
 enum { B_PREV, B_PLAY, B_NEXT, B_MUTE, B_LIST, B_SKIN, B_SEARCH, B_COUNT };
@@ -1133,6 +1159,7 @@ skip_input:
 
 		const Skin *sk = &themes[skin];
 		backdrop_apply(sk);
+		wps_apply(sk);
 		buttons[B_PLAY].icon = server_playing ? IC_PAUSE : IC_PLAY;
 		buttons[B_MUTE].icon = muted ? IC_MUTED : IC_SOUND;
 
@@ -1144,12 +1171,26 @@ skip_input:
 		C2D_TargetClear(top, sk->top_bg);
 		C2D_SceneBegin(top);
 		draw_backdrop(TOP_W, SCR_H);
-		draw_top(sk, buffering, muted, -depth);
+		if (wps_ready()) {
+			// Themes are drawn for 320x240; centre them on the 400-wide screen
+			// at native size rather than stretching the author's pixels.
+			WpsState ws = {now_title, now_artist, now_album, now_pos, now_dur,
+			               server_playing, art_present, {&art_tex, &art_sub}};
+			wps_render(&ws, (TOP_W - WPS_W) / 2 - depth, 0);
+		} else {
+			draw_top(sk, buffering, muted, -depth);
+		}
 		if (depth > 0.0f) {
 			C2D_TargetClear(top_right, sk->top_bg);
 			C2D_SceneBegin(top_right);
 			draw_backdrop(TOP_W, SCR_H);
-			draw_top(sk, buffering, muted, depth);
+			if (wps_ready()) {
+				WpsState ws = {now_title, now_artist, now_album, now_pos, now_dur,
+				               server_playing, art_present, {&art_tex, &art_sub}};
+				wps_render(&ws, (TOP_W - WPS_W) / 2 + depth, 0);
+			} else {
+				draw_top(sk, buffering, muted, depth);
+			}
 		}
 		C2D_TargetClear(bottom, sk->bottom_bg);
 		C2D_SceneBegin(bottom);
