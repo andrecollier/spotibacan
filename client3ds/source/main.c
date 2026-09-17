@@ -9,6 +9,7 @@
 #include <citro2d.h>
 #include <arpa/inet.h>
 #include <ctype.h>
+#include <dirent.h>
 #include <errno.h>
 #include <malloc.h>
 #include <netdb.h>
@@ -73,6 +74,7 @@ static u8 *art_staging = NULL;
 // Two looks over one engine: only colours and arrangement differ.
 typedef struct {
 	char name[24];
+	char author[32];
 	u32 top_bg, bottom_bg, panel, accent, on_accent, text, dim, meter;
 	bool dark;   // layout: art-forward (true) or framed list (false)
 } Skin;
@@ -80,14 +82,77 @@ typedef struct {
 #define MAX_THEMES 16
 #define THEME_DIR  "sdmc:/3ds/audio3ds/themes"
 
-static const Skin SKINS[2] = {
-	// Dark, green-accented, art-forward.
-	{"VERDE", 0xFF121212, 0xFF0A0A0A, 0xFF242424, 0xFF54CE72, 0xFF0A0A0A,
-	          0xFFFFFFFF, 0xFF9A9A9A, 0xFF3A3A3A, true},
-	// Light, blue-accented, list-forward.
-	{"CLASICA", 0xFFF4F2EF, 0xFFE9E6E2, 0xFFFFFFFF, 0xFFD67B2B, 0xFFFFFFFF,
-	            0xFF1A1A1A, 0xFF7A7A7A, 0xFFCFCBC6, false},
-};
+#define MAX_THEMES 24
+#define THEME_DIR  "sdmc:/3ds/audio3ds/themes"
+
+static Skin themes[MAX_THEMES];
+static int theme_count = 0;
+static bool theme_open = false;
+static int theme_sel = 0;
+
+// citro2d packs colours as 0xAABBGGRR; theme files write plain RRGGBB.
+static u32 theme_colour(const char *hex, u32 fallback)
+{
+	unsigned v = 0;
+	if (sscanf(hex, "%6x", &v) != 1) return fallback;
+	return 0xFF000000u | ((v & 0xFFu) << 16) | (v & 0xFF00u) | ((v >> 16) & 0xFFu);
+}
+
+// Themes are data, not code. That is what lets a player carry hundreds of them
+// and lets you edit one with a text editor instead of a compiler.
+static void theme_parse(const char *path, Skin *sk)
+{
+	FILE *f = fopen(path, "r");
+	if (!f) return;
+	char line[192];
+	while (fgets(line, sizeof(line), f)) {
+		if (line[0] == '#') continue;
+		char *colon = strchr(line, ':');
+		if (!colon) continue;
+		*colon = 0;
+		char *key = line, *val = colon + 1;
+		while (*val == ' ' || *val == '\t') val++;
+		val[strcspn(val, "\r\n")] = 0;
+		if      (!strcmp(key, "name"))      snprintf(sk->name, sizeof(sk->name), "%s", val);
+		else if (!strcmp(key, "author"))    snprintf(sk->author, sizeof(sk->author), "%s", val);
+		else if (!strcmp(key, "top bg"))    sk->top_bg    = theme_colour(val, sk->top_bg);
+		else if (!strcmp(key, "bottom bg")) sk->bottom_bg = theme_colour(val, sk->bottom_bg);
+		else if (!strcmp(key, "panel"))     sk->panel     = theme_colour(val, sk->panel);
+		else if (!strcmp(key, "accent"))    sk->accent    = theme_colour(val, sk->accent);
+		else if (!strcmp(key, "on accent")) sk->on_accent = theme_colour(val, sk->on_accent);
+		else if (!strcmp(key, "text"))      sk->text      = theme_colour(val, sk->text);
+		else if (!strcmp(key, "dim"))       sk->dim       = theme_colour(val, sk->dim);
+		else if (!strcmp(key, "meter"))     sk->meter     = theme_colour(val, sk->meter);
+		else if (!strcmp(key, "layout"))    sk->dark      = (strstr(val, "art") != NULL);
+	}
+	fclose(f);
+}
+
+static void themes_load(void)
+{
+	// Built-ins, so the player still looks right on a card with no theme files.
+	themes[0] = (Skin){"Verde", "", 0xFF121212, 0xFF0A0A0A, 0xFF242424, 0xFF54CE72,
+	                   0xFF0A0A0A, 0xFFFFFFFF, 0xFF9A9A9A, 0xFF3A3A3A, true};
+	themes[1] = (Skin){"Clasica", "", 0xFFF4F2EF, 0xFFE9E6E2, 0xFFFFFFFF, 0xFFD67B2B,
+	                   0xFFFFFFFF, 0xFF1A1A1A, 0xFF7A7A7A, 0xFFCFCBC6, false};
+	theme_count = 2;
+
+	DIR *dir = opendir(THEME_DIR);
+	if (!dir) return;
+	struct dirent *entry;
+	while (theme_count < MAX_THEMES && (entry = readdir(dir)) != NULL) {
+		const char *dot = strrchr(entry->d_name, '.');
+		if (!dot || strcmp(dot, ".cfg") != 0) continue;
+		char path[320];
+		snprintf(path, sizeof(path), THEME_DIR "/%s", entry->d_name);
+		Skin sk = themes[0];                    // inherit, then override
+		snprintf(sk.name, sizeof(sk.name), "%.*s", (int)(dot - entry->d_name), entry->d_name);
+		sk.author[0] = 0;
+		theme_parse(path, &sk);
+		themes[theme_count++] = sk;
+	}
+	closedir(dir);
+}
 
 // ---------------------------------------------------------------- ring buffer
 
@@ -709,6 +774,7 @@ int main(void)
 {
 	gfxInitDefault();
 	load_config();
+	themes_load();
 
 	// Everything that can fail runs first, while a text console is still the
 	// only thing initialised and can report why.
@@ -881,7 +947,7 @@ int main(void)
 			art_pending = false;
 		}
 
-		const Skin *sk = &SKINS[skin];
+		const Skin *sk = &themes[skin];
 		buttons[B_PLAY].icon = server_playing ? IC_PAUSE : IC_PLAY;
 		buttons[B_MUTE].icon = muted ? IC_MUTED : IC_SOUND;
 
