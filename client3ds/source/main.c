@@ -75,6 +75,7 @@ static u8 *art_staging = NULL;
 typedef struct {
 	char name[24];
 	char author[32];
+	char backdrop[48];
 	u32 top_bg, bottom_bg, panel, accent, on_accent, text, dim, meter;
 	bool dark;   // layout: art-forward (true) or framed list (false)
 } Skin;
@@ -124,16 +125,128 @@ static void theme_parse(const char *path, Skin *sk)
 		else if (!strcmp(key, "dim"))       sk->dim       = theme_colour(val, sk->dim);
 		else if (!strcmp(key, "meter"))     sk->meter     = theme_colour(val, sk->meter);
 		else if (!strcmp(key, "layout"))    sk->dark      = (strstr(val, "art") != NULL);
+		else if (!strcmp(key, "backdrop"))  snprintf(sk->backdrop, sizeof(sk->backdrop), "%s", val);
 	}
 	fclose(f);
+}
+
+#define BACKDROP_DIR "sdmc:/3ds/audio3ds/backdrops"
+#define BD_TEX 512
+#define BD_TEX_H 256
+
+static C3D_Tex backdrop_tex;
+static bool backdrop_ready = false;
+static int backdrop_w = 0, backdrop_h = 0;
+static char backdrop_name[48] = "";
+
+// Offset of (x, y) inside an 8x8 tile: the PICA200 stores textures that way and
+// citro3d has no linear-to-tiled helper.
+static inline int morton8(int x, int y)
+{
+	return (x & 1) | ((y & 1) << 1) | ((x & 2) << 1)
+	     | ((y & 2) << 2) | ((x & 4) << 2) | ((y & 4) << 3);
+}
+
+// Minimal BMP reader: 24/32-bit and 8-bit palettised, which covers what player
+// themes ship. Rows are bottom-up and padded to four bytes.
+static bool backdrop_load(const char *file)
+{
+	char path[160];
+	snprintf(path, sizeof(path), BACKDROP_DIR "/%s", file);
+	FILE *f = fopen(path, "rb");
+	if (!f) return false;
+	u8 head[54];
+	if (fread(head, 1, 54, f) != 54 || head[0] != 'B' || head[1] != 'M') {
+		fclose(f); return false;
+	}
+	u32 data_off = head[10] | (head[11] << 8) | (head[12] << 16) | (head[13] << 24);
+	u32 info_len = head[14] | (head[15] << 8) | (head[16] << 16) | (head[17] << 24);
+	int w = (int)(head[18] | (head[19] << 8) | (head[20] << 16) | (head[21] << 24));
+	int h = (int)(head[22] | (head[23] << 8) | (head[24] << 16) | (head[25] << 24));
+	int bpp = head[28] | (head[29] << 8);
+	bool flip = h > 0;
+	if (h < 0) h = -h;
+	if (w <= 0 || w > BD_TEX || h <= 0 || h > BD_TEX_H ||
+	    (bpp != 24 && bpp != 32 && bpp != 8)) {
+		fclose(f); return false;
+	}
+
+	u8 palette[1024] = {0};
+	if (bpp == 8) {
+		fseek(f, 14 + info_len, SEEK_SET);
+		fread(palette, 1, sizeof(palette), f);
+	}
+	int stride = ((w * bpp / 8) + 3) & ~3;
+	u8 *row = malloc(stride);
+	u16 *tex = linearAlloc(BD_TEX * BD_TEX_H * 2);
+	if (!row || !tex) { free(row); if (tex) linearFree(tex); fclose(f); return false; }
+	memset(tex, 0, BD_TEX * BD_TEX_H * 2);
+
+	for (int line = 0; line < h; line++) {
+		int y = flip ? (h - 1 - line) : line;
+		fseek(f, data_off + (long)line * stride, SEEK_SET);
+		if (fread(row, 1, stride, f) != (size_t)stride) break;
+		for (int x = 0; x < w; x++) {
+			u8 r, g, b;
+			if (bpp == 8) {
+				const u8 *p = palette + row[x] * 4;
+				b = p[0]; g = p[1]; r = p[2];
+			} else {
+				const u8 *p = row + x * (bpp / 8);
+				b = p[0]; g = p[1]; r = p[2];
+			}
+			int tile = (y >> 3) * (BD_TEX >> 3) + (x >> 3);
+			tex[tile * 64 + morton8(x & 7, y & 7)] =
+				(u16)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
+		}
+	}
+	free(row);
+	fclose(f);
+
+	if (backdrop_ready) C3D_TexDelete(&backdrop_tex);
+	backdrop_ready = C3D_TexInit(&backdrop_tex, BD_TEX, BD_TEX_H, GPU_RGB565);
+	if (backdrop_ready) {
+		C3D_TexSetFilter(&backdrop_tex, GPU_LINEAR, GPU_LINEAR);
+		C3D_TexLoadImage(&backdrop_tex, tex, GPU_TEXFACE_2D, 0);
+		C3D_TexFlush(&backdrop_tex);
+		backdrop_w = w; backdrop_h = h;
+	}
+	linearFree(tex);
+	return backdrop_ready;
+}
+
+static void backdrop_apply(const Skin *sk)
+{
+	if (!strcmp(backdrop_name, sk->backdrop)) return;   // already current
+	snprintf(backdrop_name, sizeof(backdrop_name), "%s", sk->backdrop);
+	if (!sk->backdrop[0] || !backdrop_load(sk->backdrop)) {
+		if (backdrop_ready) C3D_TexDelete(&backdrop_tex);
+		backdrop_ready = false;
+	}
+}
+
+// Cover, not stretch: scale until the screen is filled and centre the
+// overflow, so a 320x240 theme backdrop keeps its proportions on a 400x240
+// screen instead of being pulled wide.
+static void draw_backdrop(float screen_w, float screen_h)
+{
+	if (!backdrop_ready || backdrop_w <= 0 || backdrop_h <= 0) return;
+	float sx = screen_w / backdrop_w, sy = screen_h / backdrop_h;
+	float sc = sx > sy ? sx : sy;
+	Tex3DS_SubTexture sub = {BD_TEX, BD_TEX_H, 0.0f, 1.0f,
+	                         (float)backdrop_w / BD_TEX,
+	                         1.0f - (float)backdrop_h / BD_TEX_H};
+	C2D_Image img = {&backdrop_tex, &sub};
+	C2D_DrawImageAt(img, (screen_w - backdrop_w * sc) / 2,
+	                (screen_h - backdrop_h * sc) / 2, 0.0f, NULL, sc, sc);
 }
 
 static void themes_load(void)
 {
 	// Built-ins, so the player still looks right on a card with no theme files.
-	themes[0] = (Skin){"Verde", "", 0xFF121212, 0xFF0A0A0A, 0xFF242424, 0xFF54CE72,
+	themes[0] = (Skin){"Verde", "", "", 0xFF121212, 0xFF0A0A0A, 0xFF242424, 0xFF54CE72,
 	                   0xFF0A0A0A, 0xFFFFFFFF, 0xFF9A9A9A, 0xFF3A3A3A, true};
-	themes[1] = (Skin){"Clasica", "", 0xFFF4F2EF, 0xFFE9E6E2, 0xFFFFFFFF, 0xFFD67B2B,
+	themes[1] = (Skin){"Clasica", "", "", 0xFFF4F2EF, 0xFFE9E6E2, 0xFFFFFFFF, 0xFFD67B2B,
 	                   0xFFFFFFFF, 0xFF1A1A1A, 0xFF7A7A7A, 0xFFCFCBC6, false};
 	theme_count = 2;
 
@@ -147,7 +260,7 @@ static void themes_load(void)
 		snprintf(path, sizeof(path), THEME_DIR "/%s", entry->d_name);
 		Skin sk = themes[0];                    // inherit, then override
 		snprintf(sk.name, sizeof(sk.name), "%.*s", (int)(dot - entry->d_name), entry->d_name);
-		sk.author[0] = 0;
+		sk.author[0] = sk.backdrop[0] = 0;
 		theme_parse(path, &sk);
 		themes[theme_count++] = sk;
 	}
@@ -717,7 +830,9 @@ static void draw_theme_panel(const Skin *sk)
 		text_at(t->dark ? "art" : "list", BOT_W - 14, y + 8, 0.28f,
 		        on ? sk->on_accent : sk->dim, C2D_AlignRight);
 	}
-	text_at("Up/Down pick   A apply   B back", BOT_W / 2, SCR_H - 15, 0.32f,
+	C2D_DrawRectSolid(BOT_W - 44, 4, 0.0f, 38, 20, sk->panel);
+	draw_icon(IC_CLOSE, BOT_W - 25, 14, 11, sk->text);
+	text_at("Up/Down pick   A apply   B back", BOT_W / 2 - 20, SCR_H - 15, 0.32f,
 	        sk->dim, C2D_AlignCenter);
 }
 
@@ -726,7 +841,9 @@ static void draw_bottom(const Skin *sk, const Button *buttons, int count,
 {
 	if (theme_open) {
 		draw_theme_panel(sk);
-	} else if (lib.open) {
+		return;                 // exclusive: the buttons must not sit on top
+	}
+	if (lib.open) {
 		C2D_DrawRectSolid(LIST_X + LIST_W + 4, 8, 0.0f, 1, SCR_H - 16, sk->meter);
 		draw_list_panel(sk);
 	} else {
@@ -874,18 +991,22 @@ int main(void)
 		u32 down = hidKeysDown();
 		if (down & KEY_START) break;
 		touchPosition touch = {0, 0};
-		bool touch_used = false;
+		bool touch_used = false, input_used = false;
 		if (down & KEY_TOUCH) hidTouchRead(&touch);
 
 		if (theme_open) {
 			if (down & KEY_DUP)   theme_sel = (theme_sel + theme_count - 1) % theme_count;
 			if (down & KEY_DDOWN) theme_sel = (theme_sel + 1) % theme_count;
 			if (down & KEY_TOUCH) {
-				int first = (theme_sel / TH_PAGE) * TH_PAGE;
-				int row = (int)((touch.py - TH_Y) / TH_H);
-				if (row >= 0 && row < TH_PAGE && first + row < theme_count) {
-					theme_sel = first + row;
-					skin = theme_sel;
+				if (touch.px > BOT_W - 44 && touch.py < 24) {
+					theme_open = false;
+				} else {
+					int first = (theme_sel / TH_PAGE) * TH_PAGE;
+					int row = (int)((touch.py - TH_Y) / TH_H);
+					if (row >= 0 && row < TH_PAGE && first + row < theme_count) {
+						theme_sel = first + row;
+						skin = theme_sel;
+					}
 				}
 			}
 			if (down & KEY_A) skin = theme_sel;
@@ -915,6 +1036,7 @@ int main(void)
 				ring_clear();
 				lib.open = false;
 				layout_buttons(buttons, false);
+				input_used = true;   // closing the list must not re-read this press
 			}
 			if (down & KEY_B) { lib.open = false; layout_buttons(buttons, false); }
 		} else if ((down & KEY_TOUCH) && touch.py >= SEEK_Y - 6 &&
@@ -932,6 +1054,7 @@ int main(void)
 		}
 
 		int pressed = -1;
+		if (input_used) goto skip_input;
 		if (down & KEY_L && !lib.open) pressed = B_PREV;
 		if (down & KEY_R && !lib.open) pressed = B_NEXT;
 		if (down & KEY_A && !lib.open) pressed = B_PLAY;
@@ -995,6 +1118,7 @@ skip_input:
 		}
 
 		const Skin *sk = &themes[skin];
+		backdrop_apply(sk);
 		buttons[B_PLAY].icon = server_playing ? IC_PAUSE : IC_PLAY;
 		buttons[B_MUTE].icon = muted ? IC_MUTED : IC_SOUND;
 
@@ -1005,10 +1129,12 @@ skip_input:
 		C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
 		C2D_TargetClear(top, sk->top_bg);
 		C2D_SceneBegin(top);
+		draw_backdrop(TOP_W, SCR_H);
 		draw_top(sk, buffering, muted, -depth);
 		if (depth > 0.0f) {
 			C2D_TargetClear(top_right, sk->top_bg);
 			C2D_SceneBegin(top_right);
+			draw_backdrop(TOP_W, SCR_H);
 			draw_top(sk, buffering, muted, depth);
 		}
 		C2D_TargetClear(bottom, sk->bottom_bg);

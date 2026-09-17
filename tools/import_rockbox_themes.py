@@ -8,9 +8,12 @@ fonts and layouts are left where they are; only the palette travels.
 """
 import argparse
 import re
+import shutil
 from pathlib import Path
 
-OUT = Path(__file__).resolve().parents[1] / "client3ds/dist/3ds/audio3ds/themes"
+DIST = Path(__file__).resolve().parents[1] / "client3ds/dist/3ds/audio3ds"
+OUT = DIST / "themes"
+BACKDROPS = DIST / "backdrops"
 # "Author: X" is explicit; a bare "by X" is a guess, so it comes second and
 # gets cut at the first sign it has run into the rest of the sentence.
 AUTHOR_EXPLICIT = re.compile(r"author\s*:?\s+(.+)", re.I)
@@ -80,6 +83,18 @@ def convert(cfg: Path):
         accent = fg if abs(luma(fg) - luma(bg)) > 0.3 else mix(fg, bg, 0.4)
     on_accent = rgb(settings.get("line selector text color"), bg)
     dark = luma(bg) < 0.5
+
+    # A theme's backdrop is a plain image the player loads at runtime; copy the
+    # one this theme points at so the palette and the picture stay together.
+    backdrop = ""
+    declared = settings.get("backdrop", "")
+    if declared:
+        src = cfg.parent.parent / declared.lstrip("/").replace(".rockbox/", "")
+        if src.is_file():
+            BACKDROPS.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, BACKDROPS / src.name)
+            backdrop = src.name
+
     return {
         "name": cfg.stem[:22],
         "author": find_author(cfg),
@@ -92,6 +107,7 @@ def convert(cfg: Path):
         "dim": mix(fg, bg, 0.45),
         "meter": mix(bg, fg, 0.28),
         "layout": "art" if dark else "list",
+        "backdrop": backdrop,
     }
 
 
@@ -111,7 +127,8 @@ def main():
                  ""]
         lines += [f"{k}: {v}" for k, v in t.items() if v]
         (OUT / f"{t['name']}.cfg").write_text("\n".join(lines) + "\n")
-        print(f"  {t['name']:24} {'by ' + t['author'] if t['author'] else '(author not stated)'}")
+        credit = "by " + t["author"] if t["author"] else "(author not stated)"
+        print(f"  {t['name']:22} {credit:32}{'  + backdrop' if t['backdrop'] else ''}")
     print(f"\n{len(found)} themes written to {OUT}")
 
 
