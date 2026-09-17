@@ -10,6 +10,7 @@ import argparse
 import re
 import struct
 import shutil
+from PIL import Image
 from pathlib import Path
 
 DIST = Path(__file__).resolve().parents[1] / "client3ds/dist/3ds/audio3ds"
@@ -21,6 +22,41 @@ BACKDROP_TAG = re.compile(r"%X\(([^)]*)\)")
 AUTHOR_EXPLICIT = re.compile(r"author\s*:?\s+(.+)", re.I)
 AUTHOR_LOOSE = re.compile(r"(?:^|[\s_#*-])by\s+(.+)", re.I)
 STOP = re.compile(r"\s*(?:[(<,.;]|\bbased\b|\bwhich\b|\band spinoffs\b|\d{4})")
+
+
+TOP_W, TOP_H = 400, 240
+
+
+def generate_backdrop(theme, dest):
+    """Build an original backdrop from the theme's own palette.
+
+    Most themes carry no full-screen image: they are assembled from small
+    pieces by Rockbox's own layout language. Rather than leave those flat, this
+    paints a gradient from the colours the theme already declares. It imitates
+    nobody's artwork; it is the palette, enlarged.
+    """
+    def rgb_of(key, default):
+        h = theme.get(key) or default
+        return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
+
+    base = rgb_of("top bg", "101010")
+    panel = rgb_of("panel", "202020")
+    accent = rgb_of("accent", "808080")
+    img = Image.new("RGB", (TOP_W, TOP_H))
+    px = img.load()
+    for y in range(TOP_H):
+        v = y / (TOP_H - 1)
+        for x in range(TOP_W):
+            u = x / (TOP_W - 1)
+            # Diagonal blend base -> panel, with a soft accent wash in one
+            # corner and a gentle vignette so text keeps its contrast.
+            t = (u * 0.35 + v * 0.65)
+            c = [base[i] + (panel[i] - base[i]) * t for i in range(3)]
+            glow = max(0.0, 1.0 - ((u - 0.12) ** 2 + (v - 0.1) ** 2) * 4.2) * 0.22
+            c = [c[i] + (accent[i] - c[i]) * glow for i in range(3)]
+            edge = 1.0 - (abs(u - 0.5) ** 3 + abs(v - 0.5) ** 3) * 0.55
+            px[x, y] = tuple(max(0, min(255, int(ch * edge))) for ch in c)
+    img.save(dest, "BMP")
 
 
 def flat(path):
@@ -161,6 +197,14 @@ def main():
                  "# Bitmaps, fonts and layouts stay with their author; only colours are here.",
                  ""]
         lines += [f"{k}: {v}" for k, v in t.items() if v]
+        if not t["backdrop"]:
+            BACKDROPS.mkdir(parents=True, exist_ok=True)
+            name = f"{t['name']}_gen.bmp"
+            generate_backdrop(t, BACKDROPS / name)
+            t["backdrop"] = name
+            lines.insert(2, "# Backdrop generated from this theme's palette, "
+                            "not taken from the original theme.")
+        lines = lines[:3] + [""] + [f"{k}: {v}" for k, v in t.items() if v]
         (OUT / f"{t['name']}.cfg").write_text("\n".join(lines) + "\n")
         credit = "by " + t["author"] if t["author"] else "(author not stated)"
         print(f"  {t['name']:22} {credit:32}{'  + backdrop' if t['backdrop'] else ''}")
