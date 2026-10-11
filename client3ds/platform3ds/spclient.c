@@ -15,6 +15,10 @@
  * which is a confusing way to be told the shape is wrong. */
 #define EXT_KIND_TRACK_V4 10
 
+/* Defined with the playlist code below; the rootlist is the same shape and
+ * shares it. */
+static int read_list_items(const pbv *content, char uris[][64], int max);
+
 static void copy_str(char *dst, size_t cap, const pbv *v)
 {
 	size_t n = v->len < cap - 1 ? v->len : cap - 1;
@@ -175,7 +179,7 @@ int sp_track_metadata(const char *host, const char *token, const char *track_uri
 }
 
 int sp_rootlist(const char *host, const char *token, const char *username,
-                char uris[][96], int max, int *count, char *err, size_t errlen)
+                char uris[][64], int max, int *count, char *err, size_t errlen)
 {
 	char path[256];
 	snprintf(path, sizeof(path), "/playlist/v2/user/%s/rootlist", username);
@@ -196,24 +200,114 @@ int sp_rootlist(const char *host, const char *token, const char *username,
 	pb_get_varint(body, r.len, 2, &length);   /* SelectedListContent.length */
 	*count = (int)length;
 
-	int n = 0;
+	pbv whole = { body, r.len };
+	int n = read_list_items(&whole, uris, max);
+	http_reply_free(&r);
+	return n;
+}
+
+/* ------------------------------------------------------------- playlists */
+
+/* SelectedListContent.contents (5) -> ListItems.items (3) -> Item.uri (1).
+ * `items` is repeated, and pb_get_bytes only yields the first, so the list is
+ * walked by hand. */
+static int read_list_items(const pbv *content, char uris[][64], int max)
+{
 	pbv contents;
-	if (pb_get_bytes(body, r.len, 5, &contents)) {   /* ListItems */
-		size_t at = 0;
-		while (at < contents.len && n < max) {
-			pbv rest = { contents.p + at, contents.len - at };
-			pbv item;
-			if (!pb_get_bytes(rest.p, rest.len, 3, &item))
-				break;
-			pbv uri;
-			if (pb_get_bytes(item.p, item.len, 1, &uri)) {
-				size_t len = uri.len < 95 ? uri.len : 95;
-				memcpy(uris[n], uri.p, len);
-				uris[n][len] = '\0';
-				n++;
-			}
-			at = (size_t)(item.p + item.len - contents.p);
+	if (!pb_get_bytes(content->p, content->len, 5, &contents))
+		return 0;
+
+	int n = 0;
+	size_t at = 0;
+	while (at < contents.len && n < max) {
+		pbv rest = { contents.p + at, contents.len - at };
+		pbv item;
+		if (!pb_get_bytes(rest.p, rest.len, 3, &item))
+			break;
+		pbv uri;
+		if (pb_get_bytes(item.p, item.len, 1, &uri)) {
+			size_t len = uri.len < 63 ? uri.len : 63;
+			memcpy(uris[n], uri.p, len);
+			uris[n][len] = '\0';
+			n++;
 		}
+		at = (size_t)(item.p + item.len - contents.p);
+	}
+	return n;
+}
+
+int sp_playlist(const char *host, const char *token, const char *playlist_id,
+                char *name, size_t namelen, char uris[][64], int max,
+                int *count, char *err, size_t errlen)
+{
+	if (name && namelen)
+		name[0] = '\0';
+
+	char path[160];
+	snprintf(path, sizeof(path), "/playlist/v2/playlist/%s", playlist_id);
+
+	http_reply r;
+	if (http_get_proto(host, path, token, &r) != 0) {
+		snprintf(err, errlen, "playlist: %s", r.err);
+		return -1;
+	}
+	if (r.status != 200) {
+		snprintf(err, errlen, "playlist returned HTTP %d", r.status);
+		http_reply_free(&r);
+		return -1;
+	}
+
+	const uint8_t *body = (const uint8_t *)r.body;
+	uint64_t length = 0;
+	pb_get_varint(body, r.len, 2, &length);
+	if (count)
+		*count = (int)length;
+
+	pbv attrs, nm;
+	if (name && namelen && pb_get_bytes(body, r.len, 3, &attrs) &&
+	    pb_get_bytes(attrs.p, attrs.len, 1, &nm))      /* ListAttributes.name */
+		copy_str(name, namelen, &nm);
+
+	pbv whole = { body, r.len };
+	int n = read_list_items(&whole, uris, max);
+	http_reply_free(&r);
+	return n;
+}
+
+int sp_liked(const char *host, const char *token, const char *username,
+             char uris[][64], int max, char *err, size_t errlen)
+{
+	char path[192];
+	snprintf(path, sizeof(path),
+	         "/context-resolve/v1/spotify:user:%s:collection", username);
+
+	http_reply r;
+	if (http_get(host, path, token, &r) != 0) {
+		snprintf(err, errlen, "liked: %s", r.err);
+		return -1;
+	}
+	if (r.status != 200) {
+		snprintf(err, errlen, "liked returned HTTP %d", r.status);
+		http_reply_free(&r);
+		return -1;
+	}
+
+	/* {"pages":[{"tracks":[{"uri":"spotify:track:...", "metadata":{...}}, ...]}]}
+	 * The array iterator finds "tracks" wherever it sits, which saves walking
+	 * into "pages" first. */
+	int n = 0;
+	size_t cursor = 0;
+	const char *obj;
+	size_t objlen;
+	while (n < max && json_array_next(r.body, "tracks", &cursor, &obj, &objlen)) {
+		char buf[512];
+		if (objlen >= sizeof(buf))
+			continue;
+		memcpy(buf, obj, objlen);
+		buf[objlen] = '\0';
+		char uri[64];
+		if (json_str(buf, "uri", uri, sizeof(uri)))
+			snprintf(uris[n++], 64, "%s", uri);
 	}
 	http_reply_free(&r);
 	return n;

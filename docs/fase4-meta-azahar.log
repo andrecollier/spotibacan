@@ -1,11 +1,11 @@
 3DS Spotify -- library & metadata (phase 4)
-built 23:34:44
+built 02:42:01
 
 1. OAuth access token...
    443 chars
 2. Access point...
    6 candidates, first ap-guc3.spotify.com:4070
-   ap-guc3.spotify.com:4070 (attempt 1), 31xn3ibkyttdciogihibyz6jjuym, 195 bytes of credentials
+   ap-guc3.spotify.com:443 (attempt 2), 31xn3ibkyttdciogihibyz6jjuym, 195 bytes of credentials
 3. login5 token...
    443 chars, valid 3540 s
 4. spclient host...
@@ -26,12 +26,12 @@ built 23:34:44
 6. Search (no library needed)
    8 track uris; naming them in one batch...
      The Killers - Mr. Brightside  3:42  Vorbis 160
+     Thirty Seconds To Mars - The Kill  3:51  Vorbis 160
      The Killers - Miss Atomic Bomb  4:53  Vorbis 160
      The Killers - Human  4:05  Vorbis 160
      The Killers - All These Things That I've Done  5:01  Vorbis 160
      The Killers - Somebody Told Me  3:17  Vorbis 160
      The Killers - When You Were Young  3:40  Vorbis 160
-     The Killers - Just Another Girl  4:21  Vorbis 160
      The Killers - Read My Mind  4:06  Vorbis 160
 
 7. Radio from one track (titles come inline)
@@ -39,10 +39,10 @@ built 23:34:44
      Kings of Leon - Sex on Fire  (Only By The Night)
      MGMT - Kids  (Oracular Spectacular)
      Red Hot Chili Peppers - Can't Stop  (By the Way (Deluxe Edition))
-     Katy Perry - Hot N Cold  (One Of The Boys)
-     Dexter and The Moonrocks - Freakin’ Out  (Friends That I Don't Like)
      Two Door Cinema Club - What You Know  (Tourist History)
-     The Killers - When You Were Young  (Sam's Town)
+     Dexter and The Moonrocks - Freakin’ Out  (Friends That I Don't Like)
+     Katy Perry - Hot N Cold  (One Of The Boys)
+     The Killers - Human  (Day & Age (Bonus Tracks))
 
 8. Rootlist
    length field 4, 4 uris read
@@ -50,5 +50,27 @@ built 23:34:44
      spotify:playlist:5Pj7Zzg4HXfoXK5wC6Nr5T
      spotify:playlist:4736Lsl6HvYhjTS7kpAno5
      spotify:playlist:5H7GDvED2qYvGnPgEiWxGG
+
+9. Contents of the first playlist
+   "Molotov, Control Machete, Plastilina Mosh y demás incorrectos": 37 tracks, 24 read
+     Molotov - Gimme Tha Power
+     Molotov - Matate Tete
+     Molotov - Quitate Que Ma'sturbas ( Perra Arrabalera)
+     Molotov - Puto
+     Molotov - ¿Por Qué No Te Haces Para Alla?.. Al Mas Alla
+     Molotov - Frijolero
+     Molotov - Voto Latino
+     Molotov - Chinga Tu Madre
+     ... y 16 mas
+
+10. Liked Songs
+   7 liked, showing 7
+     Bersuit Vergarabat - Sr. Cobranza
+     Bersuit Vergarabat - Un Pacto - Live In Buenos Aires / 2001
+     Molotov - Puto
+     Bersuit Vergarabat - Yo Tomo
+     Molotov - Frijolero
+     Molotov - Hit Me
+     Molotov - Gimme Tha Power
 
 START exits.

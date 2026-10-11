@@ -68,8 +68,25 @@ int  sp_radio(const char *host, const char *token, const char *seed_uri,
  * up to `max` of their URIs are copied into `uris`. An empty rootlist is a
  * valid answer, not an error. */
 int  sp_rootlist(const char *host, const char *token, const char *username,
-                 char uris[][96], int max, int *count,
+                 char uris[][64], int max, int *count,
                  char *err, size_t errlen);
+
+/* The tracks in one playlist. `name` gets the playlist's title, `uris` up to
+ * `max` track URIs, and `count` the length the server reports, which can
+ * exceed what fits. Returns how many URIs were read, or -1.
+ *
+ * Same SelectedListContent as the rootlist: a rootlist holds playlist URIs and
+ * a playlist holds track URIs, so one parser serves both. */
+int  sp_playlist(const char *host, const char *token, const char *playlist_id,
+                 char *name, size_t namelen, char uris[][64], int max,
+                 int *count, char *err, size_t errlen);
+
+/* Liked Songs. This one answers JSON, not protobuf, and carries the whole
+ * first page inline. An empty page means an empty library, not a failure --
+ * which is worth knowing, because that is what it looked like before this
+ * account had anything saved. */
+int  sp_liked(const char *host, const char *token, const char *username,
+              char uris[][64], int max, char *err, size_t errlen);
 
 /* Picks the best file this client can actually play, or NULL. */
 const sp_file *sp_pick_file(const sp_track *t);

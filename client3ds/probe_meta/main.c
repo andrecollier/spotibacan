@@ -215,7 +215,7 @@ int main(int argc, char **argv)
 	}
 
 	say("\n8. Rootlist\n");
-	static char uris[16][96];
+	static char uris[16][64];
 	int count = 0;
 	int got = sp_rootlist(sp_host, l5.access_token, info.username, uris, 16,
 	                      &count, err, sizeof(err));
@@ -227,6 +227,65 @@ int main(int argc, char **argv)
 			say("     %s\n", uris[i]);
 		if (count == 0 && got == 0)
 			say("   (the account's playlist folder is empty)\n");
+	}
+
+	say("\n9. Contents of the first playlist\n");
+	const char *first = NULL;
+	for (int i = 0; i < got; i++)
+		if (strncmp(uris[i], "spotify:playlist:", 17) == 0) {
+			first = uris[i] + 17;
+			break;
+		}
+	if (!first) {
+		say("   no playlist in the rootlist\n");
+	} else {
+		static char tracks[24][64];
+		char plname[128];
+		int total = 0;
+		int n = sp_playlist(sp_host, l5.access_token, first, plname,
+		                    sizeof(plname), tracks, 24, &total,
+		                    err, sizeof(err));
+		if (n < 0) {
+			say("   failed: %s\n", err);
+		} else {
+			say("   \"%s\": %d tracks, %d read\n", plname, total, n);
+			static const char *ptrs2[24];
+			int show = n < 8 ? n : 8;
+			for (int i = 0; i < show; i++)
+				ptrs2[i] = tracks[i];
+			static sp_track batch2[8];
+			int named = sp_track_metadata_batch(sp_host, l5.access_token,
+			                                    ptrs2, show, batch2,
+			                                    err, sizeof(err));
+			for (int i = 0; i < named; i++)
+				say("     %s - %s\n", batch2[i].artist, batch2[i].name);
+			if (named > 0 && n > named)
+				say("     ... y %d mas\n", n - named);
+		}
+	}
+
+	say("\n10. Liked Songs\n");
+	{
+		static char liked[24][64];
+		int n = sp_liked(sp_host, l5.access_token, info.username, liked, 24,
+		                 err, sizeof(err));
+		if (n < 0) {
+			say("   failed: %s\n", err);
+		} else if (n == 0) {
+			say("   (nothing saved)\n");
+		} else {
+			static const char *ptrs3[8];
+			int show = n < 8 ? n : 8;
+			for (int i = 0; i < show; i++)
+				ptrs3[i] = liked[i];
+			static sp_track batch3[8];
+			int named = sp_track_metadata_batch(sp_host, l5.access_token,
+			                                    ptrs3, show, batch3,
+			                                    err, sizeof(err));
+			say("   %d liked, showing %d\n", n, named);
+			for (int i = 0; i < named; i++)
+				say("     %s - %s\n", batch3[i].artist, batch3[i].name);
+		}
 	}
 
 hold:
