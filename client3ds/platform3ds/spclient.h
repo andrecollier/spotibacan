@@ -27,6 +27,7 @@ typedef struct {
 } sp_file;
 
 typedef struct {
+	char    uri[64];
 	char    name[128];
 	char    artist[128];
 	char    album[128];
@@ -42,6 +43,26 @@ int  sp_resolve(char *host, size_t hostlen, char *err, size_t errlen);
 /* One track's metadata, via the extended-metadata batch service. */
 int  sp_track_metadata(const char *host, const char *token, const char *track_uri,
                        sp_track *out, char *err, size_t errlen);
+
+/* Several at once. The service takes a repeated entity_request, so a screenful
+ * of tracks costs one round trip instead of one each -- which on this console
+ * is the difference between a list that fills instantly and one that crawls.
+ * Returns how many were filled in, or -1. */
+int  sp_track_metadata_batch(const char *host, const char *token,
+                             const char *const *uris, int n,
+                             sp_track *out, char *err, size_t errlen);
+
+/* Searching the catalogue. Needs no library, which is what makes a fresh
+ * account usable: the answer is a list of track URIs, which
+ * sp_track_metadata_batch then turns into names.
+ * `query` is plain text; spaces become '+'. */
+int  sp_search_tracks(const char *host, const char *token, const char *query,
+                      char uris[][64], int max, char *err, size_t errlen);
+
+/* Recommendations seeded from one track. Unlike search, this answers with the
+ * titles and artists inline, so no metadata round trip is needed at all. */
+int  sp_radio(const char *host, const char *token, const char *seed_uri,
+              int count, sp_track *out, int max, char *err, size_t errlen);
 
 /* The user's playlist folder. `count` is how many entries the rootlist holds;
  * up to `max` of their URIs are copied into `uris`. An empty rootlist is a

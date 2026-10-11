@@ -19,4 +19,17 @@ bool json_str(const char *json, const char *key, char *out, size_t outlen);
 /* Reads an integer value. Returns false when absent or not a number. */
 bool json_int(const char *json, const char *key, long *out);
 
+/* Walks the objects of the array at `key`, one call per object.
+ *
+ * `cursor` starts at 0 and is carried between calls. Each object is handed back
+ * as a slice, which json_str and json_int can then be applied to -- and since
+ * those search at any depth, keys nested inside the object (a track's
+ * "metadata" block, say) are reachable without a second pass. Returns false
+ * when the array ends.
+ *
+ * Brace counting is string-aware: a brace inside a value, or an escaped quote,
+ * must not be mistaken for structure. */
+bool json_array_next(const char *json, const char *key, size_t *cursor,
+                     const char **obj, size_t *objlen);
+
 #endif

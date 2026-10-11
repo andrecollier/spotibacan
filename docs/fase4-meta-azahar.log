@@ -1,5 +1,5 @@
 3DS Spotify -- library & metadata (phase 4)
-built 23:29:55
+built 23:34:44
 
 1. OAuth access token...
    443 chars
@@ -23,8 +23,32 @@ built 23:29:55
      42a528f2f7db69b9ccabd1cbb533c24695ec8ef8  AAC
    pick for this console: Vorbis 160
 
-6. Rootlist
-   length field 0, 0 uris read
-   (the account's playlist folder is empty)
+6. Search (no library needed)
+   8 track uris; naming them in one batch...
+     The Killers - Mr. Brightside  3:42  Vorbis 160
+     The Killers - Miss Atomic Bomb  4:53  Vorbis 160
+     The Killers - Human  4:05  Vorbis 160
+     The Killers - All These Things That I've Done  5:01  Vorbis 160
+     The Killers - Somebody Told Me  3:17  Vorbis 160
+     The Killers - When You Were Young  3:40  Vorbis 160
+     The Killers - Just Another Girl  4:21  Vorbis 160
+     The Killers - Read My Mind  4:06  Vorbis 160
+
+7. Radio from one track (titles come inline)
+     The Killers - Somebody Told Me  (Hot Fuss)
+     Kings of Leon - Sex on Fire  (Only By The Night)
+     MGMT - Kids  (Oracular Spectacular)
+     Red Hot Chili Peppers - Can't Stop  (By the Way (Deluxe Edition))
+     Katy Perry - Hot N Cold  (One Of The Boys)
+     Dexter and The Moonrocks - Freakin’ Out  (Friends That I Don't Like)
+     Two Door Cinema Club - What You Know  (Tourist History)
+     The Killers - When You Were Young  (Sam's Town)
+
+8. Rootlist
+   length field 4, 4 uris read
+     spotify:playlist:6YA4F5snc7Rmhz9YvzAQ9M
+     spotify:playlist:5Pj7Zzg4HXfoXK5wC6Nr5T
+     spotify:playlist:4736Lsl6HvYhjTS7kpAno5
+     spotify:playlist:5H7GDvED2qYvGnPgEiWxGG
 
 START exits.

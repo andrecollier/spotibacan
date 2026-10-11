@@ -175,7 +175,46 @@ int main(int argc, char **argv)
 		    pick ? sp_format_name(pick->format) : "none playable!");
 	}
 
-	say("\n6. Rootlist\n");
+	say("\n6. Search (no library needed)\n");
+	static char found[8][64];
+	int nfound = sp_search_tracks(sp_host, l5.access_token, "the killers",
+	                              found, 8, err, sizeof(err));
+	if (nfound < 0) {
+		say("   failed: %s\n", err);
+	} else {
+		say("   %d track uris; naming them in one batch...\n", nfound);
+		static sp_track batch[8];
+		static const char *ptrs[8];
+		for (int i = 0; i < nfound; i++)
+			ptrs[i] = found[i];
+		int named = sp_track_metadata_batch(sp_host, l5.access_token, ptrs,
+		                                    nfound, batch, err, sizeof(err));
+		if (named < 0) {
+			say("   batch failed: %s\n", err);
+		} else {
+			for (int i = 0; i < named; i++) {
+				const sp_file *f = sp_pick_file(&batch[i]);
+				say("     %s - %s  %d:%02d  %s\n", batch[i].artist,
+				    batch[i].name, batch[i].duration_ms / 60000,
+				    (batch[i].duration_ms / 1000) % 60,
+				    f ? sp_format_name(f->format) : "no playable file");
+			}
+		}
+	}
+
+	say("\n7. Radio from one track (titles come inline)\n");
+	static sp_track radio[8];
+	int nradio = sp_radio(sp_host, l5.access_token, SAMPLE_TRACK, 8, radio, 8,
+	                      err, sizeof(err));
+	if (nradio < 0) {
+		say("   failed: %s\n", err);
+	} else {
+		for (int i = 0; i < nradio; i++)
+			say("     %s - %s  (%s)\n", radio[i].artist, radio[i].name,
+			    radio[i].album);
+	}
+
+	say("\n8. Rootlist\n");
 	static char uris[16][96];
 	int count = 0;
 	int got = sp_rootlist(sp_host, l5.access_token, info.username, uris, 16,

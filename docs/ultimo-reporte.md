@@ -48,9 +48,24 @@ adivinar.
    Mr. Brightside / by The Killers / from Hot Fuss / 3:42
    4 audio files: Vorbis 320, Vorbis 160, Vorbis 96, AAC
    pick for this console: Vorbis 160
-6. Rootlist
-   length field 0, 0 uris read
+6. Search (no library needed)
+   8 track uris; naming them in one batch...
+     The Killers - Mr. Brightside  3:42  Vorbis 160
+     The Killers - Miss Atomic Bomb  4:53  Vorbis 160
+     ... (8 en total, un solo viaje de metadata)
+7. Radio from one track (titles come inline)
+     The Killers - Somebody Told Me  (Hot Fuss)
+     Kings of Leon - Sex on Fire  (Only By The Night)
+     MGMT - Kids  (Oracular Spectacular)
+     ...
+8. Rootlist
+   length field 4, 4 uris read
+     spotify:playlist:6YA4F5snc7Rmhz9YvzAQ9M
+     ...
 ```
+
+El rootlist dio 4 playlists en la última corrida: Emilio guardó cosas en la cuenta mientras esto
+se escribía, así que la ruta de biblioteca quedó probada también, no solo deducida.
 
 apresolve devuelve además un host de spclient **regional** (`guc3-spclient.spotify.com`), no el
 `spclient.wg.spotify.com` genérico.
@@ -96,22 +111,32 @@ por pista. Y `OGG_VORBIS_160` está disponible, que es justo el formato que el 3
 en software. `sp_pick_file()` prefiere 160, después 96 y recién al final 320: 320 triplica el
 caudal sobre el 802.11g del 3DS por una diferencia que sus parlantes no pueden mostrar.
 
-## Lo que hay que decidir con Emilio
+## La biblioteca vacía, y por qué dejó de importar
 
-**La cuenta no tiene playlists ni Me gusta.** El rootlist vuelve con `length = 0` y cero items, y
-el contexto de la colección devuelve una página vacía:
+La cuenta es nueva, así que el rootlist vuelve con `length = 0` y el contexto de la colección da
+`"pages": [{}]`. No es un error del código: los endpoints contestan 200. Pero un cliente que solo
+sabe mostrar la biblioteca es inútil en una cuenta recién creada, así que la fase se extendió con
+las dos cosas que **no dependen de la biblioteca**:
 
-```json
-{"metadata": {"context_owner": "spotify:user:31xn..."}, "pages": [{}],
- "uri": "spotify:user:31xn...:collection"}
-```
+- **Búsqueda**: `GET /context-resolve/v1/spotify:search:<consulta+con+mas>`. Devuelve JSON con
+  una lista de URIs de pista y nada más, que después se nombran en **un solo lote** por
+  `extended-metadata` — en este consola el coste son los viajes de ida y vuelta, así que una
+  pantalla de resultados tiene que costar uno, no uno por tema.
+- **Radio / recomendados desde un tema**: `GET /radio-apollo/v3/tracks/<uri>?autoplay=true&count=N`.
+  Este contesta con **título, artista, álbum y carátula adentro**, así que no hace falta ningún
+  viaje de metadata extra. Es la vía más barata de llenar una pantalla.
 
-No es un error del código — los endpoints contestan 200 — pero significa que la pantalla de
-biblioteca va a estar vacía y no hay con qué probar la navegación. Hace falta saber si la cuenta
-está realmente vacía o si estoy usando el endpoint equivocado para Me gusta.
+Descartados: `views/v1/home`, `homehub`, `browse/v1` y `searchview/v1` dan 404 o 400.
+`inspiredby-mix/v2/seed_to_playlist` sí funciona pero devuelve el URI de una playlist editorial,
+que todavía habría que resolver — `radio-apollo` entrega lo mismo ya resuelto.
+
+La cuenta ya tiene playlists y el rootlist las devuelve, así que las tres vías —búsqueda, radio
+y biblioteca— están verificadas.
 
 ## No verificado
 
 - Sigue sin correr en consola real.
-- El contenido de una playlist (`/playlist/v2/playlist/{id}`) no se probó: no hay ninguna.
-- `product-info` y `metadata/4` dan 404; no hacen falta, pero quedan como rutas equivocadas.
+- El **contenido** de una playlist (`/playlist/v2/playlist/{id}`) todavía no se leyó: el rootlist
+  da los URIs, resolver cada uno es el paso siguiente y es el mismo patrón ya probado.
+- `product-info` y `metadata/4` dan 404; no hacen falta, pero quedan anotados como rutas
+  equivocadas para no volver a probarlas.

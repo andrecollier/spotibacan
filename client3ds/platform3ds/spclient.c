@@ -1,5 +1,6 @@
 #include "spclient.h"
 #include "http3ds.h"
+#include "json3ds.h"
 #include "proto3ds.h"
 
 #include <stdio.h>
@@ -215,5 +216,219 @@ int sp_rootlist(const char *host, const char *token, const char *username,
 		}
 	}
 	http_reply_free(&r);
+	return n;
+}
+
+/* ------------------------------------------------------- search and radio */
+
+/* json_str and json_int want a NUL-terminated string, and the array iterator
+ * hands back a slice, so each object is copied out. They are small: the
+ * biggest seen is a radio entry at a few hundred bytes. */
+static bool slice_to_buf(const char *p, size_t len, char *buf, size_t cap)
+{
+	if (len >= cap)
+		return false;
+	memcpy(buf, p, len);
+	buf[len] = '\0';
+	return true;
+}
+
+int sp_track_metadata_batch(const char *host, const char *token,
+                            const char *const *uris, int n,
+                            sp_track *out, char *err, size_t errlen)
+{
+	if (n <= 0)
+		return 0;
+
+	uint8_t q_store[16];
+	pb q;
+	pb_init(&q, q_store, sizeof(q_store));
+	pb_varint(&q, 1, EXT_KIND_TRACK_V4);
+
+	size_t cap = (size_t)n * 128 + 64;
+	uint8_t *req_store = malloc(cap);
+	if (!req_store) {
+		snprintf(err, errlen, "out of memory");
+		return -1;
+	}
+	pb req;
+	pb_init(&req, req_store, cap);
+	for (int i = 0; i < n; i++) {
+		uint8_t er_store[192];
+		pb er;
+		pb_init(&er, er_store, sizeof(er_store));
+		pb_str(&er, 1, uris[i]);
+		pb_sub(&er, 2, &q);
+		pb_sub(&req, 2, &er);          /* repeated entity_request */
+	}
+	if (!pb_ok(&req)) {
+		snprintf(err, errlen, "metadata batch of %d did not fit", n);
+		free(req_store);
+		return -1;
+	}
+
+	http_reply r;
+	int rc = http_request(host, "/extended-metadata/v0/extended-metadata", "POST",
+	                      token, "application/x-protobuf", "application/x-protobuf",
+	                      req.p, req.len, &r);
+	free(req_store);
+	if (rc != 0) {
+		snprintf(err, errlen, "metadata batch: %s", r.err);
+		return -1;
+	}
+	if (r.status != 200) {
+		snprintf(err, errlen, "metadata batch returned HTTP %d", r.status);
+		http_reply_free(&r);
+		return -1;
+	}
+
+	/* One EntityExtensionDataArray comes back per extension kind, holding one
+	 * EntityExtensionData per track, in the order asked. */
+	const uint8_t *body = (const uint8_t *)r.body;
+	int filled = 0;
+	pbv arr;
+	if (pb_get_bytes(body, r.len, 2, &arr)) {
+		size_t at = 0;
+		while (at < arr.len && filled < n) {
+			pbv rest = { arr.p + at, arr.len - at };
+			pbv ed;
+			if (!pb_get_bytes(rest.p, rest.len, 3, &ed))
+				break;
+			pbv uri, any, track;
+			memset(&out[filled], 0, sizeof(out[filled]));
+			if (pb_get_bytes(ed.p, ed.len, 2, &uri))
+				copy_str(out[filled].uri, sizeof(out[filled].uri), &uri);
+			if (pb_get_bytes(ed.p, ed.len, 3, &any) &&
+			    pb_get_bytes(any.p, any.len, 2, &track)) {
+				pbv v;
+				if (pb_get_bytes(track.p, track.len, 2, &v))
+					copy_str(out[filled].name, sizeof(out[filled].name), &v);
+				int64_t dur = 0;
+				if (pb_get_sint(track.p, track.len, 7, &dur))
+					out[filled].duration_ms = (int)dur;
+				if (pb_get_bytes(track.p, track.len, 3, &v)) {
+					pbv an;
+					if (pb_get_bytes(v.p, v.len, 2, &an))
+						copy_str(out[filled].album, sizeof(out[filled].album), &an);
+				}
+				if (pb_get_bytes(track.p, track.len, 4, &v)) {
+					pbv an;
+					if (pb_get_bytes(v.p, v.len, 2, &an))
+						copy_str(out[filled].artist, sizeof(out[filled].artist), &an);
+				}
+				size_t fat = 0;
+				while (fat < track.len && out[filled].file_count < SP_MAX_FILES) {
+					pbv frest = { track.p + fat, track.len - fat };
+					pbv file;
+					if (!pb_get_bytes(frest.p, frest.len, 12, &file))
+						break;
+					pbv fid;
+					uint64_t fmt = 0;
+					if (pb_get_bytes(file.p, file.len, 1, &fid) && fid.len == 20) {
+						memcpy(out[filled].files[out[filled].file_count].id, fid.p, 20);
+						pb_get_varint(file.p, file.len, 2, &fmt);
+						out[filled].files[out[filled].file_count].format = (int)fmt;
+						out[filled].file_count++;
+					}
+					fat = (size_t)(file.p + file.len - track.p);
+				}
+			}
+			filled++;
+			at = (size_t)(ed.p + ed.len - arr.p);
+		}
+	}
+
+	http_reply_free(&r);
+	if (filled == 0)
+		snprintf(err, errlen, "no tracks in a %u byte response", (unsigned)r.len);
+	return filled;
+}
+
+int sp_search_tracks(const char *host, const char *token, const char *query,
+                     char uris[][64], int max, char *err, size_t errlen)
+{
+	/* The context service takes the query inside the uri itself, with spaces
+	 * as '+'. Everything else still has to be percent-encoded, since this all
+	 * travels in a request line. */
+	char plus[192];
+	size_t n = 0;
+	for (const char *p = query; *p && n < sizeof(plus) - 1; p++)
+		plus[n++] = (*p == ' ') ? '+' : *p;
+	plus[n] = '\0';
+
+	/* No percent-encoding here: '+' and ':' are structural in this uri, and a
+	 * query with anything stranger than letters, digits and spaces is not
+	 * something this console's keyboard is going to produce. */
+	char path[320];
+	snprintf(path, sizeof(path), "/context-resolve/v1/spotify:search:%s", plus);
+
+	http_reply r;
+	if (http_get(host, path, token, &r) != 0) {
+		snprintf(err, errlen, "search: %s", r.err);
+		return -1;
+	}
+	if (r.status != 200) {
+		snprintf(err, errlen, "search returned HTTP %d", r.status);
+		http_reply_free(&r);
+		return -1;
+	}
+
+	int count = 0;
+	size_t cursor = 0;
+	const char *obj;
+	size_t objlen;
+	while (count < max && json_array_next(r.body, "tracks", &cursor, &obj, &objlen)) {
+		char buf[256];
+		if (!slice_to_buf(obj, objlen, buf, sizeof(buf)))
+			continue;
+		char uri[64];
+		if (json_str(buf, "uri", uri, sizeof(uri)))
+			snprintf(uris[count++], 64, "%s", uri);
+	}
+	http_reply_free(&r);
+	if (count == 0)
+		snprintf(err, errlen, "no tracks matched");
+	return count;
+}
+
+int sp_radio(const char *host, const char *token, const char *seed_uri,
+             int count, sp_track *out, int max, char *err, size_t errlen)
+{
+	char path[256];
+	snprintf(path, sizeof(path),
+	         "/radio-apollo/v3/tracks/%s?autoplay=true&count=%d", seed_uri, count);
+
+	http_reply r;
+	if (http_get(host, path, token, &r) != 0) {
+		snprintf(err, errlen, "radio: %s", r.err);
+		return -1;
+	}
+	if (r.status != 200) {
+		snprintf(err, errlen, "radio returned HTTP %d", r.status);
+		http_reply_free(&r);
+		return -1;
+	}
+
+	int n = 0;
+	size_t cursor = 0;
+	const char *obj;
+	size_t objlen;
+	while (n < max && json_array_next(r.body, "tracks", &cursor, &obj, &objlen)) {
+		char buf[1024];
+		if (!slice_to_buf(obj, objlen, buf, sizeof(buf)))
+			continue;
+		memset(&out[n], 0, sizeof(out[n]));
+		json_str(buf, "uri", out[n].uri, sizeof(out[n].uri));
+		/* These live in the entry's nested "metadata" object; json_str looks
+		 * at any depth, so one pass over the entry finds them. */
+		json_str(buf, "title", out[n].name, sizeof(out[n].name));
+		json_str(buf, "artist_name", out[n].artist, sizeof(out[n].artist));
+		json_str(buf, "album_title", out[n].album, sizeof(out[n].album));
+		if (out[n].uri[0])
+			n++;
+	}
+	http_reply_free(&r);
+	if (n == 0)
+		snprintf(err, errlen, "radio returned no tracks");
 	return n;
 }
