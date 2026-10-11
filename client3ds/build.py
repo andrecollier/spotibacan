@@ -1,23 +1,29 @@
-"""Build the 3DS audio client with the toolchain set up for the Melee port.
+"""Build a 3DS app with the toolchain set up for the Melee port.
+
+    python3 client3ds/build.py              # the audio bridge client
+    python3 client3ds/build.py --app probe_tls
 
 That shim is clang + lld + the pinned libctru, with host tools named .exe so
 the Melee scripts find them on macOS. Nothing here needs devkitARM's gcc.
 
-    python3 client3ds/build.py
+Apps that speak TLS also need libmbedtls, which deps.py builds separately.
 """
 import argparse
 import subprocess
-import time
 import sys
+import time
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import toolchain
+
 ROOT = Path(__file__).resolve().parent
-DEFAULT_TOOLCHAIN = Path.home() / "melee-3ds/native-3ds/.toolchain"
-APP = "audio3ds"
 
-
-def run(args):
-    subprocess.run([str(a) for a in args], check=True)
+# name -> (source directories, extra defines, mbedTLS flavour or None)
+APPS = {
+    "audio3ds":  (["source"], [], None),
+    "probe_tls": (["probe_tls", "platform3ds"], ["-DPROBE_BUILD"], "probe"),
+}
 
 
 def layout(sdk: Path) -> str:
@@ -41,64 +47,75 @@ def layout(sdk: Path) -> str:
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--toolchain", type=Path, default=DEFAULT_TOOLCHAIN)
+    ap.add_argument("--app", choices=sorted(APPS), default="audio3ds")
+    ap.add_argument("--toolchain", type=Path, default=toolchain.DEFAULT_TOOLCHAIN)
     ap.add_argument("--debug", action="store_true", help="-O0 with assertions")
     args = ap.parse_args()
 
-    tc = args.toolchain
-    clangs = sorted(tc.glob("llvm-mingw-*/bin/clang.exe"))
-    if not clangs:
-        raise SystemExit(f"No toolchain at {tc}; run the Melee bootstrap_macos.py first")
-    cc = clangs[-1]
-    lld = cc.with_name("ld.lld.exe")
-    packer = tc / "bin/3dsxtool.exe"
-    sdk = tc / "devkitpro"
-    arm = sdk / "devkitARM"
-    for needed in (lld, packer, sdk / "libctru/include/3ds.h"):
-        if not needed.exists():
-            raise SystemExit(f"Missing {needed}")
+    app = args.app
+    srcdirs, defines, mbed = APPS[app]
+    tc = toolchain.find(args.toolchain)
+    sdk, arm = tc.sdk, tc.arm
 
-    out = ROOT / "build"
-    out.mkdir(exist_ok=True)
-    arch = ["--no-default-config", "--target=arm-none-eabi", "-mcpu=mpcore",
-            "-mfpu=vfp", "-mfloat-abi=hard", "-mtp=soft"]
+    out = ROOT / "build" / app
+    out.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%H:%M:%S")
     flags = ["-std=gnu11", "-Wall", "-Wextra", "-D__3DS__",
              f'-DBUILD_STAMP="{stamp}"',
              "-O0" if args.debug else "-O2", "-g",
-             "-ffunction-sections", "-fdata-sections", "-fshort-enums"]
-    includes = ["-I" + str(sdk / "libctru/include"),
-                "-isystem", str(arm / "arm-none-eabi/include")]
+             "-ffunction-sections", "-fdata-sections", "-fshort-enums", *defines]
+    includes = list(tc.includes)
+    if mbed:
+        tree = ROOT / "deps/mbedtls-3.6.7"
+        if not (tree / "include/mbedtls/ssl.h").exists():
+            raise SystemExit("mbedTLS is missing; run: python3 client3ds/deps.py --probe")
+        flags.append('-DMBEDTLS_CONFIG_FILE="mbedtls_config_3ds.h"')
+        includes = ["-I" + str(ROOT / "platform3ds"),
+                    "-I" + str(tree / "include")] + includes
 
     objects = []
-    for src in sorted((ROOT / "source").glob("*.c")):
-        obj = out / (src.stem + ".o")
-        run([cc, *arch, *flags, *includes, "-c", src, "-o", obj])
-        objects.append(obj)
+    for d in srcdirs:
+        for src in sorted((ROOT / d).glob("*.c")):
+            obj = out / f"{d}_{src.stem}.o"
+            subprocess.run([str(tc.cc), *toolchain.ARCH, *flags, *includes,
+                            "-c", str(src), "-o", str(obj)], check=True)
+            objects.append(obj)
     if not objects:
-        raise SystemExit("No sources under client3ds/source")
+        raise SystemExit(f"No sources under {', '.join(srcdirs)}")
 
     libs = arm / "arm-none-eabi/lib/armv6k/fpu"
     gcc = sorted((arm / "lib/gcc/arm-none-eabi").iterdir())[-1] / "armv6k/fpu"
     script = out / "3dsx.ld"
     script.write_text(layout(sdk))
 
-    elf = out / f"{APP}.elf"
-    run([lld, "-T", script, "--gc-sections", "-Map=" + str(out / f"{APP}.map"),
-         libs / "3dsx_crt0.o", gcc / "crti.o", gcc / "crtbegin.o", *objects,
-         "-L" + str(sdk / "libctru/lib"), "-L" + str(libs), "-L" + str(gcc),
-         "--start-group", "-lcitro2d", "-lcitro3d", "-lctru", "-lm", "-lc",
-         "-lsysbase", "-lgcc", "--end-group",
-         gcc / "crtend.o", gcc / "crtn.o", "-o", elf])
+    extra = []
+    if mbed:
+        lib = ROOT / f"build/libmbedtls{'-probe' if mbed == 'probe' else ''}.a"
+        if not lib.exists():
+            raise SystemExit(f"{lib} is missing; run: python3 client3ds/deps.py"
+                             f"{' --probe' if mbed == 'probe' else ''}")
+        extra.append(str(lib))
+
+    elf = out / f"{app}.elf"
+    subprocess.run([str(tc.lld), "-T", str(script), "--gc-sections",
+                    "-Map=" + str(out / f"{app}.map"),
+                    str(libs / "3dsx_crt0.o"), str(gcc / "crti.o"),
+                    str(gcc / "crtbegin.o"), *map(str, objects), *extra,
+                    "-L" + str(sdk / "libctru/lib"), "-L" + str(libs), "-L" + str(gcc),
+                    "--start-group", "-lcitro2d", "-lcitro3d", "-lctru", "-lm", "-lc",
+                    "-lsysbase", "-lgcc", "--end-group",
+                    str(gcc / "crtend.o"), str(gcc / "crtn.o"), "-o", str(elf)],
+                   check=True)
 
     # Homebrew Launcher lists SD:/3ds/<name>/<name>.3dsx, so the folder and the
     # executable must share a name.
-    dest = ROOT / f"dist/3ds/{APP}/{APP}.3dsx"
+    dest = ROOT / f"dist/3ds/{app}/{app}.3dsx"
     dest.parent.mkdir(parents=True, exist_ok=True)
-    run([packer, elf, dest])
+    subprocess.run([str(tc.packer), str(elf), str(dest)], check=True)
     print(f"\nBuilt {dest}  ({dest.stat().st_size:,} bytes)")
-    print(f"Copy dist/3ds/ to the SD root, then edit "
-          f"SD:/3ds/{APP}/server.txt with your bridge's host:port")
+    if app == "audio3ds":
+        print(f"Copy dist/3ds/ to the SD root, then edit "
+              f"SD:/3ds/{app}/server.txt with your bridge's host:port")
 
 
 if __name__ == "__main__":
