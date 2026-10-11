@@ -108,7 +108,7 @@ int sp_track_metadata(const char *host, const char *token, const char *track_uri
 	 * malformed request. */
 	if (http_request(host, "/extended-metadata/v0/extended-metadata", "POST",
 	                 token, "application/x-protobuf", "application/x-protobuf",
-	                 req.p, req.len, &r) != 0) {
+	                 req.p, req.len, 0, &r) != 0) {
 		snprintf(err, errlen, "metadata: %s", r.err);
 		return -1;
 	}
@@ -134,6 +134,10 @@ int sp_track_metadata(const char *host, const char *token, const char *track_uri
 	}
 
 	pbv v;
+	if (pb_get_bytes(track.p, track.len, 1, &v) && v.len == 16) {
+		memcpy(out->gid, v.p, 16);
+		out->has_gid = true;
+	}
 	if (pb_get_bytes(track.p, track.len, 2, &v))      /* Track.name */
 		copy_str(out->name, sizeof(out->name), &v);
 	int64_t dur = 0;
@@ -364,7 +368,7 @@ int sp_track_metadata_batch(const char *host, const char *token,
 	http_reply r;
 	int rc = http_request(host, "/extended-metadata/v0/extended-metadata", "POST",
 	                      token, "application/x-protobuf", "application/x-protobuf",
-	                      req.p, req.len, &r);
+	                      req.p, req.len, 0, &r);
 	free(req_store);
 	if (rc != 0) {
 		snprintf(err, errlen, "metadata batch: %s", r.err);
@@ -395,6 +399,10 @@ int sp_track_metadata_batch(const char *host, const char *token,
 			if (pb_get_bytes(ed.p, ed.len, 3, &any) &&
 			    pb_get_bytes(any.p, any.len, 2, &track)) {
 				pbv v;
+				if (pb_get_bytes(track.p, track.len, 1, &v) && v.len == 16) {
+					memcpy(out[filled].gid, v.p, 16);
+					out[filled].has_gid = true;
+				}
 				if (pb_get_bytes(track.p, track.len, 2, &v))
 					copy_str(out[filled].name, sizeof(out[filled].name), &v);
 				int64_t dur = 0;
@@ -525,4 +533,59 @@ int sp_radio(const char *host, const char *token, const char *seed_uri,
 	if (n == 0)
 		snprintf(err, errlen, "radio returned no tracks");
 	return n;
+}
+
+/* --------------------------------------------------------- storage resolve */
+
+int sp_storage_resolve(const char *host, const char *token,
+                       const uint8_t file_id[20], sp_storage *out,
+                       char *err, size_t errlen)
+{
+	memset(out, 0, sizeof(*out));
+
+	char hex[41];
+	for (int i = 0; i < 20; i++)
+		snprintf(hex + i * 2, 3, "%02x", file_id[i]);
+
+	char path[128];
+	snprintf(path, sizeof(path),
+	         "/storage-resolve/files/audio/interactive/%s", hex);
+
+	http_reply r;
+	if (http_get_proto(host, path, token, &r) != 0) {
+		snprintf(err, errlen, "storage-resolve: %s", r.err);
+		return -1;
+	}
+	if (r.status != 200) {
+		snprintf(err, errlen, "storage-resolve returned HTTP %d", r.status);
+		http_reply_free(&r);
+		return -1;
+	}
+
+	const uint8_t *body = (const uint8_t *)r.body;
+	uint64_t result = 0;
+	pb_get_varint(body, r.len, 1, &result);
+	out->result = (int)result;
+
+	/* cdnurl is repeated, so the list is walked by hand. */
+	size_t at = 0;
+	while (at < r.len && out->count < SP_MAX_CDN) {
+		pbv rest = { body + at, r.len - at };
+		pbv url;
+		if (!pb_get_bytes(rest.p, rest.len, 2, &url))
+			break;
+		if (url.len < sizeof(out->urls[0])) {
+			memcpy(out->urls[out->count], url.p, url.len);
+			out->urls[out->count][url.len] = '\0';
+			out->count++;
+		}
+		at = (size_t)(url.p + url.len - body);
+	}
+	http_reply_free(&r);
+
+	if (out->count == 0) {
+		snprintf(err, errlen, "no CDN url (result %d)", out->result);
+		return -1;
+	}
+	return out->count;
 }

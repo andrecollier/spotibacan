@@ -69,6 +69,7 @@ struct ap_session {
 	int      fd;
 	shannon  enc, dec;
 	uint32_t enc_nonce, dec_nonce;
+	uint32_t key_seq;
 	int      timeout_ms;
 };
 
@@ -584,24 +585,109 @@ int ap_recv(ap_session *s, uint8_t *cmd, uint8_t *buf, size_t cap)
 	shannon_decrypt(&s->dec, header, sizeof(header));
 	*cmd = header[0];
 	size_t size = ((size_t)header[1] << 8) | header[2];
-	if (size > cap)
-		return -1;
 
-	if (size && !read_exact(s->fd, buf, size, s->timeout_ms))
+	/* Too big for the caller's buffer: read and decrypt it anyway, into a
+	 * scratch area, and report it as skipped. Returning early here would
+	 * leave the payload in the socket and the Shannon state half-advanced,
+	 * which breaks every packet that follows -- and the access point's
+	 * SecretBlock is over 4 KB, so this is not hypothetical. */
+	bool fits = size <= cap;
+	uint8_t *dst = buf;
+	uint8_t *scratch = NULL;
+	if (!fits) {
+		scratch = malloc(size ? size : 1);
+		if (!scratch)
+			return -1;
+		dst = scratch;
+	}
+
+	if (size && !read_exact(s->fd, dst, size, s->timeout_ms)) {
+		free(scratch);
 		return -1;
+	}
 	if (size)
-		shannon_decrypt(&s->dec, buf, size);
+		shannon_decrypt(&s->dec, dst, size);
 
 	uint8_t mac[MAC_SIZE], expect[MAC_SIZE];
-	if (!read_exact(s->fd, mac, sizeof(mac), s->timeout_ms))
+	bool ok = read_exact(s->fd, mac, sizeof(mac), s->timeout_ms);
+	if (ok) {
+		shannon_finish(&s->dec, expect, sizeof(expect));
+		/* A bad MAC means the stream is no longer trustworthy, not that one
+		 * packet was damaged: there is no recovering the cipher state. */
+		ok = memcmp(mac, expect, sizeof(mac)) == 0;
+	}
+	free(scratch);
+	if (!ok)
 		return -1;
-	shannon_finish(&s->dec, expect, sizeof(expect));
-	/* A bad MAC means the stream is no longer trustworthy, not that one packet
-	 * was damaged: there is no recovering the cipher state from here. */
-	if (memcmp(mac, expect, sizeof(mac)) != 0)
-		return -1;
+	if (!fits)
+		return AP_PKT_TOO_BIG;
 
 	return (int)size;
+}
+
+int ap_audio_key(ap_session *s, const uint8_t file_id[20],
+                 const uint8_t track_gid[16], uint8_t key_out[16],
+                 int *refused_code, char *err, size_t errlen)
+{
+	if (refused_code)
+		*refused_code = 0;
+
+	/* file_id, then the track's raw id, then our sequence, then two zero
+	 * bytes. 42 bytes, exactly as librespot sends it. */
+	uint8_t req[42];
+	memcpy(req, file_id, 20);
+	memcpy(req + 20, track_gid, 16);
+	uint32_t seq = s->key_seq++;
+	req[36] = (uint8_t)(seq >> 24);
+	req[37] = (uint8_t)(seq >> 16);
+	req[38] = (uint8_t)(seq >> 8);
+	req[39] = (uint8_t)seq;
+	req[40] = 0;
+	req[41] = 0;
+
+	if (ap_send(s, AP_PKT_REQUESTKEY, req, sizeof(req)) < 0) {
+		snprintf(err, errlen, "could not send the key request");
+		return -1;
+	}
+
+	/* The answer arrives among whatever else the AP is saying, and the
+	 * sequence number is what identifies it. */
+	uint8_t buf[4096];
+	for (int i = 0; i < 24; i++) {
+		uint8_t cmd;
+		int n = ap_recv(s, &cmd, buf, sizeof(buf));
+		if (n == AP_PKT_TOO_BIG)
+			continue;         /* the SecretBlock and friends; not ours */
+		if (n < 0) {
+			snprintf(err, errlen, "connection lost waiting for the audio key");
+			return -1;
+		}
+		if ((cmd == AP_PKT_AESKEY || cmd == AP_PKT_AESKEYERROR) && n >= 4) {
+			uint32_t got = ((uint32_t)buf[0] << 24) | ((uint32_t)buf[1] << 16) |
+			               ((uint32_t)buf[2] << 8) | buf[3];
+			if (got != seq)
+				continue;          /* an older request's answer */
+			if (cmd == AP_PKT_AESKEY) {
+				if (n < 20) {
+					snprintf(err, errlen, "key payload is %d bytes", n);
+					return -1;
+				}
+				memcpy(key_out, buf + 4, 16);
+				return 0;
+			}
+			int code = (n >= 6) ? ((buf[4] << 8) | buf[5]) : -1;
+			if (refused_code)
+				*refused_code = code;
+			snprintf(err, errlen,
+			         "Spotify refused the audio key (0x%04X). This is the "
+			         "restriction on newer accounts, not a bug.", code);
+			return AP_KEY_REFUSED;
+		}
+		if (cmd == AP_PKT_PING)
+			ap_handle_ping(s, buf, (size_t)n);
+	}
+	snprintf(err, errlen, "no answer to the key request");
+	return -1;
 }
 
 int ap_handle_ping(ap_session *s, const uint8_t *payload, size_t len)
@@ -701,6 +787,8 @@ ap_session *ap_login(const char *host, uint16_t port, const char *access_token,
 	for (int i = 0; i < 8; i++) {
 		uint8_t cmd;
 		int n = ap_recv(s, &cmd, buf, AP_MAX_PACKET);
+		if (n == AP_PKT_TOO_BIG)
+			continue;         /* nothing we are waiting for is that large */
 		if (n < 0) {
 			snprintf(err, errlen, "connection lost waiting for APWelcome");
 			break;

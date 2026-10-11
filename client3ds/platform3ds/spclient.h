@@ -28,6 +28,10 @@ typedef struct {
 
 typedef struct {
 	char    uri[64];
+	/* The track's raw 16-byte id. The audio key request wants this, not the
+	 * URI -- it is the same value the base62 in the URI decodes to. */
+	uint8_t gid[16];
+	bool    has_gid;
 	char    name[128];
 	char    artist[128];
 	char    album[128];
@@ -87,6 +91,21 @@ int  sp_playlist(const char *host, const char *token, const char *playlist_id,
  * account had anything saved. */
 int  sp_liked(const char *host, const char *token, const char *username,
               char uris[][64], int max, char *err, size_t errlen);
+
+/* Where the CDN is serving one audio file from. Up to three signed URLs, each
+ * with an expiry; any of them serves the same bytes. */
+#define SP_MAX_CDN 3
+
+typedef struct {
+	char urls[SP_MAX_CDN][512];
+	int  count;
+	int  result;                 /* 0 = CDN, 1 = storage, 3 = restricted */
+} sp_storage;
+
+/* `file_id` is the 20 raw bytes from sp_file. */
+int  sp_storage_resolve(const char *host, const char *token,
+                        const uint8_t file_id[20], sp_storage *out,
+                        char *err, size_t errlen);
 
 /* Picks the best file this client can actually play, or NULL. */
 const sp_file *sp_pick_file(const sp_track *t);

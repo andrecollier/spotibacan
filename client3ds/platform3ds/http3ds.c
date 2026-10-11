@@ -8,6 +8,7 @@
 #include <string.h>
 
 #define RECV_CHUNK  4096
+/* Enough for any API reply. Audio passes its own, far larger limit. */
 #define BODY_MAX    (512 * 1024)
 
 /* newlib hides strcasestr behind _GNU_SOURCE; header names are few and short,
@@ -65,7 +66,7 @@ void http_reply_free(http_reply *r)
  *
  * Reads land in RECV_CHUNK blocks rather than byte by byte: on this console the
  * cost is the number of syscalls, not the number of bytes. */
-static char *slurp(tls_conn *c, size_t *len, char *err, size_t errlen)
+static char *slurp(tls_conn *c, size_t *len, size_t limit, char *err, size_t errlen)
 {
 	size_t cap = 8192, have = 0;
 	char *buf = malloc(cap);
@@ -75,8 +76,9 @@ static char *slurp(tls_conn *c, size_t *len, char *err, size_t errlen)
 	}
 	for (;;) {
 		if (have + RECV_CHUNK + 1 > cap) {
-			if (cap >= BODY_MAX) {
-				snprintf(err, errlen, "response over %d bytes", BODY_MAX);
+			if (cap >= limit) {
+				snprintf(err, errlen, "response over %u bytes",
+				         (unsigned)limit);
 				free(buf);
 				return NULL;
 			}
@@ -131,10 +133,10 @@ static size_t dechunk(char *p, size_t len)
 	return (size_t)(out - p);
 }
 
-static int finish(tls_conn *c, http_reply *out)
+static int finish(tls_conn *c, size_t limit, http_reply *out)
 {
 	size_t total = 0;
-	char *raw = slurp(c, &total, out->err, sizeof(out->err));
+	char *raw = slurp(c, &total, limit, out->err, sizeof(out->err));
 	tls_close(c);
 	if (!raw)
 		return -1;
@@ -178,9 +180,11 @@ static int finish(tls_conn *c, http_reply *out)
 
 int http_request(const char *host, const char *path, const char *method,
                  const char *bearer, const char *ctype, const char *accept,
-                 const void *body, size_t len, http_reply *out)
+                 const void *body, size_t len, size_t limit, http_reply *out)
 {
 	memset(out, 0, sizeof(*out));
+	if (limit == 0)
+		limit = BODY_MAX;
 	tls_conn *c = tls_connect(host, 443, 20000, NULL, out->err, sizeof(out->err));
 	if (!c)
 		return -1;
@@ -225,7 +229,7 @@ int http_request(const char *host, const char *path, const char *method,
 		tls_close(c);
 		return -1;
 	}
-	return finish(c, out);
+	return finish(c, limit, out);
 }
 
 int http_post_form(const char *host, const char *path, const char *body,
@@ -233,25 +237,53 @@ int http_post_form(const char *host, const char *path, const char *body,
 {
 	return http_request(host, path, "POST", NULL,
 	                    "application/x-www-form-urlencoded", NULL,
-	                    body, strlen(body), out);
+	                    body, strlen(body), 0, out);
 }
 
 int http_get(const char *host, const char *path, const char *bearer,
              http_reply *out)
 {
-	return http_request(host, path, "GET", bearer, NULL, NULL, NULL, 0, out);
+	return http_request(host, path, "GET", bearer, NULL, NULL, NULL, 0, 0, out);
 }
 
 int http_post_proto(const char *host, const char *path,
                     const void *body, size_t len, http_reply *out)
 {
 	return http_request(host, path, "POST", NULL, "application/x-protobuf",
-	                    "application/x-protobuf", body, len, out);
+	                    "application/x-protobuf", body, len, 0, out);
 }
 
 int http_get_proto(const char *host, const char *path, const char *bearer,
                    http_reply *out)
 {
 	return http_request(host, path, "GET", bearer, NULL,
-	                    "application/x-protobuf", NULL, 0, out);
+	                    "application/x-protobuf", NULL, 0, 0, out);
+}
+
+int http_get_url(const char *url, size_t limit, http_reply *out)
+{
+	memset(out, 0, sizeof(*out));
+	if (strncmp(url, "https://", 8) != 0) {
+		snprintf(out->err, sizeof(out->err), "not an https url");
+		return -1;
+	}
+
+	const char *p = url + 8;
+	const char *slash = strchr(p, '/');
+	if (!slash) {
+		snprintf(out->err, sizeof(out->err), "url has no path");
+		return -1;
+	}
+	char host[160];
+	size_t hlen = (size_t)(slash - p);
+	if (hlen >= sizeof(host)) {
+		snprintf(out->err, sizeof(out->err), "host too long");
+		return -1;
+	}
+	memcpy(host, p, hlen);
+	host[hlen] = '\0';
+
+	/* The path keeps its query exactly as given: the CDN signature covers it. */
+	return http_request(host, slash, "GET", NULL, NULL, NULL, NULL, 0,
+	                    limit, out);
 }

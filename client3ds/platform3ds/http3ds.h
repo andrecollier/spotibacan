@@ -32,11 +32,17 @@ int http_post_proto(const char *host, const char *path,
 int http_get_proto(const char *host, const char *path, const char *bearer,
                    http_reply *out);
 
-/* The general form the three above are built from. `bearer`, `ctype` and
- * `accept` may be NULL. */
+/* The general form the ones above are built from. `bearer`, `ctype` and
+ * `accept` may be NULL. `limit` caps the response body; 0 uses the default,
+ * which is sized for API replies, not for audio. */
 int http_request(const char *host, const char *path, const char *method,
                  const char *bearer, const char *ctype, const char *accept,
-                 const void *body, size_t len, http_reply *out);
+                 const void *body, size_t len, size_t limit, http_reply *out);
+
+/* GET a full https:// URL, for the signed CDN links storage-resolve hands
+ * back: those carry host, path and a query that must be passed through
+ * untouched. `limit` is required here -- an audio file is megabytes. */
+int http_get_url(const char *url, size_t limit, http_reply *out);
 void http_reply_free(http_reply *r);
 
 /* Percent-encodes everything outside the unreserved set, for form bodies. */

@@ -22,6 +22,9 @@
 #define AP_PKT_PONG         0x49
 #define AP_PKT_PONGACK      0x4A
 #define AP_PKT_COUNTRYCODE  0x1B
+#define AP_PKT_REQUESTKEY   0x0C
+#define AP_PKT_AESKEY       0x0D
+#define AP_PKT_AESKEYERROR  0x0E
 
 typedef struct ap_session ap_session;
 
@@ -80,9 +83,28 @@ int  ap_send(ap_session *s, uint8_t cmd, const void *payload, size_t len);
  * which blocks until the packet it was promised is complete. */
 int  ap_wait(ap_session *s, int timeout_ms);
 
-/* Returns the payload length, or -1. `cmd` is always set on success. */
+/* Returns the payload length, or -1. `cmd` is always set on success.
+ *
+ * A packet larger than `cap` returns AP_PKT_TOO_BIG: it was consumed and
+ * verified, so the session stays usable, but its payload was discarded. */
+#define AP_PKT_TOO_BIG (-3)
+
 int  ap_recv(ap_session *s, uint8_t *cmd, uint8_t *buf, size_t cap);
 void ap_close(ap_session *s);
+
+/* The AES-128 key for one audio file, over this session.
+ *
+ * This is the one thing only the access point can give, and the reason the
+ * session is held open at all. Spotify refuses it for some newer accounts
+ * (librespot#1649) -- an account-side restriction, not a protocol error -- and
+ * that shows up here as AP_KEY_REFUSED.
+ *
+ * Returns 0, AP_KEY_REFUSED with the server's code in `refused_code`, or -1. */
+#define AP_KEY_REFUSED (-2)
+
+int  ap_audio_key(ap_session *s, const uint8_t file_id[20],
+                  const uint8_t track_gid[16], uint8_t key_out[16],
+                  int *refused_code, char *err, size_t errlen);
 
 /* Answers a Ping with a Pong, which is what keeps the session alive. */
 int  ap_handle_ping(ap_session *s, const uint8_t *payload, size_t len);

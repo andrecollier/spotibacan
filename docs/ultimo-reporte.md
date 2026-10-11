@@ -175,3 +175,38 @@ constante, y existe de verdad.
 5. Enchufarlo al modo nativo de `audio3ds`.
 
 Cada pieza está probada por separado. Falta unirlas.
+
+---
+
+# Fase 5a en C: la cadena completa en la consola
+
+Fecha: 2026-10-11 · Rama: `develop`
+
+Con la clave destrabada, las piezas que faltaban se escribieron en C:
+
+| Pieza | Dónde |
+|---|---|
+| `ap_audio_key()` | `platform3ds/ap3ds.c` — paquete `0x0c` sobre la sesión Shannon |
+| `sp_storage_resolve()` | `platform3ds/spclient.c` — hasta 3 URLs firmadas del CDN |
+| `http_get_url()` | `platform3ds/http3ds.c` — GET de una URL completa, con tope propio |
+| `track_fetch()` | `platform3ds/track.c` — une metadata, clave, CDN y AES-128-CTR |
+| `probe_play/` | la app que lo reproduce |
+
+## Decisiones
+
+- **El `gid` de la pista, no el URI.** El pedido de clave quiere los 16 bytes crudos del
+  identificador, que es lo mismo que el base62 del URI decodifica. Ahora `sp_track` lo trae.
+- **La clave se pide antes de bajar los bytes.** Sin ella la descarga es ruido, y son megabytes.
+- **Las tres URLs del CDN se prueban en orden.** Una firma puede haber caducado o su borde estar
+  caído; las otras sirven los mismos bytes.
+- **El descifrado es en el sitio**, así que el buffer de la respuesta HTTP pasa a ser el del
+  track sin copiar nada. Un track de 160 kbps y cuatro minutos son ~5 MB, y copiarlo sería
+  regalar 5 MB de los 23 que hay.
+- **La sesión del access point se cierra apenas se tiene la clave.** Es lo único para lo que
+  sirve.
+- **El tope de descarga es explícito** (12 MB): un track que lo supere falla en vez de quedar
+  truncado y decodificar a silencio a la mitad.
+- **`SPOTIFY_OGG_HEADER` es 167 y está escrito como constante**, con el comentario de por qué no
+  se busca el magic `OggS`: el señuelo *es* una página OggS, así que la primera coincidencia es
+  la equivocada. Y hay una comprobación explícita de que en el byte 167 aparece `OggS`, que es
+  la forma barata de detectar una clave equivocada antes de pasarle basura al decodificador.

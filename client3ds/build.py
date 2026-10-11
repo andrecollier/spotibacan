@@ -30,6 +30,9 @@ APPS = {
     "probe_meta":  (["probe_meta", "platform3ds"], ["-DPROBE_BUILD"], "probe", []),
     # No TLS: this one only reads a file off the card and decodes it.
     "probe_audio": (["probe_audio"], [], None, ["deps/stb_vorbis.c"]),
+    # The whole chain: Spotify over TLS, plus the Vorbis decoder.
+    "probe_play":  (["probe_play", "platform3ds"], ["-DPROBE_BUILD"], "probe",
+                    ["deps/stb_vorbis.c"]),
 }
 
 
