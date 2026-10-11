@@ -1,113 +1,81 @@
-# Reporte — Fase 1: TLS 1.2 nativo en el 3DS
+# Reporte — Fase 2: pairing con la cuenta de Spotify
 
-Fecha: 2026-10-10 · Rama: `develop` (creada en este turno; antes solo existía `main`)
+Fecha: 2026-10-10 · Rama: `develop`
 
 ## Resultado
 
-**Fase 1 cerrada y verificada corriendo.** El probe se ejecutó en Azahar y habló TLS 1.2 con
-los 5 hosts de Spotify: cadena verificada contra nuestras 11 anclas, SNI, reanudación por
-session ticket, y un GET HTTPS real a apresolve que devolvió 613 bytes descifrados con la lista
-de access points. Log completo en `docs/fase1-probe-azahar.log`.
+**Fase 2 cerrada y verificada en dos corridas.** La consola emulada pidió un código, Emilio lo
+aprobó en spotify.com/pair, el refresh token quedó en la SD y acto seguido se volvió a leer del
+disco y se canjeó con éxito. Después se relanzó la app desde cero para probar la ruta de
+"arranque posterior": encontró el token guardado y lo canjeó sin pairing. Es la prueba que
+importa — no conseguir un token una vez, sino arrancar mañana y seguir teniéndolo.
 
-El dato de diseño que salió de la corrida: **los cinco hosts aceptaron
-ECDHE-CHACHA20-POLY1305**, que es justo lo que queremos porque el ARM11 no tiene instrucciones
-AES. Las pruebas desde la Mac daban AES-GCM solo porque OpenSSL lo prefiere en su orden; con
-nuestra lista de suites, ChaCha20 gana en todos. `i.scdn.co` va por ECDHE-**ECDSA**, los otros
-cuatro por ECDHE-**RSA**: las dos familias hacen falta.
+Permisos concedidos (6, el mínimo; ninguno de escritura):
+`streaming`, `playlist-read-private`, `playlist-read-collaborative`, `user-library-read`,
+`user-read-email`, `user-read-private`.
+
+Logs: `docs/fase2-pairing-azahar.log` (pairing) y `docs/fase2-reboot-azahar.log` (rearranque).
+
+## El hallazgo que cambió el código
+
+**Spotify rota el refresh token en cada canje.** Las dos corridas devolvieron un token distinto
+del guardado. Eso convierte la escritura a la SD en un punto crítico: en el instante en que un
+refresh tiene éxito, el token guardado ya está muerto, así que una escritura interrumpida —
+tapa cerrada, tarjeta sacada, disco lleno — dejaría la consola sin ningún token usable y
+obligaría a parear de nuevo.
+
+Por eso `cfg_save_refresh_token()` escribe a `spotify.cfg.new` y después renombra. FAT no tiene
+reemplazo atómico, así que el archivo viejo se borra primero y esa ventana es el precio; es
+mucho más chica que una escritura parcial sobre la única copia del token.
 
 ## Qué se construyó
 
-### `client3ds/deps.py` — mbedTLS 3.6.7 para ARM11
-- Release pineado y verificado por SHA-256 (`a7e8bcbe…f6`); se baja una vez a `deps/`
-  (gitignoreado) y nunca se ejecuta nada de ahí: solo se le pasan rutas .c a clang.
-- 109 fuentes compiladas con el mismo shim de clang del port de Melee → `libmbedtls.a`.
-  Con `--probe` agrega `mbedtls_strerror` y los hooks de debug del handshake.
-- Se eligió 3.6 LTS y no 4.x: 4.x tira la API legacy y hace PSA obligatorio, que TLS 1.2 no necesita.
+- `platform3ds/pair3ds.c` — el device authorization grant (RFC 8628). `pair_begin()`,
+  `pair_poll()` y `token_refresh()`. Endpoints y client ID **no adivinados**: salen de
+  `oauth/src/lib.rs` y `docs/device-authorization.md` de librespot.
+  `POST accounts.spotify.com/oauth2/device/authorize` y `POST /api/token`, sin headers más allá
+  del `Content-Type`, sin client secret, sin PKCE y sin cookies.
+- `platform3ds/http3ds.c` — HTTP/1.1 sobre `tls3ds`: POST de formulario, GET con Bearer,
+  `Content-Length` y chunked, y `recv` en bloques de 4 KB, nunca byte a byte.
+- `platform3ds/json3ds.c` — lo justo para objetos planos de strings y números. Todo lo que se
+  parsea en esta etapa es un objeto plano, así que un parser de verdad sería peso muerto; el
+  header dice explícitamente que no camina objetos anidados, en vez de adivinar.
+- `platform3ds/cfg3ds.c` — el token en la SD, con la escritura atómica de arriba.
+- `probe_pair/main.c` — muestra el código, consulta respetando el `interval`, guarda, y vuelve a
+  leer del disco para cerrar el círculo. **Ningún token se imprime ni se loguea**: solo
+  longitudes y los permisos concedidos.
 
-### `client3ds/platform3ds/` — la capa que el 3DS tiene que aportar
-- `mbedtls_config_3ds.h`: cliente TLS 1.2 y nada más. Sin TLS 1.3 (en 3.6 arrastra el core PSA
-  y Spotify negocia 1.2 igual), sin `MBEDTLS_FS_IO`, sin `MBEDTLS_NET_C`. Incluye ya el
-  `MBEDTLS_CIPHER_MODE_CTR` del audio y el `MBEDTLS_DHM_C` del handshake del AP.
-  Buffers 16 KB in / 4 KB out (ahorra 12 KB frente al default).
-- `plat3ds.c`: los dos hooks que mbedTLS no puede resolver solo.
-  `mbedtls_ms_time()` desde `osGetTime()` (mbedTLS solo conoce POSIX y Win32) y
-  `mbedtls_hardware_poll()` desde **`PS_GenerateRandomBytes`**, el CSPRNG de hardware de la
-  consola. Esto es estrictamente mejor que el PSP, que tuvo que inventar entropía hasheando
-  la MAC del Wi-Fi, el RTC y el jitter de los hilos.
-- `tls3ds.c`: sockets de libctru + mbedTLS. Lista de suites corta (ChaCha20 primero, porque el
-  ARM11 no tiene instrucciones AES), X25519 primero por lo mismo, SNI obligatorio,
-  verificación completa de cadena y de hostname, y caché de un session ticket por host para que
-  la reconexión se salte el ECDHE. Timeouts por `poll()`: SOC no tiene `SO_RCVTIMEO` usable.
-- `gen_ca_bundle.py` + `ca_bundle.c/.pem`: 11 anclas. Las necesarias se descubren recorriendo
-  las cadenas reales (el último cert que manda el server nombra su raíz) y se sacan de dos
-  stores: el del Mac y el export CCADB de Mozilla, cacheado en `deps/`, porque Apple no trae
-  `Certainly Root R1` ni `GlobalSign Root R46`. `--verify` revalida todo contra los hosts vivos.
+## Detalles que valen para después
 
-### `client3ds/probe_tls/main.c` — la app de Fase 1
-Handshake contra los 5 hosts, con dns/tcp/handshake en ms, versión, suite y resultado de
-verificación; segunda conexión al mismo host para medir el ticket; y un GET HTTPS real a
-apresolve para probar la ruta completa. En New 3DS corre la tanda dos veces, a 268 y a 804 MHz
-(`osSetSpeedupEnable`), porque en el PSP el reloj fue la diferencia entre 1.3 s y 0.25 s de
-handshake. Todo va también a `spotify-tls.log` al lado del .3dsx.
+- El `client_id` tiene que ser el de escritorio, `65b708073fc0480ea92a077233ca87bd`. De los tres
+  que trae librespot es el único habilitado para este flujo; los de Android e iOS lo rechazan y
+  **lo reportan como `invalid_scope`, no como `unauthorized_client`**, que apunta al lugar
+  equivocado. Spotify valida los scopes antes de la elegibilidad del cliente.
+- Un solo scope no reconocido tumba la petición entera, así que no se pueden sondear pidiendo
+  extras y viendo qué vuelve.
+- Los errores llegan como JSON con HTTP 400, así que un 400 es una respuesta a leer, no un fallo
+  de transporte. `authorization_pending` y `slow_down` son estados normales de la espera.
+- Una conexión cortada durante la espera **no** es un pairing fallido: el código sigue vivo, así
+  que `pair_poll()` devuelve PENDING y se sigue consultando.
+- El access token dura 3600 s y se renueva 60 s antes, porque un token que caduca en medio de
+  una petición es peor que uno renovado un minuto antes de tiempo.
+- Tamaños reales: access token 296 chars, refresh token 131 chars.
 
-### Andamiaje
-- `client3ds/toolchain.py`: descubrimiento del shim compartido entre `build.py` y `deps.py`.
-- `build.py` ahora toma `--app` (`audio3ds` | `probe_tls`); `audio3ds` sigue compilando igual
-  (257.420 bytes, verificado).
+## Pendiente / a saber
 
-## Verificado
-
-- `libmbedtls-probe.a` compila para `--target=arm-none-eabi -mcpu=mpcore` (109/109 fuentes).
-- `probe_tls.3dsx` enlaza y empaqueta: 394.896 bytes.
-- `audio3ds.3dsx` sigue construyéndose sin cambios de comportamiento.
-- Bundle contra hosts vivos, forzando TLS 1.2 (`gen_ca_bundle.py --verify`): **7/7 ok**.
-  Todos ofrecen TLS 1.2; `login5`, `accounts`, `apresolve`, `spclient` y `audio-fa` eligen
-  ECDHE-**RSA**-AES128-GCM-SHA256, mientras `i.scdn.co` y el CDN de Akamai eligen ECDHE-**ECDSA**.
-  Las dos familias están en la lista de suites.
-- `Certainly Root R1` cruzado entre dos fuentes independientes, mismo SHA-256
-  `77:B8:2C:D8:…:D3:A0` (copia de PSPotify y export de Mozilla).
-
-## Corrida en Azahar
-
-Azahar implementa `SOC_U` sobre sockets del host, así que la red es real: el handshake, la
-verificación de cadena y el descifrado son los de verdad. Resultado, 5/5 hosts:
-
-```
-trust anchors: 11
-apresolve.spotify.com    TLSv1.2 TLS-ECDHE-RSA-WITH-CHACHA20-POLY1305-SHA256   verify ok
-login5.spotify.com       TLSv1.2 TLS-ECDHE-RSA-WITH-CHACHA20-POLY1305-SHA256   verify ok
-accounts.spotify.com     TLSv1.2 TLS-ECDHE-RSA-WITH-CHACHA20-POLY1305-SHA256   verify ok
-spclient.wg.spotify.com  TLSv1.2 TLS-ECDHE-RSA-WITH-CHACHA20-POLY1305-SHA256   verify ok
-i.scdn.co                TLSv1.2 TLS-ECDHE-ECDSA-WITH-CHACHA20-POLY1305-SHA256 verify ok
-
--- apresolve over HTTPS --
-  613 bytes, ap: ap-guc3.spotify.com:4070","ap-guc3.spotify.com:443","ap-guc3
-```
-
-Cómo se lee la salida sin cámara: el probe escribe a `stdout` (pantalla), a `stderr`
-(`svcOutputDebugString`, que el emulador registra) y al log. En Azahar el log queda en
-`~/Library/Application Support/Azahar/sdmc/spotify-tls.log` — de ahí el fallback a la raíz de
-la tarjeta cuando `argv[0]` es una ruta del host que el guest no puede abrir.
-
-## No verificado
-
-- **Los tiempos del log no valen.** El emulador corre sobre la CPU de la Mac y Azahar deja
-  `ConfigureNew3DSCPU` sin implementar, así que las dos tandas (268 y 804 MHz) salen casi
-  iguales — prueba de que las etiquetas no significan nada ahí. Los milisegundos reales y el
-  consumo de RAM siguen pendientes de una corrida en la consola; no bloquean la Fase 2.
-  Lo único que el emulador sí insinúa es la proporción del ticket: ~850 ms → ~320 ms.
-- `ap-guc3.spotify.com:443` no contesta desde esta red (sí el 4070 que anuncia apresolve).
-  A anotar para la Fase 3; no afecta a la Fase 1.
+- **Hay un refresh token real, en texto plano, en la Mac**:
+  `~/Library/Application Support/Azahar/sdmc/spotify.cfg`. Es la SD emulada. Para desparear:
+  X en la app borra el archivo, y la autorización se revoca del lado de Spotify en
+  spotify.com/account/apps.
+- No se comprobó si el token viejo muere de inmediato al rotar. Para saberlo habría que
+  guardarse el anterior y reintentarlo, y eso implica volver a parear; el código ya asume el
+  peor caso, que es lo correcto.
+- Sigue sin correr en consola real. Nada de esta fase depende del hardware salvo los tiempos.
 
 ## Cómo probarlo
 
 ```bash
-python3 client3ds/deps.py --probe && python3 client3ds/build.py --app probe_tls
-```
-En Azahar, sin tocar la SD:
-```bash
+python3 client3ds/build.py --app probe_pair
 /Applications/Azahar.app/Contents/MacOS/azahar \
-    client3ds/dist/3ds/probe_tls/probe_tls.3dsx
+    client3ds/dist/3ds/probe_pair/probe_pair.3dsx
 ```
-En la consola: copiar `client3ds/dist/3ds/` a la raíz de la SD y lanzar `probe_tls` desde el
-Homebrew Launcher con el Wi-Fi encendido. Deja `spotify-tls.log` en `SD:/3ds/probe_tls/`.

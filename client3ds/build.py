@@ -22,7 +22,8 @@ ROOT = Path(__file__).resolve().parent
 # name -> (source directories, extra defines, mbedTLS flavour or None)
 APPS = {
     "audio3ds":  (["source"], [], None),
-    "probe_tls": (["probe_tls", "platform3ds"], ["-DPROBE_BUILD"], "probe"),
+    "probe_tls":  (["probe_tls", "platform3ds"], ["-DPROBE_BUILD"], "probe"),
+    "probe_pair": (["probe_pair", "platform3ds"], ["-DPROBE_BUILD"], "probe"),
 }
 
 

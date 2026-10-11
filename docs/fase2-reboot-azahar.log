@@ -1,0 +1,19 @@
+3DS Spotify -- pairing (phase 2)
+built 23:00:25
+
+console clock: Sat Oct 10 23:00:36 2026
+config: sdmc:/spotify.cfg
+
+Found a stored refresh token (131 chars) in
+  sdmc:/spotify.cfg
+Spending it for a fresh access token...
+  refresh ok
+  access token:  296 chars
+  refresh token: 131 chars
+  valid for:     3540 s
+  scopes: playlist-read-private playlist-read-collaborative streaming user-library-read user-read-email user-read-private
+  rotated; storing the new one
+
+Already paired. X deletes the stored token and exits.
+
+START exits.
