@@ -119,3 +119,59 @@ terceros. El rumbo del ecosistema es ese.
 
 Una cuenta Premium más vieja. El cliente está escrito y verificado hasta la clave; si una
 cuenta así funciona, la Fase 5a se cierra en una tarde.
+
+---
+
+# DESTRABADO (11-oct-2026): la cuenta vieja funciona
+
+Emilio pareó una cuenta Premium más antigua y la cadena completa pasó de punta a punta:
+
+```
+== audio key, over the access point ==
+    <- 0x0d AesKey for seq 0: 16 bytes        <-- la clave
+== storage-resolve ==
+    result=0 (CDN), 3 url(s)
+== CDN download ==
+    HTTP 206, 262144 bytes
+== decrypt ==
+    68 paginas Ogg, separacion tipica 4140 bytes
+```
+
+Y el archivo resultante, verificado con ffprobe:
+
+```
+codec_name=vorbis
+sample_rate=44100
+channels=2
+format_name=ogg
+```
+
+Decodifica sin un solo error. **Es audio de Spotify descifrado por nuestro propio código.**
+
+Queda confirmado lo del issue de librespot: la variable era la antigüedad de la cuenta. La
+cuenta nueva (usuario de 28 caracteres) recibe `AesKeyError 0001` siempre; la vieja entrega la
+clave a la primera.
+
+## Una corrección importante para el port a C
+
+Antes anoté que el header de Spotify previo al Ogg **no se hardcodea**, que había que buscar el
+magic `OggS`. **Eso está mal y rompería el decodificador.**
+
+El archivo descifrado tiene una **página Ogg señuelo en el offset 0, de 167 bytes** (`0xa7`), y
+el flujo Vorbis real empieza justo después. Las ocurrencias de `OggS` caen en 0, **167**, 225,
+4511... Buscar "el primer OggS" aterriza en el señuelo, que es exactamente lo que hizo mi prueba
+y por eso `ffprobe` devolvía "End of file" sobre un archivo que en realidad estaba perfecto.
+
+**La regla correcta: saltar 167 bytes.** Es el `SPOTIFY_OGG_HEADER_END` que librespot tenía como
+constante, y existe de verdad.
+
+## Lo que falta, ahora sin bloqueos
+
+1. `ap_request_audio_key()` en C: paquete `0x0c` sobre la sesión Shannon que ya funciona.
+2. `sp_storage_resolve()` en C: devuelve hasta 3 URLs firmadas del CDN.
+3. Descarga por rangos + AES-128-CTR con mbedTLS (ya habilitado en la config) e IV
+   `72 e0 67 fb dd cb cf 77 eb e8 bc 64 3f 63 0d 93`.
+4. Saltar 167 bytes y alimentar el decodificador stb_vorbis, medido a 5.37x en hardware.
+5. Enchufarlo al modo nativo de `audio3ds`.
+
+Cada pieza está probada por separado. Falta unirlas.
