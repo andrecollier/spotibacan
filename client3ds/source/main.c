@@ -99,9 +99,6 @@ typedef struct {
 	bool dark;   // layout: art-forward (true) or framed list (false)
 } Skin;
 
-#define MAX_THEMES 16
-#define THEME_DIR  "sdmc:/3ds/audio3ds/themes"
-
 #define MAX_THEMES 24
 #define THEME_DIR  "sdmc:/3ds/audio3ds/themes"
 
@@ -773,15 +770,24 @@ static void draw_art(const Skin *sk, float x, float y, float size)
 static void draw_top(const Skin *sk, bool buffering, bool muted, float par)
 {
 	if (sk->dark) {
-		// Art on the left, text stacked beside it.
-		draw_art(sk, 20 + par * 3.2f, 56, 128);
-		text_at(now_title[0] ? now_title : "---", 168 + par * 2.0f, 70, 0.62f, sk->text, 0);
-		text_at(now_artist, 168 + par * 1.4f, 100, 0.50f, sk->accent, 0);
-		text_at(now_album, 168 + par * 1.0f, 124, 0.44f, sk->dim, 0);
-		C2D_DrawRectSolid(168 + par * 1.0f, 152, 0.0f, 64, 3, sk->accent);
-		text_at(buffering ? "BUFFERING" : (muted ? "MUTED" : "PLAYING"),
-		        168 + par * 1.0f, 164, 0.44f, sk->dim, 0);
-		text_at("3DS AUDIO", 20 + par * 0.4f, 18, 0.50f, sk->dim, 0);
+		// Art large on the left, text stacked beside it with the hierarchy
+		// carried by size and brightness rather than by rules and bars.
+		const float ART = 184.0f;
+		draw_art(sk, 18 + par * 3.2f, 28, ART);
+
+		const float tx = 18 + ART + 20;
+		text_at(now_title[0] ? now_title : "---", tx + par * 2.0f, 44, 0.66f,
+		        sk->text, 0);
+		text_at(now_artist, tx + par * 1.4f, 80, 0.50f, sk->text, 0);
+		text_at(now_album, tx + par * 1.0f, 104, 0.42f, sk->dim, 0);
+
+		// A small lit dot carries the state; a word in capitals does not need
+		// a bar over it to be read.
+		float dy = 150;
+		C2D_DrawCircleSolid(tx + 4 + par * 0.8f, dy + 5, 0.1f, 4,
+		                    buffering ? sk->dim : sk->accent);
+		text_at(buffering ? "CARGANDO" : (muted ? "SIN SONIDO" : "SONANDO"),
+		        tx + 16 + par * 0.8f, dy, 0.40f, sk->dim, 0);
 	} else {
 		// Title bar and a framed thumbnail, closer to a hardware player.
 		C2D_DrawRectSolid(0 + par * 0.2f, 0, 0.0f, TOP_W, 30, sk->accent);
@@ -872,48 +878,80 @@ static void draw_icon(Icon ic, float cx, float cy, float s, u32 col)
 	}
 }
 
+// No box around anything. Hierarchy comes from size and brightness, and only
+// the primary action gets a filled shape -- boxing every control is what made
+// the old layout look like a remote control.
 static void draw_button(const Skin *sk, const Button *b, bool lit, float glyph)
 {
-	bool on = (b->accent != lit);
-	C2D_DrawRectSolid(b->x, b->y, 0.0f, b->w, b->h, on ? sk->accent : sk->panel);
-	if (!on) C2D_DrawRectSolid(b->x, b->y + b->h - 3, 0.05f, b->w, 3, sk->accent);
-	if (lit) C2D_DrawRectSolid(b->x, b->y, 0.05f, b->w, 3, sk->text);
-	draw_icon(b->icon, b->x + b->w / 2, b->y + b->h / 2, glyph,
-	          on ? sk->on_accent : sk->text);
+	float cx = b->x + b->w / 2, cy = b->y + b->h / 2;
+	u32 ink = lit ? sk->accent : sk->text;
+
+	if (b->accent) {
+		float r = b->h * 0.42f;
+		C2D_DrawCircleSolid(cx, cy, 0.0f, r, lit ? sk->accent : sk->text);
+		draw_icon(b->icon, cx, cy, glyph, sk->bottom_bg);
+		return;
+	}
+	draw_icon(b->icon, cx, cy, glyph, ink);
 }
 
-#define LIST_X 6.0f
-#define LIST_W 178.0f
-#define ROW_Y  22.0f
-#define ROW_H  28.0f
+#define LIST_X 10.0f
+#define LIST_W 300.0f
+#define ROW_Y  46.0f
+#define ROW_H  30.0f
 
 // Left half of the split view. Browsing never takes the transport away: the
 // controls keep their own column on the right.
-static void draw_list_panel(const Skin *sk)
+// Two lines per row -- title over artist -- with the selection marked by a
+// bar and a colour instead of a filled block, which is what makes a long list
+// readable at this size.
+static void draw_native_list(const Skin *sk)
 {
-	char header[80];
-	if (lib.query[0]) snprintf(header, sizeof(header), "%s (%d)", lib.query, lib.total);
-	else snprintf(header, sizeof(header), "%d tracks", lib.total);
-	text_at(header, LIST_X + 2, 4, 0.34f, sk->dim, 0);
-	if (lib.total > LIB_ROWS) {
-		char page[16];
-		snprintf(page, sizeof(page), "%d+", lib.offset + 1);
-		text_at(page, LIST_X + LIST_W - 2, 4, 0.32f, sk->dim, C2D_AlignRight);
+	char head[96];
+	snprintf(head, sizeof(head), "%s", native_mode ? nat_title : "Biblioteca");
+	text_at(head, LIST_X, 10, 0.46f, sk->text, 0);
+
+	if (lib.total > 0) {
+		char count[32];
+		snprintf(count, sizeof(count), "%d-%d / %d", lib.offset + 1,
+		         lib.offset + lib.count, lib.total);
+		text_at(count, LIST_X + LIST_W, 12, 0.36f, sk->dim, C2D_AlignRight);
 	}
-	if (lib.count == 0) {
-		text_at(lib.loading ? "..." : "nothing found", LIST_X + LIST_W / 2, 96,
-		        0.38f, sk->dim, C2D_AlignCenter);
+	text_at(lib.query[0] ? lib.query : (native_mode ? "TEMAS" : "BIBLIOTECA"),
+	        LIST_X, 30, 0.32f, sk->dim, 0);
+
+	if (lib.loading && lib.count == 0) {
+		text_at("Cargando...", LIST_X, ROW_Y + 8, 0.44f, sk->dim, 0);
 		return;
 	}
+	if (lib.count == 0) {
+		text_at("Nada por aqui", LIST_X, ROW_Y + 8, 0.44f, sk->dim, 0);
+		return;
+	}
+
 	for (int i = 0; i < lib.count; i++) {
 		float y = ROW_Y + i * ROW_H;
-		bool on = (i == lib.sel);
-		if (on) C2D_DrawRectSolid(LIST_X, y, 0.0f, LIST_W, ROW_H - 3, sk->accent);
-		text_at(lib.name[i], LIST_X + 5, y - 1, 0.33f, on ? sk->on_accent : sk->text, 0);
+		bool sel = (i == lib.sel);
+		if (sel)
+			C2D_DrawRectSolid(LIST_X - 6, y, 0.05f, 3, ROW_H - 4, sk->accent);
+		text_at(lib.name[i], LIST_X + 4, y, 0.42f,
+		        sel ? sk->accent : sk->text, 0);
 		if (lib.dir[i][0])
-			text_at(lib.dir[i], LIST_X + 5, y + 12, 0.26f, on ? sk->on_accent : sk->dim, 0);
+			text_at(lib.dir[i], LIST_X + 4, y + 15, 0.32f, sk->dim, 0);
+	}
+
+	// A hairline scrollbar: present when it means something, invisible when
+	// everything already fits.
+	if (lib.total > lib.count) {
+		float track_h = ROW_H * LIB_ROWS;
+		float frac = (float)lib.count / (float)lib.total;
+		float pos = (float)lib.offset / (float)lib.total;
+		C2D_DrawRectSolid(LIST_X + LIST_W + 2, ROW_Y, 0.0f, 2, track_h, sk->meter);
+		C2D_DrawRectSolid(LIST_X + LIST_W + 2, ROW_Y + track_h * pos, 0.1f, 2,
+		                  track_h * frac, sk->accent);
 	}
 }
+
 
 static bool hit(const Button *b, touchPosition t)
 {
@@ -970,8 +1008,7 @@ static void draw_bottom(const Skin *sk, const Button *buttons, int count,
 		return;                 // exclusive: the buttons must not sit on top
 	}
 	if (lib.open) {
-		C2D_DrawRectSolid(LIST_X + LIST_W + 4, 8, 0.0f, 1, SCR_H - 16, sk->meter);
-		draw_list_panel(sk);
+		draw_native_list(sk);
 	} else {
 		// Seconds, not a share of the ring: the ring is deliberately oversized,
 		// so its percentage says nothing. Two seconds is the readable range.
@@ -1011,23 +1048,27 @@ static void draw_bottom(const Skin *sk, const Button *buttons, int count,
 enum { B_PREV, B_PLAY, B_NEXT, B_MUTE, B_LIST, B_SKIN, B_SEARCH, B_COUNT };
 
 // Two arrangements over one array. Zero width hides a button in that mode.
+// Touch targets stay large even though nothing is drawn around them: a finger
+// needs the area, the eye does not need the border.
 static void layout_buttons(Button *b, bool split)
 {
 	if (split) {
-		b[B_PREV]   = (Button){194,  20, 120, 42, IC_PREV,  false};
-		b[B_PLAY]   = (Button){194,  66, 120, 42, IC_PLAY,  true };
-		b[B_NEXT]   = (Button){194, 112, 120, 42, IC_NEXT,  false};
-		b[B_MUTE]   = (Button){194, 158, 120, 34, IC_SOUND, false};
-		b[B_LIST]   = (Button){194, 196, 120, 34, IC_CLOSE, false};
+		// The list owns the screen; the transport shrinks to a strip under it.
+		b[B_PREV]   = (Button){ 96, 196, 44, 40, IC_PREV,  false};
+		b[B_PLAY]   = (Button){144, 194, 44, 44, IC_PLAY,  true };
+		b[B_NEXT]   = (Button){192, 196, 44, 40, IC_NEXT,  false};
+		b[B_SEARCH] = (Button){248,   4, 36, 32, IC_SEARCH, false};
+		b[B_LIST]   = (Button){284,   4, 32, 32, IC_CLOSE,  false};
+		b[B_MUTE]   = (Button){ 40, 196, 44, 40, IC_SOUND, false};
 		b[B_SKIN]   = (Button){0, 0, 0, 0, IC_SKIN, false};
-		b[B_SEARCH] = (Button){LIST_X, 196, LIST_W, 34, IC_SEARCH, false};
 	} else {
-		b[B_PREV]   = (Button){ 16, 118,  88, 56, IC_PREV,  false};
-		b[B_PLAY]   = (Button){116, 118,  88, 56, IC_PLAY,  true };
-		b[B_NEXT]   = (Button){216, 118,  88, 56, IC_NEXT,  false};
-		b[B_MUTE]   = (Button){ 16, 184,  92, 40, IC_SOUND, false};
-		b[B_LIST]   = (Button){114, 184,  92, 40, IC_LIST,  false};
-		b[B_SKIN]   = (Button){212, 184,  92, 40, IC_SKIN,  false};
+		// One centred row, the way a player looks rather than a keypad.
+		b[B_MUTE]   = (Button){ 36, 136, 48, 48, IC_SOUND, false};
+		b[B_PREV]   = (Button){ 92, 136, 48, 48, IC_PREV,  false};
+		b[B_PLAY]   = (Button){144, 130, 60, 60, IC_PLAY,  true };
+		b[B_NEXT]   = (Button){212, 136, 48, 48, IC_NEXT,  false};
+		b[B_LIST]   = (Button){268, 136, 48, 48, IC_LIST,  false};
+		b[B_SKIN]   = (Button){284,   4, 32, 32, IC_SKIN,  false};
 		b[B_SEARCH] = (Button){0, 0, 0, 0, IC_SEARCH, false};
 	}
 }
@@ -1045,6 +1086,16 @@ static void fail_screen(const char *why)
 	}
 }
 
+static unsigned ring_free_space(void)
+{
+	return RING_BYTES - 1 - ring_used();
+}
+
+static void ring_sink_write(const unsigned char *pcm, unsigned len)
+{
+	ring_write(pcm, len);
+}
+
 // Each step of the native sign-in takes a visible moment, so it says which.
 static void native_progress(const char *step)
 {
@@ -1058,6 +1109,8 @@ int main(void)
 {
 	gfxInitDefault();
 	load_config();
+	if (native_mode)
+		sample_rate = 44100;     // Spotify's Vorbis; the config rate is the bridge's
 	themes_load();
 
 	// Everything that can fail runs first, while a text console is still the
@@ -1090,7 +1143,8 @@ int main(void)
 		consoleInit(GFX_TOP, NULL);
 		printf("\n  Spotify nativo\n\n");
 		static char nat_err[192];
-		if (native_init(native_progress, nat_err, sizeof(nat_err)) != 0) {
+		static const native_sink sink = { ring_sink_write, ring_free_space };
+		if (native_init(&sink, native_progress, nat_err, sizeof(nat_err)) != 0) {
 			printf("\n  No se pudo entrar:\n  %s\n", nat_err);
 			printf("\n  START para salir.\n");
 			while (aptMainLoop()) {
@@ -1143,6 +1197,7 @@ int main(void)
 		snprintf(now_artist, sizeof(now_artist), "%s", native_account());
 	}
 	Thread snd = threadCreate(audio_thread, NULL, 16 * 1024, 0x18, -2, false);
+	int nat_state_seen = -1;
 
 	Button buttons[B_COUNT];
 	layout_buttons(buttons, false);
@@ -1161,6 +1216,34 @@ int main(void)
 		touchPosition touch = {0, 0};
 		bool touch_used = false, input_used = false;
 		if (down & KEY_TOUCH) hidTouchRead(&touch);
+
+		if (native_mode) {
+			// The player runs on its own thread; this just mirrors it.
+			native_state st = native_playback_state();
+			if (st != nat_state_seen) {
+				nat_state_seen = (int)st;
+				switch (st) {
+				case NATIVE_LOADING:
+					snprintf(now_title, sizeof(now_title), "Cargando...");
+					now_artist[0] = '\0';
+					break;
+				case NATIVE_FAILED:
+					snprintf(now_title, sizeof(now_title), "No se pudo reproducir");
+					snprintf(now_artist, sizeof(now_artist), "%s",
+					         native_last_error());
+					break;
+				default:
+					break;
+				}
+			}
+			if (st == NATIVE_PLAYING) {
+				snprintf(now_title, sizeof(now_title), "%s", native_now_title());
+				snprintf(now_artist, sizeof(now_artist), "%s", native_now_artist());
+				now_pos = native_position();
+				now_dur = native_duration();
+				server_playing = true;
+			}
+		}
 
 		if (theme_open) {
 			if (down & KEY_DUP)   theme_sel = (theme_sel + theme_count - 1) % theme_count;
@@ -1222,13 +1305,11 @@ int main(void)
 					lib.offset = lib.sel = 0;
 					lib_reload = true;
 				} else if (idx >= 0 && idx < nat_count) {
-					// Nothing can be played yet, so A on a track does the one
-					// useful thing left: build a radio around it.
-					snprintf(nat_arg, sizeof(nat_arg), "%s", nat_rows[idx].uri);
-					nat_view = NATIVE_RADIO;
-					snprintf(nat_title, sizeof(nat_title), "Radio");
-					lib.offset = lib.sel = 0;
-					lib_reload = true;
+					// A plays the track; Y on the list builds a radio from it
+					// instead, which is the other thing worth doing here.
+					native_play(nat_rows[idx].uri);
+					buffering = true;
+					ring_clear();
 				}
 			} else if (!native_mode &&
 			           ((down & KEY_A) || (row >= 0 && row < lib.count)) &&
@@ -1263,6 +1344,18 @@ int main(void)
 		if (down & KEY_R && !lib.open) pressed = B_NEXT;
 		if (down & KEY_A && !lib.open) pressed = B_PLAY;
 		if (down & KEY_Y) pressed = lib.open ? B_SEARCH : B_MUTE;
+		if (native_mode && lib.open && (down & KEY_R) && lib.count) {
+			// R on a track: radio seeded from it. L/R still page when the
+			// selection is a playlist.
+			int idx = lib.index[lib.sel];
+			if (idx >= 0 && idx < nat_count && !nat_rows[idx].is_playlist) {
+				snprintf(nat_arg, sizeof(nat_arg), "%s", nat_rows[idx].uri);
+				nat_view = NATIVE_RADIO;
+				snprintf(nat_title, sizeof(nat_title), "Radio");
+				lib.offset = lib.sel = 0;
+				lib_reload = true;
+			}
+		}
 		if (down & (KEY_SELECT | KEY_X)) pressed = B_SKIN;
 		if ((down & KEY_TOUCH) && !touch_used)
 			for (int i = 0; i < B_COUNT; i++)

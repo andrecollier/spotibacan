@@ -6,6 +6,10 @@
 #include "pair3ds.h"
 #include "spclient.h"
 #include "tls3ds.h"
+#include "track.h"
+
+#define STB_VORBIS_NO_PUSHDATA_API
+#include "stb_vorbis.h"
 
 #include <3ds.h>
 #include <stdarg.h>
@@ -45,11 +49,35 @@ static const char *view_name(native_view v)
 	return "?";
 }
 
+/* One megabyte is about 50 seconds at 160 kbps. Fetching the whole track
+ * before the first sound would add seconds of silence for no reason; this is
+ * a first step towards streaming, not the end of it. */
+#define FETCH_BYTES   (1024 * 1024)
+#define FETCH_LIMIT   (12 * 1024 * 1024)
+#define NATIVE_RATE   44100
+
 static struct {
-	bool         ready;
-	login5_token l5;
-	char         sp_host[128];
-	char         username[128];
+	bool          ready;
+	login5_token  l5;
+	char          sp_host[128];
+	char          username[128];
+	ap_session   *ap;
+	native_sink   sink;
+
+	Thread        player;
+	LightLock      lock;
+	volatile bool  quit;
+	/* Set by the UI thread, consumed by the player. */
+	char           want[64];
+	volatile bool  want_new;
+	volatile bool  want_stop;
+
+	volatile native_state state;
+	char          title[128];
+	char          artist[128];
+	char          error[192];
+	volatile unsigned frames_out;
+	volatile unsigned total_frames;
 } g;
 
 bool native_ready(void) { return g.ready; }
@@ -62,10 +90,150 @@ static void step(void (*progress)(const char *), const char *what)
 		progress(what);
 }
 
-int native_init(void (*progress)(const char *step), char *err, size_t errlen)
+native_state native_playback_state(void) { return g.state; }
+const char *native_now_title(void)  { return g.title; }
+const char *native_now_artist(void) { return g.artist; }
+const char *native_last_error(void) { return g.error; }
+
+float native_position(void)
+{
+	return (float)g.frames_out / NATIVE_RATE;
+}
+
+float native_duration(void)
+{
+	return (float)g.total_frames / NATIVE_RATE;
+}
+
+void native_play(const char *track_uri)
+{
+	if (!g.ready || !track_uri)
+		return;
+	LightLock_Lock(&g.lock);
+	snprintf(g.want, sizeof(g.want), "%s", track_uri);
+	g.want_new = true;
+	g.want_stop = false;
+	LightLock_Unlock(&g.lock);
+}
+
+void native_stop(void)
+{
+	g.want_stop = true;
+}
+
+/* Decodes one fetched track into the ring until it runs out, the UI asks for
+ * something else, or the session is shutting down. */
+static void play_one(const track_audio *tr)
+{
+	int verr = 0;
+	stb_vorbis *v = stb_vorbis_open_memory(track_vorbis(tr),
+	                                       (int)track_vorbis_len(tr),
+	                                       &verr, NULL);
+	if (!v) {
+		snprintf(g.error, sizeof(g.error),
+		         "el decodificador rechazo el stream (%d)", verr);
+		g.state = NATIVE_FAILED;
+		return;
+	}
+
+	g.total_frames = stb_vorbis_stream_length_in_samples(v);
+	g.frames_out = 0;
+	g.state = NATIVE_PLAYING;
+	nlog("PLAY %s - %s\n", g.artist, g.title);
+
+	static s16 pcm[4096 * 2];
+	while (!g.quit && !g.want_stop && !g.want_new) {
+		/* Only decode when the ring has room: the ring is the pacing, and
+		 * running ahead of it would just burn battery. */
+		if (g.sink.free_space() < sizeof(pcm)) {
+			svcSleepThread(10000000LL);   // 10 ms
+			continue;
+		}
+		int got = stb_vorbis_get_samples_short_interleaved(v, 2, pcm, 4096 * 2);
+		if (got <= 0)
+			break;
+		g.sink.write((const unsigned char *)pcm, (unsigned)got * 4);
+		g.frames_out += (unsigned)got;
+	}
+
+	stb_vorbis_close(v);
+	nlog("PLAY fin: %u frames\n", g.frames_out);
+}
+
+static void player_thread(void *arg)
+{
+	(void)arg;
+	while (!g.quit) {
+		if (g.want_new) {
+			char uri[64];
+			LightLock_Lock(&g.lock);
+			snprintf(uri, sizeof(uri), "%s", g.want);
+			g.want_new = false;
+			LightLock_Unlock(&g.lock);
+
+			g.state = NATIVE_LOADING;
+			g.error[0] = '\0';
+			g.frames_out = g.total_frames = 0;
+			nlog("FETCH track %s\n", uri);
+
+			track_audio tr;
+			char err[192];
+			int rc = track_fetch(g.sp_host, g.l5.access_token, g.ap, uri,
+			                     FETCH_BYTES, FETCH_LIMIT, NULL, &tr,
+			                     err, sizeof(err));
+			if (rc != 0) {
+				snprintf(g.error, sizeof(g.error), "%s", err);
+				g.state = NATIVE_FAILED;
+				nlog("  fallo: %s\n", err);
+				continue;
+			}
+			snprintf(g.title, sizeof(g.title), "%s", tr.meta.name);
+			snprintf(g.artist, sizeof(g.artist), "%s", tr.meta.artist);
+			play_one(&tr);
+			track_free(&tr);
+			if (g.state == NATIVE_PLAYING)
+				g.state = NATIVE_IDLE;
+			continue;
+		}
+
+		if (g.want_stop) {
+			g.want_stop = false;
+			g.state = NATIVE_IDLE;
+		}
+
+		/* Idle: keep the access point session alive. It only speaks to say
+		 * ping, but a session that stops answering is dropped, and then the
+		 * next audio key would fail for a reason that looks like anything
+		 * but a missed ping. */
+		if (g.ap && ap_wait(g.ap, 200) == 1) {
+			uint8_t buf[2048];
+			uint8_t cmd;
+			int n = ap_recv(g.ap, &cmd, buf, sizeof(buf));
+			if (n == AP_PKT_TOO_BIG) {
+				/* fine: nothing we need is that large */
+			} else if (n < 0) {
+				nlog("AP: sesion perdida mientras esperaba\n");
+				ap_close(g.ap);
+				g.ap = NULL;
+			} else if (cmd == AP_PKT_PING) {
+				ap_handle_ping(g.ap, buf, (size_t)n);
+			}
+		} else {
+			svcSleepThread(20000000LL);   // 20 ms
+		}
+	}
+}
+
+int native_init(const native_sink *sink, void (*progress)(const char *step),
+                char *err, size_t errlen)
 {
 	if (g.ready)
 		return 0;
+	if (!sink || !sink->write || !sink->free_space) {
+		snprintf(err, errlen, "sin destino de audio");
+		return -1;
+	}
+	g.sink = *sink;
 
 	step(progress, "Starting TLS...");
 	if (R_FAILED(psInit())) {
@@ -111,10 +279,8 @@ int native_init(void (*progress)(const char *step), char *err, size_t errlen)
 	if (!ap)
 		return -1;
 	snprintf(g.username, sizeof(g.username), "%s", info.username);
-	/* Only the credentials it handed back are needed from here; the audio key
-	 * would need this session kept open, and that is the part Spotify
-	 * refuses, so it is closed rather than held for nothing. */
-	ap_close(ap);
+	/* Held, not closed: every audio key comes from this session. */
+	g.ap = ap;
 
 	step(progress, "Getting the library token...");
 	if (login5_from_credentials(info.username, info.reusable, info.reusable_len,
@@ -124,7 +290,15 @@ int native_init(void (*progress)(const char *step), char *err, size_t errlen)
 	char ignored[128];
 	sp_resolve(g.sp_host, sizeof(g.sp_host), ignored, sizeof(ignored));
 
+	LightLock_Init(&g.lock);
+	g.state = NATIVE_IDLE;
 	g.ready = true;
+	g.player = threadCreate(player_thread, NULL, 64 * 1024, 0x30, -2, false);
+	if (!g.player) {
+		snprintf(err, errlen, "no se pudo crear el hilo del reproductor");
+		g.ready = false;
+		return -1;
+	}
 	nlog("INIT: ok, %s via %s\n", g.username, g.sp_host);
 	return 0;
 }
@@ -133,6 +307,13 @@ void native_exit(void)
 {
 	if (!g.ready)
 		return;
+	g.quit = true;
+	if (g.player) {
+		threadJoin(g.player, 2000000000LL);
+		threadFree(g.player);
+	}
+	if (g.ap)
+		ap_close(g.ap);
 	memset(&g, 0, sizeof(g));
 	tls_global_exit();
 	psExit();

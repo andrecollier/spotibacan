@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parent
 #          extra single sources relative to client3ds/)
 APPS = {
     # The native source brings TLS and the whole Spotify protocol with it.
-    "audio3ds":    (["source", "platform3ds"], [], "release", []),
+    "audio3ds":    (["source", "platform3ds"], [], "release", ["deps/stb_vorbis.c"]),
     "probe_tls":   (["probe_tls", "platform3ds"], ["-DPROBE_BUILD"], "probe", []),
     "probe_pair":  (["probe_pair", "platform3ds"], ["-DPROBE_BUILD"], "probe", []),
     "probe_ap":    (["probe_ap", "platform3ds"], ["-DPROBE_BUILD"], "probe", []),

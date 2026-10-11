@@ -31,10 +31,23 @@ typedef struct {
 	bool is_playlist;
 } native_row;
 
+/* Where decoded audio goes. The client already has a ring that NDSP drains,
+ * so the native player is just another producer for it and the whole audio
+ * path downstream stays exactly as it was. */
+typedef struct {
+	void (*write)(const unsigned char *pcm, unsigned len);
+	unsigned (*free_space)(void);
+} native_sink;
+
 /* Signs in: stored refresh token -> OAuth -> access point -> login5 ->
  * spclient. Slow enough to need a screen of its own (a second or two), so the
- * caller passes a hook that reports each step. Returns 0, or -1 with err set. */
-int  native_init(void (*progress)(const char *step), char *err, size_t errlen);
+ * caller passes a hook that reports each step. Returns 0, or -1 with err set.
+ *
+ * The access point session is kept open afterwards: audio keys come from
+ * there and nowhere else, and reopening it per track would cost a second
+ * each time. The player thread answers its pings while idle. */
+int  native_init(const native_sink *sink, void (*progress)(const char *step),
+                 char *err, size_t errlen);
 void native_exit(void);
 bool native_ready(void);
 
@@ -43,6 +56,28 @@ bool native_ready(void);
  * and is ignored otherwise. Returns the row count, or -1 with err set. */
 int  native_fetch(native_view view, const char *arg, native_row *rows, int max,
                   char *err, size_t errlen);
+
+/* ------------------------------------------------------------- playback */
+
+/* Asks for a track. Returns immediately: resolving, fetching the key and
+ * downloading take seconds, and none of that belongs on the render loop. */
+void native_play(const char *track_uri);
+void native_stop(void);
+
+typedef enum {
+	NATIVE_IDLE,
+	NATIVE_LOADING,
+	NATIVE_PLAYING,
+	NATIVE_FAILED,
+} native_state;
+
+native_state native_playback_state(void);
+const char  *native_now_title(void);
+const char  *native_now_artist(void);
+const char  *native_last_error(void);
+/* Seconds of audio handed to the ring, and the track's length. */
+float        native_position(void);
+float        native_duration(void);
 
 /* A playlist's title. Fetched when it is opened, not for every row of the
  * rootlist: that would be one request per row for names most of which the
