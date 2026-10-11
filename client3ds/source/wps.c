@@ -11,7 +11,7 @@
 #define LINE_LEN 320
 
 typedef struct {
-	char id;              // the letter %xl gives it
+	char id[24];          // %xl labels are words, not single letters
 	C3D_Tex tex;
 	int w, h;             // one frame
 	int frames;
@@ -68,7 +68,7 @@ static bool bmp_load(const char *path, Bitmap *bm, int frames)
 	bool bottom_up = h > 0;
 	if (h < 0) h = -h;
 	if (w <= 0 || h <= 0 || w > 1024 || h > 1024 ||
-	    (bpp != 1 && bpp != 4 && bpp != 8 && bpp != 24 && bpp != 32)) {
+	    (bpp != 1 && bpp != 4 && bpp != 8 && bpp != 16 && bpp != 24 && bpp != 32)) {
 		fclose(f); return false;
 	}
 
@@ -102,6 +102,12 @@ static bool bmp_load(const char *path, Bitmap *bm, int frames)
 			} else if (bpp == 8) {
 				const u8 *p = palette + row[x] * 4;
 				b = p[0]; g = p[1]; r = p[2];
+			} else if (bpp == 16) {
+				// 565 packed little-endian, expanded back to eight bits.
+				u16 v = (u16)(row[x * 2] | (row[x * 2 + 1] << 8));
+				r = (u8)(((v >> 11) & 31) << 3);
+				g = (u8)(((v >> 5) & 63) << 2);
+				b = (u8)((v & 31) << 3);
 			} else {
 				const u8 *p = row + x * (bpp / 8);
 				b = p[0]; g = p[1]; r = p[2];
@@ -128,10 +134,30 @@ static bool bmp_load(const char *path, Bitmap *bm, int frames)
 	return bm->ok;
 }
 
-static Bitmap *bitmap_find(char id)
+static Bitmap *bitmap_find(const char *id)
 {
 	for (int i = 0; i < bitmap_count; i++)
-		if (bitmaps[i].id == id) return &bitmaps[i];
+		if (!strcmp(bitmaps[i].id, id)) return &bitmaps[i];
+	return NULL;
+}
+
+// %xd takes either a whole label, or a label with a frame letter stuck on the
+// end. Try the exact name first so a real label is never split.
+static Bitmap *bitmap_resolve(const char *spec, int *frame)
+{
+	*frame = 0;
+	Bitmap *bm = bitmap_find(spec);
+	if (bm) return bm;
+	size_t n = strlen(spec);
+	if (n >= 2 && isalpha((unsigned char)spec[n - 1])) {
+		char stem[24];
+		snprintf(stem, sizeof(stem), "%.*s", (int)(n - 1), spec);
+		bm = bitmap_find(stem);
+		if (bm) {
+			*frame = tolower((unsigned char)spec[n - 1]) - 'a';
+			return bm;
+		}
+	}
 	return NULL;
 }
 
@@ -166,17 +192,28 @@ bool wps_load(const char *wps_path, const char *dir)
 
 		// %xl(id,file,x,y[,frames]) preloads an image, possibly a frame strip.
 		if (!strncmp(line, "%xl(", 4) && bitmap_count < MAX_BITMAPS) {
-			char id, file[128];
-			int x, y, frames = 1;
-			int got = sscanf(line + 4, "%c,%127[^,],%d,%d,%d", &id, file, &x, &y, &frames);
-			if (got >= 4) {
-				char *close = strchr(file, ')');
-				if (close) *close = 0;
+			// %xl(label,file[,x[,y[,frames]]]) - labels are words and the
+			// trailing arguments are optional, so split rather than scan.
+			char body[256];
+			snprintf(body, sizeof(body), "%s", line + 4);
+			char *close = strrchr(body, ')');
+			if (close) *close = 0;
+			char *field[6] = {0};
+			int n = 0;
+			for (char *tok = body; tok && n < 6; ) {
+				field[n++] = tok;
+				char *comma = strchr(tok, ',');
+				if (!comma) break;
+				*comma = 0;
+				tok = comma + 1;
+			}
+			if (n >= 2 && field[0][0] && field[1][0]) {
+				int frames = (n >= 5) ? atoi(field[4]) : 1;
 				char path[320];
-				snprintf(path, sizeof(path), "%s/%s", base_dir, file);
+				snprintf(path, sizeof(path), "%s/%s", base_dir, field[1]);
 				Bitmap *bm = &bitmaps[bitmap_count];
 				memset(bm, 0, sizeof(*bm));
-				bm->id = id;
+				snprintf(bm->id, sizeof(bm->id), "%s", field[0]);
 				if (bmp_load(path, bm, frames)) bitmap_count++;
 				else skipped++;
 			}
@@ -214,6 +251,7 @@ typedef struct {
 	int align;                // 0 left, 1 centre, 2 right
 	C2D_TextBuf text_buf;
 	int art_x, art_y, art_w, art_h;   // last %Cl rectangle
+	float line_y;                     // next text baseline in this viewport
 } Ctx;
 
 static void draw_text_line(Ctx *c, const char *s)
@@ -222,17 +260,22 @@ static void draw_text_line(Ctx *c, const char *s)
 	C2D_Text t;
 	C2D_TextParse(&t, c->text_buf, s);
 	C2D_TextOptimize(&t);
+	// Rockbox stacks successive text lines down the viewport. Drawing them all
+	// at the viewport origin piled every line on top of the last.
+	if (c->line_y + 13.0f > c->vp.h) return;
 	float x = c->ox + c->vp.x;
 	u32 flags = C2D_WithColor;
 	if (c->align == 1) { x += c->vp.w / 2.0f; flags |= C2D_AlignCenter; }
 	else if (c->align == 2) { x += c->vp.w; flags |= C2D_AlignRight; }
-	C2D_DrawText(&t, flags, x, c->oy + c->vp.y, 0.4f, 0.42f, 0.42f,
+	C2D_DrawText(&t, flags, x, c->oy + c->vp.y + c->line_y, 0.4f, 0.42f, 0.42f,
 	             c->vp.has_fg ? c->vp.fg : 0xFFFFFFFF);
+	c->line_y += 13.0f;
 }
 
-static void draw_bitmap(Ctx *c, char id, int frame)
+static void draw_bitmap(Ctx *c, const char *spec)
 {
-	Bitmap *bm = bitmap_find(id);
+	int frame = 0;
+	Bitmap *bm = bitmap_resolve(spec, &frame);
 	if (!bm || !bm->ok) return;
 	if (frame < 0 || frame >= bm->frames) frame = 0;
 	Tex3DS_SubTexture sub = {
@@ -378,16 +421,25 @@ static void render_span(Ctx *c, const char *s, const char *end)
 				if (s < end) s++;
 			}
 			c->align = 0;
+			c->line_y = 0;
 			continue;
 		}
 		if (*s == 'x' && s + 1 < end && s[1] == 'd') {            // draw bitmap
 			s += 2;
-			if (s < end && *s == '(') s++;
-			char id = (s < end) ? *s++ : 0;
-			int frame = 0;
-			if (s < end && isalpha((unsigned char)*s)) frame = tolower((unsigned char)*s++) - 'a';
-			if (s < end && *s == ')') s++;
-			draw_bitmap(c, id, frame);
+			char spec[24] = {0};
+			size_t n = 0;
+			if (s < end && *s == '(') {
+				s++;
+				while (s < end && *s != ')' && n < sizeof(spec) - 1) spec[n++] = *s++;
+				if (s < end) s++;
+			} else {
+				// Older form: the label follows with no brackets.
+				while (s < end && isalnum((unsigned char)*s) && n < sizeof(spec) - 1)
+					spec[n++] = *s++;
+			}
+			char *comma = strchr(spec, ',');
+			if (comma) *comma = 0;
+			draw_bitmap(c, spec);
 			continue;
 		}
 		if (*s == 'C') {                                          // album art
