@@ -23,6 +23,20 @@ int http_post_form(const char *host, const char *path, const char *body,
                    http_reply *out);
 int http_get(const char *host, const char *path, const char *bearer,
              http_reply *out);
+
+/* Spotify's internal services speak protobuf over HTTPS, with the body and the
+ * reply both binary; `out->body` is still NUL-terminated for convenience but
+ * `out->len` is what counts. */
+int http_post_proto(const char *host, const char *path,
+                    const void *body, size_t len, http_reply *out);
+int http_get_proto(const char *host, const char *path, const char *bearer,
+                   http_reply *out);
+
+/* The general form the three above are built from. `bearer`, `ctype` and
+ * `accept` may be NULL. */
+int http_request(const char *host, const char *path, const char *method,
+                 const char *bearer, const char *ctype, const char *accept,
+                 const void *body, size_t len, http_reply *out);
 void http_reply_free(http_reply *r);
 
 /* Percent-encodes everything outside the unreserved set, for form bodies. */

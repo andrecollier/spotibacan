@@ -36,6 +36,13 @@ typedef struct {
 
 bool pb_get_bytes(const uint8_t *buf, size_t len, uint32_t field, pbv *out);
 bool pb_get_varint(const uint8_t *buf, size_t len, uint32_t field, uint64_t *out);
+
+/* A `sint32`/`sint64` field. These are zigzag-encoded, so reading one as a
+ * plain varint silently returns roughly double the real value for positives --
+ * which looks like a plausible number and not like a bug. Spotify's
+ * metadata.proto declares duration, popularity, number and disc_number this
+ * way. */
+bool pb_get_sint(const uint8_t *buf, size_t len, uint32_t field, int64_t *out);
 bool pb_has(const uint8_t *buf, size_t len, uint32_t field);
 
 /* Chases a path of nested length-delimited fields, e.g. challenge ->

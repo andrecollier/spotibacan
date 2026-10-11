@@ -176,28 +176,51 @@ static int finish(tls_conn *c, http_reply *out)
 	return 0;
 }
 
-int http_post_form(const char *host, const char *path, const char *body,
-                   http_reply *out)
+int http_request(const char *host, const char *path, const char *method,
+                 const char *bearer, const char *ctype, const char *accept,
+                 const void *body, size_t len, http_reply *out)
 {
 	memset(out, 0, sizeof(*out));
 	tls_conn *c = tls_connect(host, 443, 20000, NULL, out->err, sizeof(out->err));
 	if (!c)
 		return -1;
 
-	size_t blen = strlen(body);
-	char head[512];
-	int n = snprintf(head, sizeof(head),
-	                 "POST %s HTTP/1.1\r\nHost: %s\r\n"
-	                 "User-Agent: 3ds-spotify/0.1\r\n"
-	                 "Content-Type: application/x-www-form-urlencoded\r\n"
-	                 "Content-Length: %u\r\nConnection: close\r\n\r\n",
-	                 path, host, (unsigned)blen);
-	if (n < 0 || (size_t)n >= sizeof(head)) {
-		snprintf(out->err, sizeof(out->err), "request headers too long");
+	/* A bearer token is long -- login5's runs past 400 characters -- so the
+	 * header buffer is sized for it rather than for a typical request. */
+	size_t headcap = 1024 + (bearer ? strlen(bearer) : 0) + strlen(path);
+	char *head = malloc(headcap);
+	if (!head) {
+		snprintf(out->err, sizeof(out->err), "out of memory");
 		tls_close(c);
 		return -1;
 	}
-	if (tls_write(c, head, n) != n || tls_write(c, body, blen) != (int)blen) {
+
+	int n = snprintf(head, headcap,
+	                 "%s %s HTTP/1.1\r\nHost: %s\r\n"
+	                 "User-Agent: 3ds-spotify/0.1\r\n"
+	                 "%s%s%s"
+	                 "%s%s%s"
+	                 "%s%s%s"
+	                 "Content-Length: %u\r\nConnection: close\r\n\r\n",
+	                 method, path, host,
+	                 bearer ? "Authorization: Bearer " : "", bearer ? bearer : "",
+	                 bearer ? "\r\n" : "",
+	                 ctype ? "Content-Type: " : "", ctype ? ctype : "",
+	                 ctype ? "\r\n" : "",
+	                 accept ? "Accept: " : "", accept ? accept : "",
+	                 accept ? "\r\n" : "",
+	                 (unsigned)len);
+	if (n < 0 || (size_t)n >= headcap) {
+		snprintf(out->err, sizeof(out->err), "request headers too long");
+		free(head);
+		tls_close(c);
+		return -1;
+	}
+
+	bool sent = tls_write(c, head, n) == n &&
+	            (len == 0 || tls_write(c, body, len) == (int)len);
+	free(head);
+	if (!sent) {
 		snprintf(out->err, sizeof(out->err), "write failed");
 		tls_close(c);
 		return -1;
@@ -205,32 +228,30 @@ int http_post_form(const char *host, const char *path, const char *body,
 	return finish(c, out);
 }
 
+int http_post_form(const char *host, const char *path, const char *body,
+                   http_reply *out)
+{
+	return http_request(host, path, "POST", NULL,
+	                    "application/x-www-form-urlencoded", NULL,
+	                    body, strlen(body), out);
+}
+
 int http_get(const char *host, const char *path, const char *bearer,
              http_reply *out)
 {
-	memset(out, 0, sizeof(*out));
-	tls_conn *c = tls_connect(host, 443, 20000, NULL, out->err, sizeof(out->err));
-	if (!c)
-		return -1;
+	return http_request(host, path, "GET", bearer, NULL, NULL, NULL, 0, out);
+}
 
-	char head[1024];
-	int n = snprintf(head, sizeof(head),
-	                 "GET %s HTTP/1.1\r\nHost: %s\r\n"
-	                 "User-Agent: 3ds-spotify/0.1\r\n"
-	                 "%s%s%s"
-	                 "Connection: close\r\n\r\n",
-	                 path, host,
-	                 bearer ? "Authorization: Bearer " : "",
-	                 bearer ? bearer : "", bearer ? "\r\n" : "");
-	if (n < 0 || (size_t)n >= sizeof(head)) {
-		snprintf(out->err, sizeof(out->err), "request headers too long");
-		tls_close(c);
-		return -1;
-	}
-	if (tls_write(c, head, n) != n) {
-		snprintf(out->err, sizeof(out->err), "write failed");
-		tls_close(c);
-		return -1;
-	}
-	return finish(c, out);
+int http_post_proto(const char *host, const char *path,
+                    const void *body, size_t len, http_reply *out)
+{
+	return http_request(host, path, "POST", NULL, "application/x-protobuf",
+	                    "application/x-protobuf", body, len, out);
+}
+
+int http_get_proto(const char *host, const char *path, const char *bearer,
+                   http_reply *out)
+{
+	return http_request(host, path, "GET", bearer, NULL,
+	                    "application/x-protobuf", NULL, 0, out);
 }

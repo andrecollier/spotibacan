@@ -34,11 +34,34 @@ typedef struct {
 	double connect_ms;
 	double handshake_ms;
 	double login_ms;
-	size_t reusable_len;         /* reusable credentials, not stored by us */
+	/* The credentials APWelcome hands back. login5 trades these for the Bearer
+	 * token spclient wants, so they are the link between the two halves of the
+	 * session -- and they are a credential: never display or log them. */
+	uint8_t reusable[320];
+	size_t  reusable_len;
 } ap_info;
 
-/* Asks apresolve which access point to dial. Returns 0, or -1 with err set. */
+#define AP_MAX_CANDIDATES 6
+
+typedef struct {
+	char     host[128];
+	uint16_t port;
+} ap_candidate;
+
+/* Asks apresolve which access points to dial. It returns several, on ports
+ * 4070, 443 and 80, and any one of them can refuse a connection while the
+ * others answer -- so taking only the first is a single point of failure for
+ * no reason. Returns how many were read, or -1. */
+int ap_resolve_list(ap_candidate *out, int max, char *err, size_t errlen);
+
+/* The first candidate, for callers that do not care. Returns 0, or -1. */
 int ap_resolve(char *host, size_t hostlen, uint16_t *port, char *err, size_t errlen);
+
+/* Tries each candidate in order and returns the first session that logs in.
+ * `tried` is set to how many were attempted. */
+ap_session *ap_login_any(const ap_candidate *cands, int n, const char *access_token,
+                         const char *device_id, ap_info *info, int *tried,
+                         char *err, size_t errlen);
 
 /* Dials the AP, completes the handshake and logs in with an OAuth access
  * token. `info` may be NULL. Returns NULL with `err` set on failure; when the

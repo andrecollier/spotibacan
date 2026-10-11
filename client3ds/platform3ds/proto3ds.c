@@ -142,6 +142,16 @@ bool pb_get_varint(const uint8_t *buf, size_t len, uint32_t field, uint64_t *out
 	return scan(buf, len, field, 0, NULL, out);
 }
 
+bool pb_get_sint(const uint8_t *buf, size_t len, uint32_t field, int64_t *out)
+{
+	uint64_t raw;
+	if (!scan(buf, len, field, 0, NULL, &raw))
+		return false;
+	if (out)
+		*out = (int64_t)(raw >> 1) ^ -(int64_t)(raw & 1);
+	return true;
+}
+
 bool pb_has(const uint8_t *buf, size_t len, uint32_t field)
 {
 	pbv v;

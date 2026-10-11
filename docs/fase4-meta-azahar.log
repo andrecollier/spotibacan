@@ -1,0 +1,30 @@
+3DS Spotify -- library & metadata (phase 4)
+built 23:29:55
+
+1. OAuth access token...
+   443 chars
+2. Access point...
+   6 candidates, first ap-guc3.spotify.com:4070
+   ap-guc3.spotify.com:4070 (attempt 1), 31xn3ibkyttdciogihibyz6jjuym, 195 bytes of credentials
+3. login5 token...
+   443 chars, valid 3540 s
+4. spclient host...
+   guc3-spclient.spotify.com
+
+5. Track metadata
+   Mr. Brightside
+   by The Killers
+   from Hot Fuss
+   3:42
+   4 audio files:
+     cf100297a1c010f8bca9667e8d7822c2d35a20dc  Vorbis 320
+     3f090e7f0793eac0c6d562385820c576e9ff7d29  Vorbis 160
+     191184dcab41508b524b84f43d86ba5527472bc6  Vorbis 96
+     42a528f2f7db69b9ccabd1cbb533c24695ec8ef8  AAC
+   pick for this console: Vorbis 160
+
+6. Rootlist
+   length field 0, 0 uris read
+   (the account's playlist folder is empty)
+
+START exits.

@@ -1,0 +1,208 @@
+/* Phase 4: the library and the metadata.
+ *
+ * Chains the whole thing together for the first time: stored refresh token ->
+ * OAuth access token -> access point login -> the reusable credentials
+ * APWelcome returns -> a login5 Bearer token -> spclient. Then reads the
+ * rootlist and a track's metadata, which is where the audio file ids live and
+ * therefore what the next phase needs.
+ */
+#include <3ds.h>
+#include <malloc.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "ap3ds.h"
+#include "cfg3ds.h"
+#include "login5.h"
+#include "pair3ds.h"
+#include "spclient.h"
+#include "tls3ds.h"
+
+#define SOC_BUFFER 0x100000
+
+/* "Mr. Brightside" -- a track that is certainly on Spotify and in the
+ * catalogue everywhere, so a failure here is this client's fault. */
+#define SAMPLE_TRACK "spotify:track:3n3Ppam7vgaVa1iaRUc9Lp"
+
+static FILE *logf;
+
+static void say(const char *fmt, ...)
+{
+	char line[512];
+	va_list ap;
+	va_start(ap, fmt);
+	vsnprintf(line, sizeof(line), fmt, ap);
+	va_end(ap);
+	fputs(line, stdout);
+	fputs(line, stderr);
+	if (logf) {
+		fputs(line, logf);
+		fflush(logf);
+	}
+}
+
+static void open_log(const char *argv0)
+{
+	if (argv0 && argv0[0]) {
+		char p[320];
+		snprintf(p, sizeof(p), "%s", argv0);
+		char *slash = strrchr(p, '/');
+		if (slash) {
+			slash[1] = '\0';
+			strncat(p, "spotify-meta.log", sizeof(p) - strlen(p) - 1);
+			logf = fopen(p, "w");
+		}
+	}
+	if (!logf)
+		logf = fopen("sdmc:/spotify-meta.log", "w");
+}
+
+static void frame(void)
+{
+	gfxFlushBuffers();
+	gfxSwapBuffers();
+	gspWaitForVBlank();
+}
+
+int main(int argc, char **argv)
+{
+	(void)argc;
+	gfxInitDefault();
+	consoleInit(GFX_TOP, NULL);
+	const char *argv0 = (argv && argv[0]) ? argv[0] : NULL;
+	open_log(argv0);
+	cfg_set_path(argv0);
+
+	say("3DS Spotify -- library & metadata (phase 4)\n");
+	say("built %s\n\n", BUILD_STAMP);
+
+	u32 *soc = memalign(0x1000, SOC_BUFFER);
+	if (!soc || R_FAILED(socInit(soc, SOC_BUFFER))) {
+		say("socInit failed; is Wi-Fi on?\n");
+		goto hold;
+	}
+	if (R_FAILED(psInit())) {
+		say("psInit failed.\n");
+		goto hold;
+	}
+	int rc = tls_global_init();
+	if (rc) {
+		char reason[128];
+		tls_strerror(rc, reason, sizeof(reason));
+		say("tls_global_init: %s\n", reason);
+		goto hold;
+	}
+
+	char err[256];
+	char stored[512];
+	if (!cfg_load_refresh_token(stored, sizeof(stored))) {
+		say("Not paired. Run probe_pair first.\n");
+		goto hold;
+	}
+
+	spotify_tokens tok;
+	say("1. OAuth access token...\n");
+	if (token_refresh(stored, &tok, err, sizeof(err)) != 0) {
+		say("   failed: %s\n", err);
+		goto hold;
+	}
+	if (tok.refresh_token[0] && strcmp(tok.refresh_token, stored) != 0)
+		cfg_save_refresh_token(tok.refresh_token, tok.scope);
+	say("   %u chars\n", (unsigned)strlen(tok.access_token));
+
+	char device_id[64];
+	ap_device_id(device_id, sizeof(device_id));
+
+	say("2. Access point...\n");
+	ap_candidate cands[AP_MAX_CANDIDATES];
+	int ncands = ap_resolve_list(cands, AP_MAX_CANDIDATES, err, sizeof(err));
+	if (ncands < 1) {
+		say("   apresolve failed: %s\n", err);
+		goto hold;
+	}
+	say("   %d candidates, first %s:%u\n", ncands, cands[0].host, cands[0].port);
+	ap_info info;
+	int tried = 0;
+	ap_session *ap = ap_login_any(cands, ncands, tok.access_token, device_id,
+	                              &info, &tried, err, sizeof(err));
+	if (!ap) {
+		say("   all %d failed, last: %s\n", tried, err);
+		goto hold;
+	}
+	say("   %s (attempt %d), %s, %u bytes of credentials\n",
+	    info.ap, tried, info.username, (unsigned)info.reusable_len);
+
+	/* The AP session is not needed for the rest of this phase, but closing it
+	 * is deliberate rather than accidental: the next phase keeps it open,
+	 * because audio keys only come from here. */
+	ap_close(ap);
+
+	say("3. login5 token...\n");
+	login5_token l5;
+	if (login5_from_credentials(info.username, info.reusable, info.reusable_len,
+	                            device_id, &l5, err, sizeof(err)) != 0) {
+		say("   failed: %s\n", err);
+		goto hold;
+	}
+	say("   %u chars, valid %ld s\n", (unsigned)strlen(l5.access_token),
+	    (long)(l5.expires_at - time(NULL)));
+
+	say("4. spclient host...\n");
+	char sp_host[128];
+	err[0] = '\0';
+	sp_resolve(sp_host, sizeof(sp_host), err, sizeof(err));
+	say("   %s%s%s\n", sp_host, err[0] ? "  -- " : "", err[0] ? err : "");
+
+	say("\n5. Track metadata\n");
+	sp_track t;
+	if (sp_track_metadata(sp_host, l5.access_token, SAMPLE_TRACK, &t,
+	                      err, sizeof(err)) != 0) {
+		say("   failed: %s\n", err);
+	} else {
+		say("   %s\n   by %s\n   from %s\n   %d:%02d\n", t.name, t.artist,
+		    t.album, t.duration_ms / 60000, (t.duration_ms / 1000) % 60);
+		say("   %d audio files:\n", t.file_count);
+		for (int i = 0; i < t.file_count; i++) {
+			char hex[41];
+			for (int j = 0; j < 20; j++)
+				snprintf(hex + j * 2, 3, "%02x", t.files[i].id[j]);
+			say("     %s  %s\n", hex, sp_format_name(t.files[i].format));
+		}
+		const sp_file *pick = sp_pick_file(&t);
+		say("   pick for this console: %s\n",
+		    pick ? sp_format_name(pick->format) : "none playable!");
+	}
+
+	say("\n6. Rootlist\n");
+	static char uris[16][96];
+	int count = 0;
+	int got = sp_rootlist(sp_host, l5.access_token, info.username, uris, 16,
+	                      &count, err, sizeof(err));
+	if (got < 0) {
+		say("   failed: %s\n", err);
+	} else {
+		say("   length field %d, %d uris read\n", count, got);
+		for (int i = 0; i < got; i++)
+			say("     %s\n", uris[i]);
+		if (count == 0 && got == 0)
+			say("   (the account's playlist folder is empty)\n");
+	}
+
+hold:
+	say("\nSTART exits.\n");
+	while (aptMainLoop()) {
+		hidScanInput();
+		if (hidKeysDown() & KEY_START)
+			break;
+		frame();
+	}
+	if (logf)
+		fclose(logf);
+	tls_global_exit();
+	psExit();
+	socExit();
+	gfxExit();
+	return 0;
+}

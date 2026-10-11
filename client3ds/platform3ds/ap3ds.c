@@ -158,7 +158,7 @@ static int tcp_connect(const char *host, uint16_t port, char *err, size_t errlen
 
 /* --------------------------------------------------------------- apresolve */
 
-int ap_resolve(char *host, size_t hostlen, uint16_t *port, char *err, size_t errlen)
+int ap_resolve_list(ap_candidate *out, int max, char *err, size_t errlen)
 {
 	http_reply r;
 	if (http_get("apresolve.spotify.com", "/?type=accesspoint", NULL, &r) != 0) {
@@ -172,32 +172,50 @@ int ap_resolve(char *host, size_t hostlen, uint16_t *port, char *err, size_t err
 	}
 
 	/* The body is {"accesspoint":["host:port", ...]}. json3ds only reads flat
-	 * objects, and pulling the first element of one known array is not worth a
-	 * parser, so the first quoted string after the key is taken directly. */
-	int rc = -1;
+	 * objects, and walking one known array of strings is not worth a parser. */
+	int n = 0;
 	const char *key = strstr(r.body, "\"accesspoint\"");
-	const char *open = key ? strchr(key, '[') : NULL;
-	const char *q1 = open ? strchr(open, '"') : NULL;
-	const char *q2 = q1 ? strchr(q1 + 1, '"') : NULL;
-	if (q2) {
+	const char *p = key ? strchr(key, '[') : NULL;
+	const char *end = p ? strchr(p, ']') : NULL;
+	while (p && end && n < max) {
+		const char *q1 = strchr(p, '"');
+		if (!q1 || q1 > end)
+			break;
+		const char *q2 = strchr(q1 + 1, '"');
+		if (!q2 || q2 > end)
+			break;
 		char entry[160];
-		size_t n = (size_t)(q2 - q1 - 1);
-		if (n < sizeof(entry)) {
-			memcpy(entry, q1 + 1, n);
-			entry[n] = '\0';
+		size_t len = (size_t)(q2 - q1 - 1);
+		if (len < sizeof(entry)) {
+			memcpy(entry, q1 + 1, len);
+			entry[len] = '\0';
 			char *colon = strrchr(entry, ':');
 			if (colon) {
 				*colon = '\0';
-				snprintf(host, hostlen, "%s", entry);
-				*port = (uint16_t)atoi(colon + 1);
-				rc = 0;
+				snprintf(out[n].host, sizeof(out[n].host), "%s", entry);
+				out[n].port = (uint16_t)atoi(colon + 1);
+				n++;
 			}
 		}
+		p = q2 + 1;
 	}
-	if (rc != 0)
-		snprintf(err, errlen, "could not read an access point out of apresolve");
 	http_reply_free(&r);
-	return rc;
+
+	if (n == 0) {
+		snprintf(err, errlen, "could not read an access point out of apresolve");
+		return -1;
+	}
+	return n;
+}
+
+int ap_resolve(char *host, size_t hostlen, uint16_t *port, char *err, size_t errlen)
+{
+	ap_candidate one[1];
+	if (ap_resolve_list(one, 1, err, errlen) < 1)
+		return -1;
+	snprintf(host, hostlen, "%s", one[0].host);
+	*port = one[0].port;
+	return 0;
 }
 
 /* -------------------------------------------------------------- device id */
@@ -699,8 +717,11 @@ ap_session *ap_login(const char *host, uint16_t port, const char *access_token,
 			pb_get_varint(buf, (size_t)n, 0x14, &acct);
 			nfo->account_type = (int)acct;
 			pbv reusable;
-			if (pb_get_bytes(buf, (size_t)n, 0x28, &reusable))
+			if (pb_get_bytes(buf, (size_t)n, 0x28, &reusable) &&
+			    reusable.len <= sizeof(nfo->reusable)) {
+				memcpy(nfo->reusable, reusable.p, reusable.len);
 				nfo->reusable_len = reusable.len;
+			}
 			ok = true;
 			break;
 		}
@@ -724,6 +745,29 @@ ap_session *ap_login(const char *host, uint16_t port, const char *access_token,
 		return NULL;
 	}
 	return s;
+}
+
+ap_session *ap_login_any(const ap_candidate *cands, int n, const char *access_token,
+                         const char *device_id, ap_info *info, int *tried,
+                         char *err, size_t errlen)
+{
+	char last[256] = "no candidates";
+	for (int i = 0; i < n; i++) {
+		if (tried)
+			*tried = i + 1;
+		ap_session *s = ap_login(cands[i].host, cands[i].port, access_token,
+		                         device_id, info, err, errlen);
+		if (s)
+			return s;
+		snprintf(last, sizeof(last), "%s", err);
+		/* A refused login is the account's answer and will be the same
+		 * everywhere, so only connection-level failures are worth retrying
+		 * against another access point. */
+		if (info && info->login_error)
+			break;
+	}
+	snprintf(err, errlen, "%s", last);
+	return NULL;
 }
 
 void ap_close(ap_session *s)
