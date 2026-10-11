@@ -44,12 +44,14 @@ static bool decrypt(uint8_t *buf, size_t len, const uint8_t key[16])
 }
 
 int track_fetch(const char *sp_host, const char *token, ap_session *ap,
-                const char *track_uri, size_t limit, track_audio *out,
-                char *err, size_t errlen)
+                const char *track_uri, size_t bytes, size_t limit,
+                void (*progress)(const char *step),
+                track_audio *out, char *err, size_t errlen)
 {
 	memset(out, 0, sizeof(*out));
 	TickCounter t;
 
+	if (progress) progress("metadata");
 	osTickCounterStart(&t);
 	if (sp_track_metadata(sp_host, token, track_uri, &out->meta,
 	                      err, errlen) != 0)
@@ -65,6 +67,7 @@ int track_fetch(const char *sp_host, const char *token, ap_session *ap,
 	}
 	out->format = file->format;
 
+	if (progress) progress("storage-resolve");
 	sp_storage storage;
 	if (sp_storage_resolve(sp_host, token, file->id, &storage,
 	                       err, errlen) < 0)
@@ -74,6 +77,7 @@ int track_fetch(const char *sp_host, const char *token, ap_session *ap,
 
 	/* The key must be asked for before the bytes are worth fetching: without
 	 * it the download is just noise. */
+	if (progress) progress("clave de audio");
 	osTickCounterStart(&t);
 	uint8_t key[16];
 	int refused = 0;
@@ -84,11 +88,13 @@ int track_fetch(const char *sp_host, const char *token, ap_session *ap,
 	if (rc != 0)
 		return rc;
 
+	if (progress) progress("descarga del CDN");
 	osTickCounterStart(&t);
 	http_reply r;
 	int got = -1;
 	for (int i = 0; i < storage.count; i++) {
-		got = http_get_url(storage.urls[i], limit, &r);
+		got = bytes ? http_get_url_range(storage.urls[i], bytes, limit, &r)
+		            : http_get_url(storage.urls[i], limit, &r);
 		if (got == 0 && (r.status == 200 || r.status == 206))
 			break;
 		/* A signed URL can have expired or its edge can be down; the other
@@ -109,6 +115,7 @@ int track_fetch(const char *sp_host, const char *token, ap_session *ap,
 		return -1;
 	}
 
+	if (progress) progress("descifrado");
 	osTickCounterStart(&t);
 	if (!decrypt((uint8_t *)r.body, r.len, key)) {
 		snprintf(err, errlen, "AES-CTR failed");

@@ -43,6 +43,12 @@ int http_request(const char *host, const char *path, const char *method,
  * back: those carry host, path and a query that must be passed through
  * untouched. `limit` is required here -- an audio file is megabytes. */
 int http_get_url(const char *url, size_t limit, http_reply *out);
+
+/* The same, asking the CDN for only the first `bytes` of the file. Enough to
+ * start playing -- and, for a probe, enough to prove the chain without waiting
+ * on megabytes. 0 means the whole file. */
+int http_get_url_range(const char *url, size_t bytes, size_t limit,
+                       http_reply *out);
 void http_reply_free(http_reply *r);
 
 /* Percent-encodes everything outside the unreserved set, for form bodies. */

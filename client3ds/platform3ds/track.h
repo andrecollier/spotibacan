@@ -41,9 +41,12 @@ typedef struct {
  *
  * Returns 0, AP_KEY_REFUSED when Spotify withholds the key for this account,
  * or -1. */
+/* `bytes` asks the CDN for only the first N bytes; 0 fetches the whole file.
+ * `progress` may be NULL -- without it, four services hide behind one call. */
 int  track_fetch(const char *sp_host, const char *token, ap_session *ap,
-                 const char *track_uri, size_t limit, track_audio *out,
-                 char *err, size_t errlen);
+                 const char *track_uri, size_t bytes, size_t limit,
+                 void (*progress)(const char *step),
+                 track_audio *out, char *err, size_t errlen);
 
 void track_free(track_audio *t);
 

@@ -178,6 +178,9 @@ static int finish(tls_conn *c, size_t limit, http_reply *out)
 	return 0;
 }
 
+/* Set for the next request only; the CDN is the only caller that needs it. */
+static size_t pending_range;
+
 int http_request(const char *host, const char *path, const char *method,
                  const char *bearer, const char *ctype, const char *accept,
                  const void *body, size_t len, size_t limit, http_reply *out)
@@ -199,12 +202,23 @@ int http_request(const char *host, const char *path, const char *method,
 		return -1;
 	}
 
+	/* The range goes into its own buffer rather than being spliced in with
+	 * ternaries: a %u conversion cannot be skipped the way a %s can, so with
+	 * no range set it still printed a stray "0" into the headers and
+	 * malformed every single request. */
+	char range[48] = "";
+	if (pending_range)
+		snprintf(range, sizeof(range), "Range: bytes=0-%u\r\n",
+		         (unsigned)(pending_range - 1));
+	pending_range = 0;
+
 	int n = snprintf(head, headcap,
 	                 "%s %s HTTP/1.1\r\nHost: %s\r\n"
 	                 "User-Agent: 3ds-spotify/0.1\r\n"
 	                 "%s%s%s"
 	                 "%s%s%s"
 	                 "%s%s%s"
+	                 "%s"
 	                 "Content-Length: %u\r\nConnection: close\r\n\r\n",
 	                 method, path, host,
 	                 bearer ? "Authorization: Bearer " : "", bearer ? bearer : "",
@@ -213,6 +227,7 @@ int http_request(const char *host, const char *path, const char *method,
 	                 ctype ? "\r\n" : "",
 	                 accept ? "Accept: " : "", accept ? accept : "",
 	                 accept ? "\r\n" : "",
+	                 range,
 	                 (unsigned)len);
 	if (n < 0 || (size_t)n >= headcap) {
 		snprintf(out->err, sizeof(out->err), "request headers too long");
@@ -286,4 +301,13 @@ int http_get_url(const char *url, size_t limit, http_reply *out)
 	/* The path keeps its query exactly as given: the CDN signature covers it. */
 	return http_request(host, slash, "GET", NULL, NULL, NULL, NULL, 0,
 	                    limit, out);
+}
+
+int http_get_url_range(const char *url, size_t bytes, size_t limit,
+                       http_reply *out)
+{
+	pending_range = bytes;
+	int rc = http_get_url(url, limit, out);
+	pending_range = 0;
+	return rc;
 }

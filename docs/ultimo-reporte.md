@@ -210,3 +210,41 @@ Con la clave destrabada, las piezas que faltaban se escribieron en C:
   se busca el magic `OggS`: el señuelo *es* una página OggS, así que la primera coincidencia es
   la equivocada. Y hay una comprobación explícita de que en el byte 167 aparece `OggS`, que es
   la forma barata de detectar una clave equivocada antes de pasarle basura al decodificador.
+
+## Verificado en consola emulada
+
+```
+4. pista, clave y descarga...
+   ... metadata
+   ... storage-resolve
+   ... clave de audio
+   ... descarga del CDN
+   ... descifrado
+   The Killers - Mr. Brightside
+   Vorbis 160, 1048576 bytes
+   resolve 2205  key 902  download 7002  decrypt 249 ms
+5. decodificar y sonar...
+   44100 Hz, 2 canales
+   ndspInit fallo (emulador sin firmware del DSP)
+```
+
+Que stb_vorbis lea la cabecera del stream **descifrado** prueba dos cosas a la vez: la clave es
+correcta y el salto de 167 bytes también. Si cualquiera de las dos estuviera mal, no habría
+Vorbis que abrir.
+
+Falta oírlo, y eso el emulador no puede: NDSP necesita la firmware del DSP de la consola.
+
+Los tiempos son del emulador y no valen como medida, salvo uno que da una idea útil: **249 ms
+para descifrar 1 MB**. A 160 kbps eso es un segundo de CPU por cada ~80 segundos de audio, así
+que el AES no va a ser el cuello de botella ni en hardware.
+
+## Dos errores propios en esta tanda
+
+1. **Reporté un arreglo sin verificar el archivo.** La edición de la cabecera `Range` no hizo
+   match y la di por aplicada; el `0` suelto siguió malformando todas las peticiones y la app
+   moría en el primer pedido. Lo que lo destrabó fue bisecar con `probe_meta`, compilado antes
+   del cambio, que corría perfecto con la misma cuenta y el mismo entorno — eso descartó el
+   entorno y dejó solo mi código nuevo.
+2. **Una conversión `%u` no se puede omitir como una `%s`.** Intercalar `Range` con ternarios
+   dentro del formato imprimía un `0` cuando no había rango. Ahora la cabecera se arma en su
+   propio buffer.
