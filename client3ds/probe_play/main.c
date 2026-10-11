@@ -75,6 +75,11 @@ static void frame(void)
 	gspWaitForVBlank();
 }
 
+static void track_step(const char *step)
+{
+	say("   ... %s\n", step);
+}
+
 int main(int argc, char **argv)
 {
 	(void)argc;
@@ -153,8 +158,11 @@ int main(int argc, char **argv)
 
 	say("4. pista, clave y descarga...\n");
 	track_audio tr;
-	rc = track_fetch(sp_host, l5.access_token, ap, SAMPLE_TRACK, TRACK_LIMIT,
-	                 &tr, err, sizeof(err));
+	/* One megabyte is about 50 seconds at 160 kbps: enough to prove the chain
+	 * and hear it, without waiting on the whole file. */
+	rc = track_fetch(sp_host, l5.access_token, ap, SAMPLE_TRACK,
+	                 1024 * 1024, TRACK_LIMIT, track_step, &tr,
+	                 err, sizeof(err));
 	/* The key was the only thing the session was for. */
 	ap_close(ap);
 	if (rc != 0) {
