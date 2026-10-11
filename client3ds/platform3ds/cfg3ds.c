@@ -1,5 +1,6 @@
 #include "cfg3ds.h"
 
+#include <dirent.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -14,12 +15,14 @@ void cfg_set_path(const char *argv0)
 		char *slash = strrchr(path, '/');
 		if (slash) {
 			slash[1] = '\0';
-			strncat(path, CFG_NAME, sizeof(path) - strlen(path) - 1);
-			/* Confirm the directory is actually writable here; under an
-			 * emulator argv[0] is a host path the guest cannot open. */
-			FILE *probe = fopen(path, "a");
-			if (probe) {
-				fclose(probe);
+			/* Confirm the directory is really there before using it: under an
+			 * emulator argv[0] is a host path the guest cannot reach. Asking
+			 * opendir rather than opening the file for append, which would
+			 * leave an empty spotify.cfg behind on every first run. */
+			DIR *dir = opendir(path);
+			if (dir) {
+				closedir(dir);
+				strncat(path, CFG_NAME, sizeof(path) - strlen(path) - 1);
 				return;
 			}
 		}

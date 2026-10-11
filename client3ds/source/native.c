@@ -29,8 +29,20 @@ static void nlog(const char *fmt, ...)
 	vsnprintf(line, sizeof(line), fmt, ap);
 	va_end(ap);
 	fputs(line, stderr);
-	if (!logf)
-		logf = fopen("sdmc:/native.log", "a");
+	if (!logf) {
+		/* Beside the .3dsx, like the token and the device id: everything the
+		 * app owns lives in its own folder, so the card stays clean and the
+		 * whole app is one directory to copy or delete. */
+		char path[320];
+		snprintf(path, sizeof(path), "%s", cfg_path());
+		char *slash = strrchr(path, '/');
+		if (slash)
+			slash[1] = '\0';
+		else
+			path[0] = '\0';
+		strncat(path, "native.log", sizeof(path) - strlen(path) - 1);
+		logf = fopen(path, "a");
+	}
 	if (logf) {
 		fputs(line, logf);
 		fflush(logf);
