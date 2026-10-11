@@ -4,9 +4,16 @@ Fecha: 2026-10-10 · Rama: `develop` (creada en este turno; antes solo existía 
 
 ## Resultado
 
-TLS 1.2 contra Spotify funciona desde el 3DS en lo que se puede verificar sin consola:
-mbedTLS 3.6.7 compila para ARM11, el probe enlaza y empaqueta en un .3dsx de 395 KB, y el
-bundle de anclas valida las 7 cadenas reales de Spotify. **Falta correrlo en hardware.**
+**Fase 1 cerrada y verificada corriendo.** El probe se ejecutó en Azahar y habló TLS 1.2 con
+los 5 hosts de Spotify: cadena verificada contra nuestras 11 anclas, SNI, reanudación por
+session ticket, y un GET HTTPS real a apresolve que devolvió 613 bytes descifrados con la lista
+de access points. Log completo en `docs/fase1-probe-azahar.log`.
+
+El dato de diseño que salió de la corrida: **los cinco hosts aceptaron
+ECDHE-CHACHA20-POLY1305**, que es justo lo que queremos porque el ARM11 no tiene instrucciones
+AES. Las pruebas desde la Mac daban AES-GCM solo porque OpenSSL lo prefiere en su orden; con
+nuestra lista de suites, ChaCha20 gana en todos. `i.scdn.co` va por ECDHE-**ECDSA**, los otros
+cuatro por ECDHE-**RSA**: las dos familias hacen falta.
 
 ## Qué se construyó
 
@@ -60,10 +67,35 @@ handshake. Todo va también a `spotify-tls.log` al lado del .3dsx.
 - `Certainly Root R1` cruzado entre dos fuentes independientes, mismo SHA-256
   `77:B8:2C:D8:…:D3:A0` (copia de PSPotify y export de Mozilla).
 
+## Corrida en Azahar
+
+Azahar implementa `SOC_U` sobre sockets del host, así que la red es real: el handshake, la
+verificación de cadena y el descifrado son los de verdad. Resultado, 5/5 hosts:
+
+```
+trust anchors: 11
+apresolve.spotify.com    TLSv1.2 TLS-ECDHE-RSA-WITH-CHACHA20-POLY1305-SHA256   verify ok
+login5.spotify.com       TLSv1.2 TLS-ECDHE-RSA-WITH-CHACHA20-POLY1305-SHA256   verify ok
+accounts.spotify.com     TLSv1.2 TLS-ECDHE-RSA-WITH-CHACHA20-POLY1305-SHA256   verify ok
+spclient.wg.spotify.com  TLSv1.2 TLS-ECDHE-RSA-WITH-CHACHA20-POLY1305-SHA256   verify ok
+i.scdn.co                TLSv1.2 TLS-ECDHE-ECDSA-WITH-CHACHA20-POLY1305-SHA256 verify ok
+
+-- apresolve over HTTPS --
+  613 bytes, ap: ap-guc3.spotify.com:4070","ap-guc3.spotify.com:443","ap-guc3
+```
+
+Cómo se lee la salida sin cámara: el probe escribe a `stdout` (pantalla), a `stderr`
+(`svcOutputDebugString`, que el emulador registra) y al log. En Azahar el log queda en
+`~/Library/Application Support/Azahar/sdmc/spotify-tls.log` — de ahí el fallback a la raíz de
+la tarjeta cuando `argv[0]` es una ruta del host que el guest no puede abrir.
+
 ## No verificado
 
-- **Nada corrió en consola.** No hay 3DS ni emulador en esta Mac, así que el handshake real,
-  los tiempos y el consumo de RAM siguen sin medir. Es lo único que cierra la Fase 1.
+- **Los tiempos del log no valen.** El emulador corre sobre la CPU de la Mac y Azahar deja
+  `ConfigureNew3DSCPU` sin implementar, así que las dos tandas (268 y 804 MHz) salen casi
+  iguales — prueba de que las etiquetas no significan nada ahí. Los milisegundos reales y el
+  consumo de RAM siguen pendientes de una corrida en la consola; no bloquean la Fase 2.
+  Lo único que el emulador sí insinúa es la proporción del ticket: ~850 ms → ~320 ms.
 - `ap-guc3.spotify.com:443` no contesta desde esta red (sí el 4070 que anuncia apresolve).
   A anotar para la Fase 3; no afecta a la Fase 1.
 
@@ -72,5 +104,10 @@ handshake. Todo va también a `spotify-tls.log` al lado del .3dsx.
 ```bash
 python3 client3ds/deps.py --probe && python3 client3ds/build.py --app probe_tls
 ```
-Copiar `client3ds/dist/3ds/` a la raíz de la SD y lanzar `probe_tls` desde el Homebrew Launcher
-con el Wi-Fi encendido. Deja `spotify-tls.log` en `SD:/3ds/probe_tls/`.
+En Azahar, sin tocar la SD:
+```bash
+/Applications/Azahar.app/Contents/MacOS/azahar \
+    client3ds/dist/3ds/probe_tls/probe_tls.3dsx
+```
+En la consola: copiar `client3ds/dist/3ds/` a la raíz de la SD y lanzar `probe_tls` desde el
+Homebrew Launcher con el Wi-Fi encendido. Deja `spotify-tls.log` en `SD:/3ds/probe_tls/`.

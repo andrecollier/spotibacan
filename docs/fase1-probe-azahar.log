@@ -1,0 +1,49 @@
+3DS Spotify -- TLS 1.2 probe
+mbedTLS 3.6.7, built 22:45:37
+
+trust anchors: 11
+console: New 3DS
+
+==== 268 MHz ====
+apresolve.spotify.com    TLSv1.2 TLS-ECDHE-RSA-WITH-CHACHA20-POLY1305-SHA256
+  dns 0  tcp 173  handshake 852 ms  verify ok
+  again: handshake 318 ms (ticket reused)
+login5.spotify.com       TLSv1.2 TLS-ECDHE-RSA-WITH-CHACHA20-POLY1305-SHA256
+  dns 0  tcp 142  handshake 852 ms  verify ok
+  again: handshake 334 ms (ticket reused)
+accounts.spotify.com     TLSv1.2 TLS-ECDHE-RSA-WITH-CHACHA20-POLY1305-SHA256
+  dns 0  tcp 92  handshake 669 ms  verify ok
+  again: handshake 282 ms (ticket reused)
+spclient.wg.spotify.com  TLSv1.2 TLS-ECDHE-RSA-WITH-CHACHA20-POLY1305-SHA256
+  dns 0  tcp 142  handshake 903 ms  verify ok
+  again: handshake 451 ms (ticket reused)
+i.scdn.co                TLSv1.2 TLS-ECDHE-ECDSA-WITH-CHACHA20-POLY1305-SHA256
+  dns 0  tcp 125  handshake 1153 ms  verify ok
+  again: handshake 301 ms (ticket reused)
+
+-- apresolve over HTTPS --
+  613 bytes, ap: ap-guc3.spotify.com:4070","ap-guc3.spotify.com:443","ap-guc3
+
+==== 804 MHz (New 3DS) ====
+apresolve.spotify.com    TLSv1.2 TLS-ECDHE-RSA-WITH-CHACHA20-POLY1305-SHA256
+  dns 0  tcp 104  handshake 334 ms  verify ok
+  again: handshake 334 ms (ticket reused)
+login5.spotify.com       TLSv1.2 TLS-ECDHE-RSA-WITH-CHACHA20-POLY1305-SHA256
+  dns 0  tcp 109  handshake 802 ms  verify ok
+  again: handshake 334 ms (ticket reused)
+accounts.spotify.com     TLSv1.2 TLS-ECDHE-RSA-WITH-CHACHA20-POLY1305-SHA256
+  dns 0  tcp 109  handshake 735 ms  verify ok
+  again: handshake 267 ms (ticket reused)
+spclient.wg.spotify.com  TLSv1.2 TLS-ECDHE-RSA-WITH-CHACHA20-POLY1305-SHA256
+  dns 0  tcp 109  handshake 819 ms  verify ok
+  again: handshake 334 ms (ticket reused)
+i.scdn.co                TLSv1.2 TLS-ECDHE-ECDSA-WITH-CHACHA20-POLY1305-SHA256
+  dns 0  tcp 125  handshake 1036 ms  verify ok
+  again: handshake 297 ms (ticket reused)
+
+-- apresolve over HTTPS --
+  613 bytes, ap: ap-guc3.spotify.com:4070","ap-guc3.spotify.com:443","ap-guc3
+
+Done. Log written beside the .3dsx.
+
+Press START to exit.

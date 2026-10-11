@@ -40,6 +40,9 @@ static void say(const char *fmt, ...)
 	vsnprintf(line, sizeof(line), fmt, ap);
 	va_end(ap);
 	fputs(line, stdout);
+	/* stderr is libctru's svcOutputDebugString, which an emulator records in
+	 * its own log -- the only way to read this run without a camera. */
+	fputs(line, stderr);
 	if (logf) {
 		fputs(line, logf);
 		fflush(logf);
@@ -48,17 +51,22 @@ static void say(const char *fmt, ...)
 
 static void open_log(const char *argv0)
 {
-	/* argv[0] is sdmc:/3ds/<app>/<app>.3dsx under the Homebrew Launcher, so the
-	 * log lands next to the executable instead of at the card root. */
-	char path[256];
-	snprintf(path, sizeof(path), "%s", argv0 && argv0[0] ? argv0 : "spotify-tls");
-	char *slash = strrchr(path, '/');
-	if (slash)
-		slash[1] = '\0';
-	else
-		path[0] = '\0';
-	strncat(path, "spotify-tls.log", sizeof(path) - strlen(path) - 1);
-	logf = fopen(path, "w");
+	/* Under the Homebrew Launcher argv[0] is sdmc:/3ds/<app>/<app>.3dsx, so the
+	 * log lands beside the executable. An emulator loading the .3dsx from a
+	 * host path gives an argv[0] the guest cannot open, hence the fallback to
+	 * the card root. */
+	if (argv0 && argv0[0]) {
+		char path[256];
+		snprintf(path, sizeof(path), "%s", argv0);
+		char *slash = strrchr(path, '/');
+		if (slash) {
+			slash[1] = '\0';
+			strncat(path, "spotify-tls.log", sizeof(path) - strlen(path) - 1);
+			logf = fopen(path, "w");
+		}
+	}
+	if (!logf)
+		logf = fopen("sdmc:/spotify-tls.log", "w");
 }
 
 /* A GET over an established connection, just enough to prove the plaintext
