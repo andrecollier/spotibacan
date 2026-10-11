@@ -8,6 +8,7 @@
 #include <3ds.h>
 #include <citro2d.h>
 
+#include "cfg3ds.h"
 #include "native.h"
 #include <arpa/inet.h>
 #include <ctype.h>
@@ -883,9 +884,13 @@ static bool pair_poll_frame(int attempt)
 	return aptMainLoop();
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
+	(void)argc;
 	gfxInitDefault();
+	// The token belongs beside the .3dsx, like every other app here; without
+	// this it would land at the card root and not match the probes.
+	cfg_set_path((argv && argv[0]) ? argv[0] : NULL);
 	load_config();
 	if (native_mode)
 		sample_rate = 44100;     // Spotify's Vorbis; the config rate is the bridge's
@@ -916,9 +921,27 @@ int main(void)
 		audio = linearAlloc(buf_bytes * WAVE_BUFFERS);
 		if (!audio) fail = "Audio memory failed.";
 	}
+	consoleInit(GFX_TOP, NULL);
+	printf("\n  audio3ds  %s\n", BUILD_STAMP);
+	printf("  modo: %s\n", native_mode ? "SPOTIFY (nativo)" : "PUENTE");
+	printf("  config: %s\n", cfg_path());
+	printf("  token guardado: %s\n", native_has_token() ? "si" : "no");
+	if (!native_mode) {
+		printf("\n  Esta en modo PUENTE porque hay un server.txt\n");
+		printf("  con host:puerto en la carpeta de la app.\n");
+		printf("  Borra ese archivo para usar Spotify.\n");
+		printf("\n  START para continuar igual.\n");
+		while (aptMainLoop()) {
+			hidScanInput();
+			if (hidKeysDown() & KEY_START) break;
+			gfxFlushBuffers();
+			gfxSwapBuffers();
+			gspWaitForVBlank();
+		}
+	}
+
 	if (!fail && native_mode) {
-		consoleInit(GFX_TOP, NULL);
-		printf("\n  Spotify nativo\n\n");
+		printf("\n");
 		static char nat_err[192];
 		static const native_sink sink = { ring_sink_write, ring_free_space };
 		// First run on a console: pair here rather than in a separate tool.
