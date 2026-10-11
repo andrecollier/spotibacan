@@ -38,18 +38,33 @@ niega es la clave para descifrarlos.
   del AP, y con `seq` 0 y siguientes.
 - **No es ese tema en particular.** Un segundo tema falla igual.
 
-## Las dos explicaciones que quedan
+## RESUELTO: no es el código. Es un bug conocido de Spotify, sin arreglo
 
-1. **La cuenta tiene una o dos horas de vida.** Es plausible que el servicio de claves de audio
-   esté restringido para cuentas nuevas por antiabuso, justamente porque es el paso que permite
-   bajarse el audio.
-2. **Spotify dejó de servir esta ruta a clientes no oficiales**, recientemente. PSPotify-ME se
-   mergeó el 11-oct-2026 diciendo que le funciona, y su propio README advierte que usa servicios
-   privados que "pueden cambiar o bloquear en cualquier momento".
+Emilio corrió librespot con la misma cuenta y **falla exactamente igual**:
 
-No puedo distinguirlas desde acá, y las dos están fuera del código.
+```
+ERROR librespot_core::audio_key] error audio key 0 1
+WARN  Unable to load key, continuing without decryption: Service unavailable
+ERROR Unable to read audio file: Symphonia Decoder Error: end of stream
+ERROR Skipping to next track, unable to load track
+DEBUG marking spotify:track:... as unavailable
+```
 
-## El test que lo resuelve, y que necesita a Emilio
+`error audio key 0 1` es literalmente el mismo `0001`. Y lo que parecía reproducción era el
+salteo: baja el archivo, no consigue la clave, intenta decodificar bytes cifrados, falla con
+"end of stream" y pasa al siguiente. Nunca sonó nada.
+
+Es [librespot#1649](https://github.com/librespot-org/librespot/issues/1649), **abierto desde el
+21-nov-2025 y sin arreglo**. Los mantenedores no lo pueden reproducir; kingosticks especuló
+"They may be phasing out this way of getting the key", sin confirmar.
+
+Lo decisivo para nosotros es [#1735](https://github.com/librespot-org/librespot/issues/1735),
+cerrado como duplicado: **una cuenta Premium falla y otra funciona en la misma máquina**. O sea
+que la variable es la cuenta, no el software ni el código. El reportante sospechó de la edad de
+la cuenta, pero otro usuario vio el fallo en una vieja y en una nueva, así que la edad por sí
+sola no lo explica.
+
+## El test que lo resolvió
 
 Correr **librespot**, que ya está instalado (0.8.0), con la misma cuenta, y hacerle llegar una
 orden de reproducción desde el teléfono o la compu:
@@ -65,12 +80,11 @@ Después, en Spotify del teléfono o de la compu, elegir **prueba-3ds** en la li
 grep -iE "audio key|aeskey|error" /tmp/librespot.log | head
 ```
 
-Lo que dice cada resultado:
+Resultado: librespot también falla. Queda descartado el port.
 
-- **librespot suena** → el problema es mío y sigo buscando con una referencia que funciona al lado.
-- **librespot también falla en la clave de audio** → no es el port. Es la cuenta nueva o es
-  Spotify, y entonces la salida es esperar unos días con la cuenta en uso normal, o probar con
-  una cuenta Premium más vieja.
+**La única variable que se sabe que da vuelta el resultado es la cuenta.** Si Emilio consigue
+otra cuenta Premium, se prueba en diez minutos: el cliente ya está escrito hasta la clave, y el
+resto de la cadena (storage-resolve, CDN, AES-CTR) está entendido y documentado.
 
 ## Mi propio bug, encontrado por el camino
 
