@@ -90,6 +90,73 @@ static void step(void (*progress)(const char *), const char *what)
 		progress(what);
 }
 
+bool native_has_token(void)
+{
+	char stored[512];
+	return cfg_load_refresh_token(stored, sizeof(stored));
+}
+
+int native_pair(void (*show_code)(const char *code, const char *url),
+                bool (*poll)(int attempt), char *err, size_t errlen)
+{
+	/* Pairing needs TLS but not a session, and it runs before native_init,
+	 * so it brings up what it needs itself. Both calls are no-ops the second
+	 * time around. */
+	if (R_FAILED(psInit())) {
+		snprintf(err, errlen, "sin fuente de entropia (ps:ps)");
+		return -1;
+	}
+	int rc = tls_global_init();
+	if (rc) {
+		tls_strerror(rc, err, errlen);
+		return -1;
+	}
+
+	pair_request req;
+	if (pair_begin(&req, err, errlen) != 0)
+		return -1;
+	nlog("PAIR: code %s\n", req.user_code);
+	if (show_code)
+		show_code(req.user_code, req.verification_uri_complete[0]
+		                         ? req.verification_uri_complete
+		                         : req.verification_uri);
+
+	int interval = req.interval_s > 0 ? req.interval_s : 5;
+	time_t deadline = time(NULL) + req.expires_in_s;
+	for (int attempt = 1; time(NULL) < deadline; attempt++) {
+		/* The caller owns the frame loop, so it does the waiting and can
+		 * keep the code on screen and the buttons alive. */
+		for (int i = 0; i < interval * 60; i++)
+			if (poll && !poll(attempt)) {
+				snprintf(err, errlen, "cancelado");
+				return -1;
+			}
+
+		spotify_tokens tok;
+		char perr[192] = "";
+		pair_status st = pair_poll(&req, &tok, perr, sizeof(perr));
+		if (st == PAIR_OK) {
+			if (!tok.refresh_token[0] ||
+			    !cfg_save_refresh_token(tok.refresh_token, tok.scope)) {
+				snprintf(err, errlen, "no se pudo guardar el token");
+				return -1;
+			}
+			nlog("PAIR: ok\n");
+			return 0;
+		}
+		if (st == PAIR_SLOW_DOWN) {
+			interval += 5;
+			continue;
+		}
+		if (st != PAIR_PENDING) {
+			snprintf(err, errlen, "%s", perr[0] ? perr : "el pareo fallo");
+			return -1;
+		}
+	}
+	snprintf(err, errlen, "el codigo caduco");
+	return -1;
+}
+
 native_state native_playback_state(void) { return g.state; }
 const char *native_now_title(void)  { return g.title; }
 const char *native_now_artist(void) { return g.artist; }
@@ -249,7 +316,7 @@ int native_init(const native_sink *sink, void (*progress)(const char *step),
 	step(progress, "Reading the stored token...");
 	char stored[512];
 	if (!cfg_load_refresh_token(stored, sizeof(stored))) {
-		snprintf(err, errlen, "not paired yet; run probe_pair once");
+		snprintf(err, errlen, "sin parear");
 		return -1;
 	}
 

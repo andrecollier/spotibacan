@@ -853,6 +853,31 @@ static void native_progress(const char *step)
 	gspWaitForVBlank();
 }
 
+// The pairing code has to stay readable while the user walks to a phone, so
+// it is printed once and the waiting happens under it.
+static void pair_show_code(const char *code, const char *url)
+{
+	printf("\n\n   Entra a:\n   %s\n", url);
+	printf("\n   y escribe este codigo:\n\n       %s\n\n", code);
+	printf("   Esperando (B cancela)");
+}
+
+static bool pair_poll_frame(int attempt)
+{
+	(void)attempt;
+	hidScanInput();
+	if (hidKeysDown() & KEY_B)
+		return false;
+	// One dot per second of waiting, so a stuck pairing is visible.
+	static int ticks = 0;
+	if (++ticks % 60 == 0)
+		printf(".");
+	gfxFlushBuffers();
+	gfxSwapBuffers();
+	gspWaitForVBlank();
+	return aptMainLoop();
+}
+
 int main(void)
 {
 	gfxInitDefault();
@@ -891,6 +916,22 @@ int main(void)
 		printf("\n  Spotify nativo\n\n");
 		static char nat_err[192];
 		static const native_sink sink = { ring_sink_write, ring_free_space };
+		// First run on a console: pair here rather than in a separate tool.
+		if (!native_has_token() &&
+		    native_pair(pair_show_code, pair_poll_frame, nat_err,
+		                sizeof(nat_err)) != 0) {
+			printf("\n\n  No se pudo parear:\n  %s\n", nat_err);
+			printf("\n  START para salir.\n");
+			while (aptMainLoop()) {
+				hidScanInput();
+				if (hidKeysDown() & KEY_START) break;
+				gfxFlushBuffers();
+				gfxSwapBuffers();
+				gspWaitForVBlank();
+			}
+			gfxExit();
+			return 1;
+		}
 		if (native_init(&sink, native_progress, nat_err, sizeof(nat_err)) != 0) {
 			printf("\n  No se pudo entrar:\n  %s\n", nat_err);
 			printf("\n  START para salir.\n");

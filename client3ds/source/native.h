@@ -39,6 +39,19 @@ typedef struct {
 	unsigned (*free_space)(void);
 } native_sink;
 
+/* Pairs the console with an account when there is no stored token.
+ *
+ * The code has to stay on screen while the user walks to another device and
+ * types it in, so this cannot be a step inside native_init: the caller draws
+ * it, and this reports progress through the hook. `show_code` is called once
+ * with the code and the url; `poll` is called between attempts and returns
+ * false to give up. Returns 0 once a token is stored, or -1. */
+int  native_pair(void (*show_code)(const char *code, const char *url),
+                 bool (*poll)(int attempt), char *err, size_t errlen);
+
+/* Whether a stored token exists, i.e. whether pairing can be skipped. */
+bool native_has_token(void);
+
 /* Signs in: stored refresh token -> OAuth -> access point -> login5 ->
  * spclient. Slow enough to need a screen of its own (a second or two), so the
  * caller passes a hook that reports each step. Returns 0, or -1 with err set.
