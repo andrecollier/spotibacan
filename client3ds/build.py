@@ -22,7 +22,8 @@ ROOT = Path(__file__).resolve().parent
 # name -> (source directories, extra defines, mbedTLS flavour or None,
 #          extra single sources relative to client3ds/)
 APPS = {
-    "audio3ds":    (["source"], [], None, []),
+    # The native source brings TLS and the whole Spotify protocol with it.
+    "audio3ds":    (["source", "platform3ds"], [], "release", []),
     "probe_tls":   (["probe_tls", "platform3ds"], ["-DPROBE_BUILD"], "probe", []),
     "probe_pair":  (["probe_pair", "platform3ds"], ["-DPROBE_BUILD"], "probe", []),
     "probe_ap":    (["probe_ap", "platform3ds"], ["-DPROBE_BUILD"], "probe", []),

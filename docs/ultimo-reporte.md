@@ -1,227 +1,64 @@
-# Reporte — Fase 5: audio. Bloqueado en la clave, y no parece ser el código
+# Reporte — la biblioteca completa y la interfaz enchufada
 
-Fecha: 2026-10-10 · Rama: `develop`
+Fecha: 2026-10-11 · Rama: `develop`
 
-## Estado
+## Paso 1: contenido de playlists y Me gusta — cerrado
 
-La cadena de audio está entendida y verificada **hasta un paso antes del final**. El bloqueo es
-la clave de audio: el access point la niega con `AesKeyError 0001` en todos los casos probados.
+Faltaba resolver los URIs que daba el rootlist.
 
-```
-metadata (gid + file_id)   OK   -- 4 formatos, Vorbis 96/160/320 + AAC
-clave de audio (AP)        FAIL -- AesKeyError 0001, siempre
-storage-resolve            OK   -- result=0 (CDN), 3 URLs firmadas por formato
-descarga del CDN           sin probar (no tiene sentido sin la clave)
-descifrado AES-128-CTR     escrito, sin probar
-```
+- `GET /playlist/v2/playlist/{id}` devuelve el **mismo `SelectedListContent`** que el rootlist:
+  uno guarda URIs de playlist y el otro de pista, así que un solo recorrido sirve para los dos
+  y el rootlist pasó a usarlo también.
+- Me gusta va por `/context-resolve/v1/spotify:user:{id}:collection`, que contesta JSON con la
+  primera página entera. **La página vacía que vimos antes era la biblioteca vacía, no el
+  endpoint equivocado**: con la cuenta ya poblada, devuelve las pistas.
 
-Lo importante: **storage-resolve devuelve URLs firmadas del CDN para los cuatro formatos**, o sea
-que la cuenta sí tiene derecho a ese audio. Los bytes cifrados están disponibles; lo único que se
-niega es la clave para descifrarlos.
+Verificado en consola emulada: playlist de 37 temas con su nombre real
+("Molotov, Control Machete, Plastilina Mosh y demás incorrectos"), 24 URIs leídos, 8 nombrados
+en **un solo viaje** de metadata; y 7 Me gusta nombrados.
 
-## Lo que se descartó, con evidencia
+## Paso 2: la interfaz, enchufada al cliente nativo
 
-- **El plan de la cuenta no es el problema.** El propio AP manda un SecretBlock que contiene
-  `<type>premium</type>` y `catalogue>premium`. Es Premium, confirmado por Spotify, no por fe.
-- **El pedido es byte por byte el de librespot.** `file_id`(20) + `gid`(16) + `seq`(u32 BE) +
-  `0x0000`, paquete `0x0c`. Y el `gid` está verificado contra el base62 del URI:
-  `3n3Ppam7vgaVa1iaRUc9Lp` → `6ecac90c03f74dcba9e21b408e14719f`, igual al del metadata.
-- **No es una ruta obsoleta.** `player.rs:1111` de librespot actual sigue usando
-  `session.audio_key().request()`.
-- **No es el formato.** Los cuatro (Vorbis 96/160/320 y AAC) dan el mismo `0001`.
-- **No es restricción del tema.** El metadata no trae `restriction` ni `alternative`.
-- **No es el método de autenticación del AP.** Falla igual entrando con el token OAuth
-  (`AUTHENTICATION_SPOTIFY_TOKEN`) y con las credenciales reutilizables
-  (`AUTHENTICATION_STORED_SPOTIFY_CREDENTIALS`), que es lo que librespot usa a partir del segundo
-  arranque.
-- **No es una sesión sucia.** Falla en sesión recién abierta, con y sin drenar la ráfaga inicial
-  del AP, y con `seq` 0 y siguientes.
-- **No es ese tema en particular.** Un segundo tema falla igual.
+`audio3ds` fue escrito alrededor del puente: pide una lista a un servidor de la LAN y recibe
+JSON. El modo nativo ofrece **la misma forma** desde Spotify, así que las pieles, las carátulas,
+el teclado del sistema y la lista táctil no cambian ni una línea.
 
-## RESUELTO: no es el código. Es un bug conocido de Spotify, sin arreglo
+Se activa con una primera línea `native` en `SD:/3ds/audio3ds/server.txt`. Un `server.txt`
+existente sigue funcionando igual — era la forma de no romper nada.
 
-Emilio corrió librespot con la misma cuenta y **falla exactamente igual**:
+Qué se puede hacer, documentado en `docs/modo-nativo.md`:
 
-```
-ERROR librespot_core::audio_key] error audio key 0 1
-WARN  Unable to load key, continuing without decryption: Service unavailable
-ERROR Unable to read audio file: Symphonia Decoder Error: end of stream
-ERROR Skipping to next track, unable to load track
-DEBUG marking spotify:track:... as unavailable
-```
-
-`error audio key 0 1` es literalmente el mismo `0001`. Y lo que parecía reproducción era el
-salteo: baja el archivo, no consigue la clave, intenta decodificar bytes cifrados, falla con
-"end of stream" y pasa al siguiente. Nunca sonó nada.
-
-Es [librespot#1649](https://github.com/librespot-org/librespot/issues/1649), **abierto desde el
-21-nov-2025 y sin arreglo**. Los mantenedores no lo pueden reproducir; kingosticks especuló
-"They may be phasing out this way of getting the key", sin confirmar.
-
-Lo decisivo para nosotros es [#1735](https://github.com/librespot-org/librespot/issues/1735),
-cerrado como duplicado: **una cuenta Premium falla y otra funciona en la misma máquina**. O sea
-que la variable es la cuenta, no el software ni el código. El reportante sospechó de la edad de
-la cuenta, pero otro usuario vio el fallo en una vieja y en una nueva, así que la edad por sí
-sola no lo explica.
-
-## El test que lo resolvió
-
-Correr **librespot**, que ya está instalado (0.8.0), con la misma cuenta, y hacerle llegar una
-orden de reproducción desde el teléfono o la compu:
-
-```bash
-librespot --name "prueba-3ds" --backend pipe --verbose 2>&1 | tee /tmp/librespot.log
-```
-
-Después, en Spotify del teléfono o de la compu, elegir **prueba-3ds** en la lista de dispositivos
-(Connect) y darle play a cualquier tema. Y buscar en el log:
-
-```bash
-grep -iE "audio key|aeskey|error" /tmp/librespot.log | head
-```
-
-Resultado: librespot también falla. Queda descartado el port.
-
-**La única variable que se sabe que da vuelta el resultado es la cuenta.** Si Emilio consigue
-otra cuenta Premium, se prueba en diez minutos: el cliente ya está escrito hasta la clave, y el
-resto de la cadena (storage-resolve, CDN, AES-CTR) está entendido y documentado.
-
-## Mi propio bug, encontrado por el camino
-
-La referencia en Python avanzaba el nonce de Shannon **antes** de leer el header, así que un
-timeout consumía un nonce sin consumir bytes y desincronizaba el cifrador para siempre: la sesión
-quedaba muerta sin ningún error que lo dijera. **El C no tiene este bug** — `ap_recv()` lee el
-header primero y recién entonces avanza el nonce, y para eso existe `ap_wait()`. Vale anotarlo
-porque es la clase de error que no da síntomas útiles: no falla la lectura, fallan todas las
-siguientes.
-
-## Lo que sí quedó listo de la Fase 5
-
-- `storage-resolve` entendido y probado: `GET /storage-resolve/files/audio/interactive/<file_id hex>`
-  devuelve `StorageResolveResponse` con `result` (0 = CDN) y hasta 3 URLs firmadas con expiración.
-- El pedido de clave y la respuesta: paquetes `0x0c` / `0x0d` / `0x0e` sobre la sesión Shannon.
-- El descifrado: AES-128-CTR con el IV fijo
-  `72 e0 67 fb dd cb cf 77 eb e8 bc 64 3f 63 0d 93`, contador por bloque desde el offset del
-  archivo.
-- Que el header de Spotify antes del Ogg **no se hardcodea**: se busca el magic `OggS`, que es
-  robusto y además dice cuál es el offset real.
-
-Nada de esto se escribió todavía en C para la consola: habría sido escribir contra un paso que no
-se puede probar.
-
----
-
-# Fase 5b: el decodificador Vorbis y la salida de audio
-
-Fecha: 2026-10-11
-
-Con la clave bloqueada por Spotify, la otra mitad de la Fase 5 sí se puede hacer: decodificar
-Vorbis en el ARM11 y sacarlo por NDSP. **Es el último desconocido técnico grande del proyecto** —
-es donde el PSP tuvo que recurrir al Media Engine, su segundo procesador, y el 3DS no tiene
-equivalente que valga la pena: el decodificador comparte el ARM11 con la red y la interfaz.
-
-## Qué se construyó
-
-- `deps/stb_vorbis.c` v1.22 (dominio público), pineado por SHA-256 igual que mbedTLS y bajado
-  por `deps.py`.
-- `probe_audio/` — lee `test.ogg` de la tarjeta y hace **dos pasadas separadas**:
-  1. **Solo decodificar**, sin audio de por medio. Es la medición que importa y la única
-     portable.
-  2. **Reproducir por NDSP**, que necesita la firmware del DSP de la consola.
-- `tools/make_test_ogg.py` — genera los archivos de prueba desde cualquier tema local.
-
-Separarlas no fue cosmético: la primera versión las mezclaba y **se colgó** esperando que NDSP
-liberara un buffer que nunca iba a liberar. Ahora una firmware ausente cuesta la prueba de
-reproducción, no el banco de pruebas, y el bucle de reproducción se rinde tras 600 vueltas en
-vez de girar para siempre.
-
-## Resultado en Azahar
-
-```
-44100 Hz, 2 ch, 1543552 frames (0:35)
-decoder memory: 162160 setup + 4096 temp bytes
-
--- pass 1: decode only --
-   1543552 frames = 35.0 s of audio
-   decode cpu 2408 ms over 378 chunks (6.4 ms each, worst 7.6)
-   REALTIME FACTOR: 14.54x
-
--- pass 2: playback through NDSP --
-   ndspInit failed: no DSP firmware.
-```
-
-**Correcto**: decodificó los 1.543.552 frames exactos, los 35,0 s completos, sin errores. El
-decodificador y su integración funcionan.
-
-**El 14,54x no vale como número de rendimiento**: es la CPU de la Mac. Y haciendo la cuenta al
-revés, tampoco es tranquilizador: un núcleo moderno hace este trabajo en el orden de 30 a 60
-veces lo que un ARM11 a 268 MHz, así que 14,54x podría traducirse a **menos de 1x en la consola**.
-No es una predicción —el factor de conversión es muy grueso— pero sí es razón suficiente para no
-dar por ganada esta fase.
-
-Dos cosas juegan a favor: el archivo de prueba es de **230 kbps**, bastante más duro que los 160
-de Spotify, y el New 3DS corre a 804 MHz con `osSetSpeedupEnable`.
-
-Si no alcanza, el plan B está claro y es conocido: **tremor (libvorbisidec)**, el decodificador
-Vorbis de enteros que usan los reproductores tipo Rockbox. stb_vorbis es de punto flotante y el
-VFP del ARM11 es lento; tremor existe precisamente para este caso.
-
-## Esto hay que correrlo en la consola
-
-Es la primera vez que el emulador no puede contestar la pregunta: NDSP necesita la firmware del
-DSP, y el número de rendimiento necesita el ARM11 de verdad.
-
-Copiar a la SD la carpeta `client3ds/dist/3ds/`, que ya queda armada con:
-
-```
-SD:/3ds/probe_audio/probe_audio.3dsx
-SD:/3ds/probe_audio/test.ogg        (230 kbps, el caso duro)
-SD:/3ds/probe_audio/test-low.ogg    (97 kbps, para comparar)
-```
-
-Lanzarlo del Homebrew Launcher. Deja `spotify-audio.log` al lado. Lo que hay que mirar:
-
-- **REALTIME FACTOR** de la pasada 1. Por encima de 3x es cómodo; entre 1,5x y 3x es justo pero
-  alcanza; por debajo de 1,5x hay que pasar a tremor.
-- **underruns** de la pasada 2, que deben ser 0.
-- Si suena limpio.
-
-## Medido en hardware (11-oct-2026)
-
-```
-REALTIME FACTOR: 5.37x
-underruns:       0
-suena limpio
-```
-
-**Cierra la fase.** Con el archivo duro de 230 kbps, decodificar cuesta ~19% de un núcleo, y
-Spotify sirve 160, así que va a costar menos. Además se logró **sin** `osSetSpeedupEnable`, o sea
-a 268 MHz: los 804 MHz del New 3DS quedan enteros en reserva. Sobra CPU para TLS, red e interfaz
-a la vez, y **no hace falta tremor** — stb_vorbis alcanza de sobra.
-
-Queda anotado que mi estimación previa ("podría quedar por debajo de 1x") estaba equivocada:
-extrapolar del emulador al ARM11 con un factor de 30-60x subestimaba mucho la consola. La
-medición en hardware era la única forma de saberlo, y por eso valía la pena pedirla.
-
-## Dónde queda el proyecto
-
-| Fase | Estado |
+| Acción | Resultado |
 |---|---|
-| 1 — TLS 1.2 | verificado |
-| 2 — pairing | verificado, sobrevive rearranques |
-| 3 — sesión con el access point | verificado, APWelcome y pings |
-| 4 — metadata, búsqueda, radio, playlists | verificado |
-| 5a — clave de audio | **bloqueado por Spotify** (librespot#1649) |
-| 5b — decodificador Vorbis + NDSP | verificado en hardware, 5.37x |
+| Arranque | la lista abre en tus playlists, con **Me gusta** de primera fila |
+| **A** sobre una lista | entra y muestra sus temas |
+| **A** sobre un tema | arma una **radio** a partir de él |
+| **B** | vuelve atrás |
+| **Y** | teclado del sistema, busca en el catálogo de Spotify |
+| **L / R** | pasa página **sin pedir nada a la red** |
 
-Todo lo que depende de nosotros está hecho y medido. El único eslabón que falta es la clave de
-audio, que no es del código: librespot falla igual en esta cuenta.
+**No reproduce**, y la pantalla superior lo dice en vez de fingir. Esa es la Fase 5a, bloqueada.
 
-## Lo que este resultado destraba por otro lado
+### Decisiones que valen
 
-El puente (`server/bridge.py`) hoy manda **PCM crudo**, entre 706 y 1024 kbps, que según las
-pruebas de septiembre estaba en el borde del 802.11g del 3DS y obligó a bajar a 22050 Hz. Ahora
-que la consola decodifica Vorbis a 5.37x, el puente podría mandar **Vorbis de 160 kbps**: unas
-seis veces menos caudal, techo de ancho de banda eliminado, y 44.1 kHz completos en vez de
-22050. El decodificador ya está escrito y medido; sería cambiar la fuente del puente y enchufar
-el mismo código.
+- **Pasar página no cuesta red.** La vista se descarga una vez y las páginas se recortan de lo
+  que ya está en memoria; sólo se vuelve a pedir si cambia la vista o la consulta. En esta
+  consola el coste son los viajes de ida y vuelta.
+- **Los nombres se piden en lote.** Una pantalla de resultados cuesta un viaje, no uno por fila.
+- **La radio no cuesta ni ese lote**: `radio-apollo` trae los títulos adentro.
+- **Los nombres de las playlists se piden al abrirlas**, no al listarlas: hacerlo por fila sería
+  una petición por lista para nombres que casi nunca se miran. Mientras tanto la fila dice
+  "Lista N", que es feo y honesto.
+- **La sesión del access point se cierra** después de login5. Mantenerla abierta sólo serviría
+  para pedir claves de audio, que es justo lo que Spotify niega.
+- **Hay log en `SD:/native.log`**, porque la interfaz tapa la consola de texto y sin eso un
+  fallo de red se vería como una lista vacía y nada más.
+
+### Dos bugs del camino
+
+1. El modo nativo levantaba sin pedir jamás la biblioteca. **`lib_reload` lo consume el hilo de
+   comandos del puente**, que en modo nativo no arranca. Ahora hay un hilo propio que lo
+   atiende — y sigue estando fuera del bucle de render por la misma razón de siempre: una
+   petición de un segundo no puede congelar la interfaz.
+2. Las dos funciones de lista usaban anchos de URI distintos (96 y 64). Unificado en 64:
+   `spotify:playlist:` más 22 caracteres son 39, así que sobra.

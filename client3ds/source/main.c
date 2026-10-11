@@ -8,6 +8,7 @@
 #include <3ds.h>
 #include <citro2d.h>
 
+#include "native.h"
 #include "wps.h"
 #include <arpa/inet.h>
 #include <ctype.h>
@@ -61,6 +62,21 @@ typedef struct {
 } Library;
 static Library lib;
 static volatile bool lib_reload = false;
+
+// ------------------------------------------------------------- native mode
+// The same list, filled from Spotify instead of from the bridge. Browsing
+// only: the audio key is refused by Spotify for this account, so nothing here
+// can start a track. Selected with a first line of "native" in server.txt.
+static bool native_mode = false;
+static native_view nat_view = NATIVE_PLAYLISTS;
+static char nat_arg[64] = "";
+static char nat_title[48] = "Listas";
+static native_row nat_rows[NATIVE_ROWS];
+static int  nat_count = 0;
+static char nat_status[64] = "";
+// What the cached rows correspond to, so turning a page does not refetch.
+static native_view nat_loaded_view = (native_view)-1;
+static char nat_loaded_arg[64] = "\x01";
 
 // Audio runs on its own thread: the system keyboard suspends the main loop,
 // and four wave buffers hold only a quarter second.
@@ -496,9 +512,59 @@ static void url_escape(const char *in, char *out, size_t size)
 	out[j] = 0;
 }
 
+// Pulls one view from Spotify, then hands the UI the window it is showing.
+// The fetch is cached by view and argument: paging with L/R must not cost a
+// round trip, because on this console round trips are the expensive part.
+static void native_library_fetch(void)
+{
+	const char *arg = (nat_view == NATIVE_SEARCH) ? lib.query : nat_arg;
+	bool same = nat_view == nat_loaded_view &&
+	            strcmp(arg ? arg : "", nat_loaded_arg) == 0;
+
+	if (!same) {
+		lib.loading = true;
+		char err[160] = "";
+		int n = native_fetch(nat_view, arg, nat_rows, NATIVE_ROWS,
+		                     err, sizeof(err));
+		if (n < 0) {
+			nat_count = 0;
+			snprintf(nat_status, sizeof(nat_status), "%s", err);
+		} else {
+			nat_count = n;
+			nat_status[0] = '\0';
+			nat_loaded_view = nat_view;
+			snprintf(nat_loaded_arg, sizeof(nat_loaded_arg), "%s",
+			         arg ? arg : "");
+		}
+	}
+
+	// The playlists view carries one synthetic row for Liked Songs, which is
+	// not in the rootlist but is where most people look first.
+	int extra = (nat_view == NATIVE_PLAYLISTS) ? 1 : 0;
+	lib.total = nat_count + extra;
+	lib.count = 0;
+	for (int i = lib.offset; i < lib.total && lib.count < LIB_ROWS; i++) {
+		if (extra && i == 0) {
+			snprintf(lib.name[lib.count], sizeof(lib.name[0]), "Me gusta");
+			lib.dir[lib.count][0] = '\0';
+			lib.index[lib.count] = -2;
+		} else {
+			const native_row *r = &nat_rows[i - extra];
+			snprintf(lib.name[lib.count], sizeof(lib.name[0]), "%s", r->label);
+			snprintf(lib.dir[lib.count], sizeof(lib.dir[0]), "%s", r->sub);
+			lib.index[lib.count] = i - extra;
+		}
+		lib.count++;
+	}
+	if (lib.sel >= lib.count) lib.sel = lib.count ? lib.count - 1 : 0;
+	lib.loading = false;
+}
+
 // Walk the flat {"i":..,"name":"..","dir":".."} records the bridge returns.
 static void library_fetch(void)
 {
+	if (native_mode) { native_library_fetch(); return; }
+
 	char escaped[160], path[256];
 	url_escape(lib.query, escaped, sizeof(escaped));
 	snprintf(path, sizeof(path), "/library?q=%s&offset=%d&limit=%d",
@@ -554,6 +620,21 @@ static bool json_bool(const char *json, const char *key)
 	if (!p) return false;
 	p = strchr(p + strlen(pattern), ':');
 	return p && strncmp(p + 1, " true", 5) == 0;
+}
+
+// In native mode the bridge's command thread is not running, and it is the one
+// that services lib_reload. A fetch takes about a second against Spotify, so it
+// gets its own thread for the same reason: never on the render loop.
+static void native_library_thread(void *arg)
+{
+	(void)arg;
+	while (running) {
+		if (lib_reload) {
+			lib_reload = false;
+			library_fetch();
+		}
+		svcSleepThread(30000000LL);   // 30 ms
+	}
 }
 
 // Transport requests run off the render loop: a stalled server must never
@@ -626,6 +707,12 @@ static void load_config(void)
 	if (!f) return;
 	char line[128];
 	if (fgets(line, sizeof(line), f)) {
+		line[strcspn(line, "\r\n")] = '\0';
+		if (strcmp(line, "native") == 0) {
+			native_mode = true;
+			fclose(f);
+			return;
+		}
 		char *colon = strchr(line, ':');
 		if (colon) {
 			*colon = '\0';
@@ -958,6 +1045,15 @@ static void fail_screen(const char *why)
 	}
 }
 
+// Each step of the native sign-in takes a visible moment, so it says which.
+static void native_progress(const char *step)
+{
+	printf("  %s\n", step);
+	gfxFlushBuffers();
+	gfxSwapBuffers();
+	gspWaitForVBlank();
+}
+
 int main(void)
 {
 	gfxInitDefault();
@@ -990,6 +1086,25 @@ int main(void)
 		audio = linearAlloc(buf_bytes * WAVE_BUFFERS);
 		if (!audio) fail = "Audio memory failed.";
 	}
+	if (!fail && native_mode) {
+		consoleInit(GFX_TOP, NULL);
+		printf("\n  Spotify nativo\n\n");
+		static char nat_err[192];
+		if (native_init(native_progress, nat_err, sizeof(nat_err)) != 0) {
+			printf("\n  No se pudo entrar:\n  %s\n", nat_err);
+			printf("\n  START para salir.\n");
+			while (aptMainLoop()) {
+				hidScanInput();
+				if (hidKeysDown() & KEY_START) break;
+				gfxFlushBuffers();
+				gfxSwapBuffers();
+				gspWaitForVBlank();
+			}
+			gfxExit();
+			return 1;
+		}
+		printf("  %s\n", native_account());
+	}
 	if (fail) { fail_screen(fail); gfxExit(); return 1; }
 
 	audio_base = audio;
@@ -1011,9 +1126,22 @@ int main(void)
 	C3D_TexInit(&art_tex, ART_PIXELS, ART_PIXELS, GPU_RGB565);
 	C3D_TexSetFilter(&art_tex, GPU_LINEAR, GPU_LINEAR);
 
-	Thread net = threadCreate(stream_thread, NULL, 32 * 1024, 0x30, -2, false);
-	Thread meta = threadCreate(metadata_thread, NULL, 32 * 1024, 0x3F, -2, false);
-	Thread cmd = threadCreate(command_thread, NULL, 48 * 1024, 0x3F, -2, false);
+	// In native mode there is no bridge to stream from, poll or command.
+	// The audio thread still runs: it only moves the ring into NDSP, and with
+	// an empty ring it idles.
+	Thread net = NULL, meta = NULL, cmd = NULL;
+	if (!native_mode) {
+		net = threadCreate(stream_thread, NULL, 32 * 1024, 0x30, -2, false);
+		meta = threadCreate(metadata_thread, NULL, 32 * 1024, 0x3F, -2, false);
+		cmd = threadCreate(command_thread, NULL, 48 * 1024, 0x3F, -2, false);
+	} else {
+		cmd = threadCreate(native_library_thread, NULL, 32 * 1024, 0x3F, -2, false);
+		buffering = false;
+		lib.open = true;
+		lib_reload = true;
+		snprintf(now_title, sizeof(now_title), "Spotify: sin audio todavia");
+		snprintf(now_artist, sizeof(now_artist), "%s", native_account());
+	}
 	Thread snd = threadCreate(audio_thread, NULL, 16 * 1024, 0x18, -2, false);
 
 	Button buttons[B_COUNT];
@@ -1068,7 +1196,43 @@ int main(void)
 			// Closing the list re-lays out the buttons, so this same coordinate
 			// would then land on one of them. Consume it here.
 			if (row >= 0 && row < lib.count) { lib.sel = row; touch_used = true; }
-			if (((down & KEY_A) || (row >= 0 && row < lib.count)) && lib.count) {
+			if (native_mode && (down & KEY_B) && nat_view != NATIVE_PLAYLISTS) {
+				nat_view = NATIVE_PLAYLISTS;
+				nat_arg[0] = '\0';
+				snprintf(nat_title, sizeof(nat_title), "Listas");
+				lib.offset = lib.sel = 0;
+				lib_reload = true;
+			} else if (native_mode &&
+			           ((down & KEY_A) || (row >= 0 && row < lib.count)) &&
+			           lib.count) {
+				int idx = lib.index[lib.sel];
+				if (idx == -2) {
+					nat_view = NATIVE_LIKED;
+					nat_arg[0] = '\0';
+					snprintf(nat_title, sizeof(nat_title), "Me gusta");
+					lib.offset = lib.sel = 0;
+					lib_reload = true;
+				} else if (idx >= 0 && idx < nat_count &&
+				           nat_rows[idx].is_playlist) {
+					snprintf(nat_arg, sizeof(nat_arg), "%s", nat_rows[idx].uri);
+					if (native_playlist_name(nat_arg, nat_title,
+					                         sizeof(nat_title)) != 0)
+						snprintf(nat_title, sizeof(nat_title), "Lista");
+					nat_view = NATIVE_TRACKS;
+					lib.offset = lib.sel = 0;
+					lib_reload = true;
+				} else if (idx >= 0 && idx < nat_count) {
+					// Nothing can be played yet, so A on a track does the one
+					// useful thing left: build a radio around it.
+					snprintf(nat_arg, sizeof(nat_arg), "%s", nat_rows[idx].uri);
+					nat_view = NATIVE_RADIO;
+					snprintf(nat_title, sizeof(nat_title), "Radio");
+					lib.offset = lib.sel = 0;
+					lib_reload = true;
+				}
+			} else if (!native_mode &&
+			           ((down & KEY_A) || (row >= 0 && row < lib.count)) &&
+			           lib.count) {
 				static char jump[48];
 				snprintf(jump, sizeof(jump), "/control/play/%d", lib.index[lib.sel]);
 				pending_cmd = jump;
@@ -1124,11 +1288,18 @@ int main(void)
 				// because it lives on its own thread.
 				SwkbdState kb;
 				swkbdInit(&kb, SWKBD_TYPE_QWERTY, 2, sizeof(lib.query) - 1);
-				swkbdSetHintText(&kb, "Search your library");
+				swkbdSetHintText(&kb, native_mode ? "Buscar en Spotify"
+				                                  : "Search your library");
 				swkbdSetInitialText(&kb, lib.query);
 				char typed[sizeof(lib.query)] = "";
 				if (swkbdInputText(&kb, typed, sizeof(typed)) == SWKBD_BUTTON_RIGHT) {
 					strncpy(lib.query, typed, sizeof(lib.query) - 1);
+					if (native_mode) {
+						nat_view = lib.query[0] ? NATIVE_SEARCH
+						                        : NATIVE_PLAYLISTS;
+						snprintf(nat_title, sizeof(nat_title), "%s",
+						         lib.query[0] ? "Busqueda" : "Listas");
+					}
 					lib.offset = lib.sel = 0;
 					lib_reload = true;
 				}
