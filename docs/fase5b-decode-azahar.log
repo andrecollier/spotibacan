@@ -1,0 +1,22 @@
+3DS Spotify -- Vorbis decode (phase 5b)
+built 00:06:33
+
+console: New 3DS
+file: test.ogg  (1006128 bytes)
+open took 12 ms
+44100 Hz, 2 ch, 1543552 frames (0:35)
+decoder memory: 162160 setup + 4096 temp bytes
+
+-- pass 1: decode only --
+   1543552 frames = 35.0 s of audio
+   decode cpu 2408 ms over 378 chunks (6.4 ms each, worst 7.6)
+
+   REALTIME FACTOR: 14.54x
+   cpu needed just to decode: 7%
+   (on an emulator these numbers are the host's, not the ARM11's)
+
+-- pass 2: playback through NDSP --
+   ndspInit failed: no DSP firmware.
+   Expected under an emulator; on hardware this should work.
+
+START exits.

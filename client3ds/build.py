@@ -19,13 +19,16 @@ import toolchain
 
 ROOT = Path(__file__).resolve().parent
 
-# name -> (source directories, extra defines, mbedTLS flavour or None)
+# name -> (source directories, extra defines, mbedTLS flavour or None,
+#          extra single sources relative to client3ds/)
 APPS = {
-    "audio3ds":  (["source"], [], None),
-    "probe_tls":  (["probe_tls", "platform3ds"], ["-DPROBE_BUILD"], "probe"),
-    "probe_pair": (["probe_pair", "platform3ds"], ["-DPROBE_BUILD"], "probe"),
-    "probe_ap":   (["probe_ap", "platform3ds"], ["-DPROBE_BUILD"], "probe"),
-    "probe_meta": (["probe_meta", "platform3ds"], ["-DPROBE_BUILD"], "probe"),
+    "audio3ds":    (["source"], [], None, []),
+    "probe_tls":   (["probe_tls", "platform3ds"], ["-DPROBE_BUILD"], "probe", []),
+    "probe_pair":  (["probe_pair", "platform3ds"], ["-DPROBE_BUILD"], "probe", []),
+    "probe_ap":    (["probe_ap", "platform3ds"], ["-DPROBE_BUILD"], "probe", []),
+    "probe_meta":  (["probe_meta", "platform3ds"], ["-DPROBE_BUILD"], "probe", []),
+    # No TLS: this one only reads a file off the card and decodes it.
+    "probe_audio": (["probe_audio"], [], None, ["deps/stb_vorbis.c"]),
 }
 
 
@@ -56,7 +59,7 @@ def main():
     args = ap.parse_args()
 
     app = args.app
-    srcdirs, defines, mbed = APPS[app]
+    srcdirs, defines, mbed, extra_sources = APPS[app]
     tc = toolchain.find(args.toolchain)
     sdk, arm = tc.sdk, tc.arm
 
@@ -76,13 +79,23 @@ def main():
         includes = ["-I" + str(ROOT / "platform3ds"),
                     "-I" + str(tree / "include")] + includes
 
+    sources = [(d, src) for d in srcdirs for src in sorted((ROOT / d).glob("*.c"))]
+    for rel in extra_sources:
+        path = ROOT / rel
+        if not path.exists():
+            raise SystemExit(f"{path} is missing; run: python3 client3ds/deps.py")
+        sources.append((Path(rel).parent.name, path))
+
     objects = []
-    for d in srcdirs:
-        for src in sorted((ROOT / d).glob("*.c")):
-            obj = out / f"{d}_{src.stem}.o"
-            subprocess.run([str(tc.cc), *toolchain.ARCH, *flags, *includes,
-                            "-c", str(src), "-o", str(obj)], check=True)
-            objects.append(obj)
+    for d, src in sources:
+        obj = out / f"{d}_{src.stem}.o"
+        cmd = [str(tc.cc), *toolchain.ARCH, *flags, *includes,
+               "-c", str(src), "-o", str(obj)]
+        # Warnings in pinned upstream sources are not ours to fix.
+        if "deps" in src.parts:
+            cmd = [c for c in cmd if c not in ("-Wall", "-Wextra")] + ["-w"]
+        subprocess.run(cmd, check=True)
+        objects.append(obj)
     if not objects:
         raise SystemExit(f"No sources under {', '.join(srcdirs)}")
 

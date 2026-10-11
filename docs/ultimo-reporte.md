@@ -108,3 +108,80 @@ siguientes.
 
 Nada de esto se escribió todavía en C para la consola: habría sido escribir contra un paso que no
 se puede probar.
+
+---
+
+# Fase 5b: el decodificador Vorbis y la salida de audio
+
+Fecha: 2026-10-11
+
+Con la clave bloqueada por Spotify, la otra mitad de la Fase 5 sí se puede hacer: decodificar
+Vorbis en el ARM11 y sacarlo por NDSP. **Es el último desconocido técnico grande del proyecto** —
+es donde el PSP tuvo que recurrir al Media Engine, su segundo procesador, y el 3DS no tiene
+equivalente que valga la pena: el decodificador comparte el ARM11 con la red y la interfaz.
+
+## Qué se construyó
+
+- `deps/stb_vorbis.c` v1.22 (dominio público), pineado por SHA-256 igual que mbedTLS y bajado
+  por `deps.py`.
+- `probe_audio/` — lee `test.ogg` de la tarjeta y hace **dos pasadas separadas**:
+  1. **Solo decodificar**, sin audio de por medio. Es la medición que importa y la única
+     portable.
+  2. **Reproducir por NDSP**, que necesita la firmware del DSP de la consola.
+- `tools/make_test_ogg.py` — genera los archivos de prueba desde cualquier tema local.
+
+Separarlas no fue cosmético: la primera versión las mezclaba y **se colgó** esperando que NDSP
+liberara un buffer que nunca iba a liberar. Ahora una firmware ausente cuesta la prueba de
+reproducción, no el banco de pruebas, y el bucle de reproducción se rinde tras 600 vueltas en
+vez de girar para siempre.
+
+## Resultado en Azahar
+
+```
+44100 Hz, 2 ch, 1543552 frames (0:35)
+decoder memory: 162160 setup + 4096 temp bytes
+
+-- pass 1: decode only --
+   1543552 frames = 35.0 s of audio
+   decode cpu 2408 ms over 378 chunks (6.4 ms each, worst 7.6)
+   REALTIME FACTOR: 14.54x
+
+-- pass 2: playback through NDSP --
+   ndspInit failed: no DSP firmware.
+```
+
+**Correcto**: decodificó los 1.543.552 frames exactos, los 35,0 s completos, sin errores. El
+decodificador y su integración funcionan.
+
+**El 14,54x no vale como número de rendimiento**: es la CPU de la Mac. Y haciendo la cuenta al
+revés, tampoco es tranquilizador: un núcleo moderno hace este trabajo en el orden de 30 a 60
+veces lo que un ARM11 a 268 MHz, así que 14,54x podría traducirse a **menos de 1x en la consola**.
+No es una predicción —el factor de conversión es muy grueso— pero sí es razón suficiente para no
+dar por ganada esta fase.
+
+Dos cosas juegan a favor: el archivo de prueba es de **230 kbps**, bastante más duro que los 160
+de Spotify, y el New 3DS corre a 804 MHz con `osSetSpeedupEnable`.
+
+Si no alcanza, el plan B está claro y es conocido: **tremor (libvorbisidec)**, el decodificador
+Vorbis de enteros que usan los reproductores tipo Rockbox. stb_vorbis es de punto flotante y el
+VFP del ARM11 es lento; tremor existe precisamente para este caso.
+
+## Esto hay que correrlo en la consola
+
+Es la primera vez que el emulador no puede contestar la pregunta: NDSP necesita la firmware del
+DSP, y el número de rendimiento necesita el ARM11 de verdad.
+
+Copiar a la SD la carpeta `client3ds/dist/3ds/`, que ya queda armada con:
+
+```
+SD:/3ds/probe_audio/probe_audio.3dsx
+SD:/3ds/probe_audio/test.ogg        (230 kbps, el caso duro)
+SD:/3ds/probe_audio/test-low.ogg    (97 kbps, para comparar)
+```
+
+Lanzarlo del Homebrew Launcher. Deja `spotify-audio.log` al lado. Lo que hay que mirar:
+
+- **REALTIME FACTOR** de la pasada 1. Por encima de 3x es cómodo; entre 1,5x y 3x es justo pero
+  alcanza; por debajo de 1,5x hay que pasar a tremor.
+- **underruns** de la pasada 2, que deben ser 0.
+- Si suena limpio.

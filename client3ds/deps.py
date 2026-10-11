@@ -27,6 +27,13 @@ NAME = "mbedtls-3.6.7"
 SHA256 = "a7e8bcbec0e6f761b4af24f25677626b35f762f68eef79c08677a363212d11f6"
 URL = f"https://github.com/Mbed-TLS/mbedtls/releases/download/{NAME}/{NAME}.tar.bz2"
 
+# The Vorbis decoder: one public-domain file, pinned the same way. Spotify
+# streams Ogg Vorbis, and the ARM11 has to decode it in software -- there is no
+# second processor to hand it to, which is the whole reason this port is easier
+# than the PSP one.
+STB_VORBIS_URL = "https://raw.githubusercontent.com/nothings/stb/master/stb_vorbis.c"
+STB_VORBIS_SHA256 = "4c7cb2ff1f7011e9d67950446b7eb9ca044f2e464d76bfbb0b84dd2e23e65636"
+
 
 def fetch(deps: Path) -> Path:
     deps.mkdir(parents=True, exist_ok=True)
@@ -51,6 +58,21 @@ def fetch(deps: Path) -> Path:
     return tree
 
 
+def fetch_stb_vorbis(deps: Path) -> Path:
+    deps.mkdir(parents=True, exist_ok=True)
+    dst = deps / "stb_vorbis.c"
+    if not dst.exists():
+        print("Downloading stb_vorbis...")
+        with urllib.request.urlopen(STB_VORBIS_URL, timeout=60) as r:
+            dst.write_bytes(r.read())
+    got = hashlib.sha256(dst.read_bytes()).hexdigest()
+    if got != STB_VORBIS_SHA256:
+        raise SystemExit(f"{dst} hashes {got}, expected {STB_VORBIS_SHA256}\n"
+                         "stb has no releases, so this pins a commit of master; "
+                         "if upstream moved, review the diff before updating.")
+    return dst
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -61,6 +83,7 @@ def main():
     args = ap.parse_args()
 
     tc = toolchain.find(args.toolchain)
+    fetch_stb_vorbis(ROOT / "deps")
     tree = fetch(ROOT / "deps")
     out = ROOT / "build" / ("mbedtls-probe" if args.probe else "mbedtls")
     out.mkdir(parents=True, exist_ok=True)
