@@ -185,3 +185,43 @@ Lanzarlo del Homebrew Launcher. Deja `spotify-audio.log` al lado. Lo que hay que
   alcanza; por debajo de 1,5x hay que pasar a tremor.
 - **underruns** de la pasada 2, que deben ser 0.
 - Si suena limpio.
+
+## Medido en hardware (11-oct-2026)
+
+```
+REALTIME FACTOR: 5.37x
+underruns:       0
+suena limpio
+```
+
+**Cierra la fase.** Con el archivo duro de 230 kbps, decodificar cuesta ~19% de un núcleo, y
+Spotify sirve 160, así que va a costar menos. Además se logró **sin** `osSetSpeedupEnable`, o sea
+a 268 MHz: los 804 MHz del New 3DS quedan enteros en reserva. Sobra CPU para TLS, red e interfaz
+a la vez, y **no hace falta tremor** — stb_vorbis alcanza de sobra.
+
+Queda anotado que mi estimación previa ("podría quedar por debajo de 1x") estaba equivocada:
+extrapolar del emulador al ARM11 con un factor de 30-60x subestimaba mucho la consola. La
+medición en hardware era la única forma de saberlo, y por eso valía la pena pedirla.
+
+## Dónde queda el proyecto
+
+| Fase | Estado |
+|---|---|
+| 1 — TLS 1.2 | verificado |
+| 2 — pairing | verificado, sobrevive rearranques |
+| 3 — sesión con el access point | verificado, APWelcome y pings |
+| 4 — metadata, búsqueda, radio, playlists | verificado |
+| 5a — clave de audio | **bloqueado por Spotify** (librespot#1649) |
+| 5b — decodificador Vorbis + NDSP | verificado en hardware, 5.37x |
+
+Todo lo que depende de nosotros está hecho y medido. El único eslabón que falta es la clave de
+audio, que no es del código: librespot falla igual en esta cuenta.
+
+## Lo que este resultado destraba por otro lado
+
+El puente (`server/bridge.py`) hoy manda **PCM crudo**, entre 706 y 1024 kbps, que según las
+pruebas de septiembre estaba en el borde del 802.11g del 3DS y obligó a bajar a 22050 Hz. Ahora
+que la consola decodifica Vorbis a 5.37x, el puente podría mandar **Vorbis de 160 kbps**: unas
+seis veces menos caudal, techo de ancho de banda eliminado, y 44.1 kHz completos en vez de
+22050. El decodificador ya está escrito y medido; sería cambiar la fuente del puente y enchufar
+el mismo código.
