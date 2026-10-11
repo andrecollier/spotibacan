@@ -50,7 +50,7 @@ static volatile int meta_soon = 0;
 static const char *volatile pending_cmd = NULL;
 static volatile bool cmd_busy = false;
 
-#define LIB_ROWS 6
+#define LIB_ROWS 5
 typedef struct {
 	bool open, loading;
 	int total, offset, sel, count;
@@ -487,18 +487,23 @@ static void metadata_thread(void *arg)
 
 // -------------------------------------------------------------------- config
 
+// Native is the default now: this is a Spotify client, and the bridge is the
+// path it grew out of. No config file at all means native, so a fresh card
+// needs nothing but the .3dsx.
 static void load_config(void)
 {
+	native_mode = true;
 	FILE *f = fopen(CONFIG_PATH, "r");
 	if (!f) return;
 	char line[128];
 	if (fgets(line, sizeof(line), f)) {
 		line[strcspn(line, "\r\n")] = '\0';
-		if (strcmp(line, "native") == 0) {
-			native_mode = true;
+		if (strcmp(line, "native") == 0 || line[0] == '\0') {
 			fclose(f);
 			return;
 		}
+		// A host:port line is the bridge asking for itself by name.
+		native_mode = false;
 		char *colon = strchr(line, ':');
 		if (colon) {
 			*colon = '\0';
@@ -567,8 +572,8 @@ static void draw_top(const Skin *sk, bool buffering, bool muted, float par)
 		const float tx = 18 + ART + 20;
 		text_at(now_title[0] ? now_title : "---", tx + par * 2.0f, 44, 0.66f,
 		        sk->text, 0);
-		text_at(now_artist, tx + par * 1.4f, 80, 0.50f, sk->text, 0);
-		text_at(now_album, tx + par * 1.0f, 104, 0.42f, sk->dim, 0);
+		text_at(now_artist, tx + par * 1.4f, 82, 0.56f, sk->text, 0);
+		text_at(now_album, tx + par * 1.0f, 110, 0.48f, sk->dim, 0);
 
 		// A small lit dot carries the state; a word in capitals does not need
 		// a bar over it to be read.
@@ -576,7 +581,7 @@ static void draw_top(const Skin *sk, bool buffering, bool muted, float par)
 		C2D_DrawCircleSolid(tx + 4 + par * 0.8f, dy + 5, 0.1f, 4,
 		                    buffering ? sk->dim : sk->accent);
 		text_at(buffering ? "CARGANDO" : (muted ? "SIN SONIDO" : "SONANDO"),
-		        tx + 16 + par * 0.8f, dy, 0.40f, sk->dim, 0);
+		        tx + 16 + par * 0.8f, dy, 0.46f, sk->dim, 0);
 	} else {
 		// Title bar and a framed thumbnail, closer to a hardware player.
 		C2D_DrawRectSolid(0 + par * 0.2f, 0, 0.0f, TOP_W, 30, sk->accent);
@@ -682,8 +687,8 @@ static void draw_button(const Skin *sk, const Button *b, bool lit, float glyph)
 
 #define LIST_X 10.0f
 #define LIST_W 300.0f
-#define ROW_Y  46.0f
-#define ROW_H  30.0f
+#define ROW_Y  52.0f
+#define ROW_H  34.0f
 
 // Left half of the split view. Browsing never takes the transport away: the
 // controls keep their own column on the right.
@@ -694,23 +699,23 @@ static void draw_native_list(const Skin *sk)
 {
 	char head[96];
 	snprintf(head, sizeof(head), "%s", native_mode ? nat_title : "Biblioteca");
-	text_at(head, LIST_X, 10, 0.46f, sk->text, 0);
+	text_at(head, LIST_X, 8, 0.56f, sk->text, 0);
 
 	if (lib.total > 0) {
 		char count[32];
 		snprintf(count, sizeof(count), "%d-%d / %d", lib.offset + 1,
 		         lib.offset + lib.count, lib.total);
-		text_at(count, LIST_X + LIST_W, 12, 0.36f, sk->dim, C2D_AlignRight);
+		text_at(count, LIST_X + LIST_W, 12, 0.44f, sk->dim, C2D_AlignRight);
 	}
 	text_at(lib.query[0] ? lib.query : (native_mode ? "TEMAS" : "BIBLIOTECA"),
-	        LIST_X, 30, 0.32f, sk->dim, 0);
+	        LIST_X, 32, 0.44f, sk->dim, 0);
 
 	if (lib.loading && lib.count == 0) {
-		text_at("Cargando...", LIST_X, ROW_Y + 8, 0.44f, sk->dim, 0);
+		text_at("Cargando...", LIST_X, ROW_Y + 8, 0.50f, sk->dim, 0);
 		return;
 	}
 	if (lib.count == 0) {
-		text_at("Nada por aqui", LIST_X, ROW_Y + 8, 0.44f, sk->dim, 0);
+		text_at("Nada por aqui", LIST_X, ROW_Y + 8, 0.50f, sk->dim, 0);
 		return;
 	}
 
@@ -719,10 +724,10 @@ static void draw_native_list(const Skin *sk)
 		bool sel = (i == lib.sel);
 		if (sel)
 			C2D_DrawRectSolid(LIST_X - 6, y, 0.05f, 3, ROW_H - 4, sk->accent);
-		text_at(lib.name[i], LIST_X + 4, y, 0.42f,
+		text_at(lib.name[i], LIST_X + 4, y, 0.50f,
 		        sel ? sk->accent : sk->text, 0);
 		if (lib.dir[i][0])
-			text_at(lib.dir[i], LIST_X + 4, y + 15, 0.32f, sk->dim, 0);
+			text_at(lib.dir[i], LIST_X + 4, y + 17, 0.44f, sk->dim, 0);
 	}
 
 	// A hairline scrollbar: present when it means something, invisible when
@@ -791,8 +796,8 @@ static void draw_bottom(const Skin *sk, const Button *buttons, int count,
 	}
 	for (int i = 0; i < count; i++)
 		if (buttons[i].w > 0.0f)
-			draw_button(sk, &buttons[i], i == flash, buttons[i].h * 0.44f);
-	text_at("build " BUILD_STAMP, BOT_W - 4, SCR_H - 11, 0.28f, sk->dim, C2D_AlignRight);
+			draw_button(sk, &buttons[i], i == flash, buttons[i].h * 0.52f);
+	text_at(BUILD_STAMP, BOT_W - 6, SCR_H - 14, 0.40f, sk->meter, C2D_AlignRight);
 }
 
 enum { B_PREV, B_PLAY, B_NEXT, B_MUTE, B_LIST, B_SEARCH, B_COUNT };
@@ -804,12 +809,12 @@ static void layout_buttons(Button *b, bool split)
 {
 	if (split) {
 		// The list owns the screen; the transport shrinks to a strip under it.
-		b[B_PREV]   = (Button){ 96, 196, 44, 40, IC_PREV,  false};
-		b[B_PLAY]   = (Button){144, 194, 44, 44, IC_PLAY,  true };
-		b[B_NEXT]   = (Button){192, 196, 44, 40, IC_NEXT,  false};
+		b[B_PREV]   = (Button){ 96, 200, 44, 40, IC_PREV,  false};
+		b[B_PLAY]   = (Button){144, 198, 44, 44, IC_PLAY,  true };
+		b[B_NEXT]   = (Button){192, 200, 44, 40, IC_NEXT,  false};
 		b[B_SEARCH] = (Button){248,   4, 36, 32, IC_SEARCH, false};
 		b[B_LIST]   = (Button){284,   4, 32, 32, IC_CLOSE,  false};
-		b[B_MUTE]   = (Button){ 40, 196, 44, 40, IC_SOUND, false};
+		b[B_MUTE]   = (Button){ 40, 200, 44, 40, IC_SOUND, false};
 	} else {
 		// One centred row, the way a player looks rather than a keypad.
 		b[B_MUTE]   = (Button){ 36, 136, 48, 48, IC_SOUND, false};
