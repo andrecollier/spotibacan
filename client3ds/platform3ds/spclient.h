@@ -71,8 +71,14 @@ int  sp_radio(const char *host, const char *token, const char *seed_uri,
 /* The user's playlist folder. `count` is how many entries the rootlist holds;
  * up to `max` of their URIs are copied into `uris`. An empty rootlist is a
  * valid answer, not an error. */
+/* The playlist folder, with each list's name.
+ *
+ * Asking for the decorated rootlist costs the same one request and brings the
+ * names along in meta_items; without it the rows have nothing to show but an
+ * index, and resolving each playlist for its title would be one request per
+ * row. `names` may be NULL. */
 int  sp_rootlist(const char *host, const char *token, const char *username,
-                 char uris[][64], int max, int *count,
+                 char uris[][64], char names[][64], int max, int *count,
                  char *err, size_t errlen);
 
 /* The tracks in one playlist. `name` gets the playlist's title, `uris` up to

@@ -45,7 +45,7 @@ static volatile bool art_pending = false, art_present = false;
 static volatile bool server_playing = true;
 static volatile float now_pos = 0.0f, now_dur = 0.0f;
 
-#define LIB_ROWS 5
+#define LIB_ROWS 4
 typedef struct {
 	bool open, loading;
 	int total, offset, sel, count;
@@ -82,21 +82,27 @@ static u8 *art_staging = NULL;
 // streaming client has no use for sixteen looks, and they cost 12 MB on the
 // card to carry.
 typedef struct {
-	u32 top_bg, bottom_bg, panel, accent, on_accent, text, dim, meter;
+	u32 top_bg, bottom_bg, panel, accent, on_accent, text, dim, meter, warm;
 	bool dark;
 } Skin;
 
-static const Skin SKIN = {
-	.top_bg    = 0xFF121212,   // ABGR, as citro2d wants it
-	.bottom_bg = 0xFF1A1A1A,
-	.panel     = 0xFF242424,
-	.accent    = 0xFF4ADE80,
-	.on_accent = 0xFF121212,
-	.text      = 0xFFF5F5F5,
-	.dim       = 0xFF8A8A8A,
-	.meter     = 0xFF3A3A3A,
-	.dark      = true,
-};
+#define RGB(r, g, b) C2D_Color32((r), (g), (b), 0xFF)
+
+static Skin SKIN;
+
+static void skin_init(void)
+{
+	SKIN.top_bg    = RGB(0x12, 0x14, 0x13);
+	SKIN.bottom_bg = RGB(0x1B, 0x1E, 0x1C);
+	SKIN.panel     = RGB(0x26, 0x2A, 0x27);
+	SKIN.accent    = RGB(0x3D, 0xE8, 0x5B);   // the green of the action bar
+	SKIN.on_accent = RGB(0x0E, 0x14, 0x10);
+	SKIN.text      = RGB(0xF2, 0xF4, 0xF2);
+	SKIN.dim       = RGB(0x8E, 0x96, 0x90);
+	SKIN.meter     = RGB(0x33, 0x39, 0x35);
+	SKIN.warm      = RGB(0xFF, 0x8A, 0x70);   // headings, against all the green
+	SKIN.dark      = true;
+}
 
 // ---------------------------------------------------------------- ring buffer
 
@@ -243,6 +249,40 @@ static C2D_TextBuf text_buf;
 static C3D_Tex art_tex;
 static Tex3DS_SubTexture art_sub = {ART_PIXELS, ART_PIXELS, 0.0f, 1.0f, 1.0f, 0.0f};
 
+// Cuts a string to fit a width, with an ellipsis. Without this a long artist
+// name simply runs past the edge of the screen and is clipped mid-letter.
+static void text_fit(const char *str, float x, float y, float scale, u32 colour,
+                     float max_w)
+{
+	if (!str || !*str) return;
+	char buf[192];
+	snprintf(buf, sizeof(buf), "%s", str);
+
+	C2D_Text t;
+	float w = 0, h = 0;
+	C2D_TextParse(&t, text_buf, buf);
+	C2D_TextGetDimensions(&t, scale, scale, &w, &h);
+	if (w > max_w) {
+		size_t n = strlen(buf);
+		while (n > 1 && w > max_w) {
+			n--;
+			buf[n] = '\0';
+			C2D_TextParse(&t, text_buf, buf);
+			C2D_TextGetDimensions(&t, scale, scale, &w, &h);
+		}
+		if (n > 3) {
+			buf[n - 1] = '.';
+			buf[n] = '.';
+			buf[n + 1] = '\0';
+		}
+		C2D_TextParse(&t, text_buf, buf);
+	}
+	C2D_TextOptimize(&t);
+	C2D_DrawText(&t, C2D_WithColor, x, y, 0.5f, scale, scale, colour);
+}
+
+static void clock_text(char *out, size_t n, float secs);
+
 static void text_at(const char *str, float x, float y, float scale, u32 colour, u32 align)
 {
 	if (!str || !*str) return;
@@ -277,37 +317,37 @@ static void draw_art(const Skin *sk, float x, float y, float size)
 // par is signed per eye and already scaled by the 3D slider.
 static void draw_top(const Skin *sk, bool buffering, bool muted, float par)
 {
-	if (sk->dark) {
-		// Art large on the left, text stacked beside it with the hierarchy
-		// carried by size and brightness rather than by rules and bars.
-		const float ART = 184.0f;
-		draw_art(sk, 18 + par * 3.2f, 28, ART);
+	// Art on the left with a real margin, text beside it, and nothing else.
+	// The text column is measured, so a long title stops at the edge instead
+	// of running off it.
+	const float ART = 152.0f;
+	const float AX = 20.0f, AY = 44.0f;
+	const float TX = AX + ART + 22.0f;
+	const float TW = TOP_W - TX - 20.0f;
 
-		const float tx = 18 + ART + 20;
-		text_at(now_title[0] ? now_title : "---", tx + par * 2.0f, 44, 0.66f,
-		        sk->text, 0);
-		text_at(now_artist, tx + par * 1.4f, 82, 0.56f, sk->text, 0);
-		text_at(now_album, tx + par * 1.0f, 110, 0.48f, sk->dim, 0);
+	draw_art(sk, AX + par * 3.0f, AY, ART);
 
-		// A small lit dot carries the state; a word in capitals does not need
-		// a bar over it to be read.
-		float dy = 150;
-		C2D_DrawCircleSolid(tx + 4 + par * 0.8f, dy + 5, 0.1f, 4,
-		                    buffering ? sk->dim : sk->accent);
-		text_at(buffering ? "CARGANDO" : (muted ? "SIN SONIDO" : "SONANDO"),
-		        tx + 16 + par * 0.8f, dy, 0.46f, sk->dim, 0);
-	} else {
-		// Title bar and a framed thumbnail, closer to a hardware player.
-		C2D_DrawRectSolid(0 + par * 0.2f, 0, 0.0f, TOP_W, 30, sk->accent);
-		text_at("Now Playing", TOP_W / 2 + par * 0.6f, 6, 0.56f, sk->on_accent, C2D_AlignCenter);
-		C2D_DrawRectSolid(26 + par * 2.6f, 56, 0.0f, 104, 104, sk->dim);
-		draw_art(sk, 30 + par * 3.0f, 60, 96);
-		text_at(now_title[0] ? now_title : "---", 152 + par * 1.8f, 64, 0.58f, sk->text, 0);
-		text_at(now_artist, 152 + par * 1.3f, 94, 0.48f, sk->text, 0);
-		text_at(now_album, 152 + par * 1.0f, 118, 0.44f, sk->dim, 0);
-		C2D_DrawRectSolid(152 + par * 0.8f, 146, 0.0f, TOP_W - 172, 1, sk->meter);
-		text_at(buffering ? "Buffering..." : (muted ? "Paused output" : "Playing"),
-		        152 + par * 0.8f, 154, 0.44f, sk->dim, 0);
+	text_fit(now_title[0] ? now_title : "Nada sonando", TX + par * 2.0f, AY + 2,
+	         0.70f, sk->text, TW);
+	text_fit(now_artist, TX + par * 1.4f, AY + 36, 0.54f, sk->dim, TW);
+	text_fit(now_album, TX + par * 1.0f, AY + 60, 0.46f, sk->meter, TW);
+
+	const char *state = buffering ? "CARGANDO" : (muted ? "SIN SONIDO" : "SONANDO");
+	C2D_DrawCircleSolid(TX + 5 + par * 0.8f, AY + 112, 0.1f, 4,
+	                    buffering ? sk->warm : sk->accent);
+	text_at(state, TX + 18 + par * 0.8f, AY + 103, 0.46f, sk->dim, 0);
+
+	if (now_dur > 1.0f) {
+		float done = now_pos / now_dur;
+		if (done > 1.0f) done = 1.0f;
+		float bx = TX + par * 0.6f, by = AY + 140, bw = TW;
+		C2D_DrawRectSolid(bx, by, 0.0f, bw, 3, sk->meter);
+		C2D_DrawRectSolid(bx, by, 0.1f, bw * done, 3, sk->accent);
+		char a[12], b[12];
+		clock_text(a, sizeof(a), now_pos);
+		clock_text(b, sizeof(b), now_dur);
+		text_at(a, bx, by + 8, 0.42f, sk->dim, 0);
+		text_at(b, bx + bw, by + 8, 0.42f, sk->dim, C2D_AlignRight);
 	}
 }
 
@@ -316,7 +356,8 @@ typedef enum {
 	IC_SOUND, IC_MUTED, IC_LIST, IC_SEARCH, IC_CLOSE
 } Icon;
 
-typedef struct { float x, y, w, h; Icon icon; bool accent; } Button;
+typedef struct { float x, y, w, h; Icon icon; bool accent;
+                 const char *label; } Button;
 
 // Transport glyphs drawn from primitives: no textures to ship, and they scale
 // to whatever size a layout gives them.
@@ -382,54 +423,52 @@ static void draw_icon(Icon ic, float cx, float cy, float s, u32 col)
 	}
 }
 
-// No box around anything. Hierarchy comes from size and brightness, and only
-// the primary action gets a filled shape -- boxing every control is what made
-// the old layout look like a remote control.
+// The primary action is a full-width bar, the way the reference does it:
+// unmissable, a huge touch target, and it cannot overlap the list because it
+// owns the bottom of the screen. Everything else is a bare icon.
 static void draw_button(const Skin *sk, const Button *b, bool lit, float glyph)
 {
-	float cx = b->x + b->w / 2, cy = b->y + b->h / 2;
-	u32 ink = lit ? sk->accent : sk->text;
-
 	if (b->accent) {
-		float r = b->h * 0.42f;
-		C2D_DrawCircleSolid(cx, cy, 0.0f, r, lit ? sk->accent : sk->text);
-		draw_icon(b->icon, cx, cy, glyph, sk->bottom_bg);
+		C2D_DrawRectSolid(b->x, b->y, 0.0f, b->w, b->h,
+		                  lit ? sk->text : sk->accent);
+		draw_icon(b->icon, b->x + 30, b->y + b->h / 2, glyph, sk->on_accent);
+		text_at(b->label, b->x + 52, b->y + b->h / 2 - 11, 0.54f,
+		        sk->on_accent, 0);
 		return;
 	}
-	draw_icon(b->icon, cx, cy, glyph, ink);
+	draw_icon(b->icon, b->x + b->w / 2, b->y + b->h / 2, glyph,
+	          lit ? sk->accent : sk->text);
 }
 
-#define LIST_X 10.0f
-#define LIST_W 300.0f
-#define ROW_Y  52.0f
-#define ROW_H  34.0f
+#define BAND_H 40.0f          // title band across the top
+#define BAR_Y  198.0f         // the full-width action bar
+#define LIST_X 16.0f
+#define LIST_W 288.0f
+#define ROW_Y  (BAND_H + 10.0f)
+#define ROW_H  37.0f
 
 // Left half of the split view. Browsing never takes the transport away: the
 // controls keep their own column on the right.
-// Two lines per row -- title over artist -- with the selection marked by a
-// bar and a colour instead of a filled block, which is what makes a long list
-// readable at this size.
+// A title band, four roomy rows, and nothing competing with them. Two lines
+// per row -- title over artist -- with the selection marked by a bar and a
+// colour rather than a filled block, which is what keeps a long list readable.
 static void draw_native_list(const Skin *sk)
 {
-	char head[96];
-	snprintf(head, sizeof(head), "%s", nat_title);
-	text_at(head, LIST_X, 8, 0.56f, sk->text, 0);
-
+	C2D_DrawRectSolid(0, 0, 0.0f, BOT_W, BAND_H, sk->panel);
+	text_fit(nat_title, LIST_X, 9, 0.58f, sk->text, 190);
 	if (lib.total > 0) {
 		char count[32];
 		snprintf(count, sizeof(count), "%d-%d / %d", lib.offset + 1,
 		         lib.offset + lib.count, lib.total);
-		text_at(count, LIST_X + LIST_W, 12, 0.44f, sk->dim, C2D_AlignRight);
+		text_at(count, BOT_W - 72, 14, 0.42f, sk->dim, C2D_AlignRight);
 	}
-	text_at(lib.query[0] ? lib.query : "TEMAS",
-	        LIST_X, 32, 0.44f, sk->dim, 0);
 
 	if (lib.loading && lib.count == 0) {
-		text_at("Cargando...", LIST_X, ROW_Y + 8, 0.50f, sk->dim, 0);
+		text_at("Cargando...", LIST_X, ROW_Y + 10, 0.52f, sk->dim, 0);
 		return;
 	}
 	if (lib.count == 0) {
-		text_at("Nada por aqui", LIST_X, ROW_Y + 8, 0.50f, sk->dim, 0);
+		text_at("Nada por aqui", LIST_X, ROW_Y + 10, 0.52f, sk->dim, 0);
 		return;
 	}
 
@@ -437,21 +476,20 @@ static void draw_native_list(const Skin *sk)
 		float y = ROW_Y + i * ROW_H;
 		bool sel = (i == lib.sel);
 		if (sel)
-			C2D_DrawRectSolid(LIST_X - 6, y, 0.05f, 3, ROW_H - 4, sk->accent);
-		text_at(lib.name[i], LIST_X + 4, y, 0.50f,
-		        sel ? sk->accent : sk->text, 0);
+			C2D_DrawRectSolid(LIST_X - 8, y - 1, 0.05f, 3, ROW_H - 8, sk->accent);
+		text_fit(lib.name[i], LIST_X, y, 0.52f,
+		         sel ? sk->accent : sk->text, LIST_W - 14);
 		if (lib.dir[i][0])
-			text_at(lib.dir[i], LIST_X + 4, y + 17, 0.44f, sk->dim, 0);
+			text_fit(lib.dir[i], LIST_X, y + 18, 0.44f, sk->dim, LIST_W - 14);
 	}
 
-	// A hairline scrollbar: present when it means something, invisible when
-	// everything already fits.
+	// A hairline scrollbar, only when there is more than fits.
 	if (lib.total > lib.count) {
 		float track_h = ROW_H * LIB_ROWS;
 		float frac = (float)lib.count / (float)lib.total;
 		float pos = (float)lib.offset / (float)lib.total;
-		C2D_DrawRectSolid(LIST_X + LIST_W + 2, ROW_Y, 0.0f, 2, track_h, sk->meter);
-		C2D_DrawRectSolid(LIST_X + LIST_W + 2, ROW_Y + track_h * pos, 0.1f, 2,
+		C2D_DrawRectSolid(BOT_W - 7, ROW_Y, 0.0f, 2, track_h, sk->meter);
+		C2D_DrawRectSolid(BOT_W - 7, ROW_Y + track_h * pos, 0.1f, 2,
 		                  track_h * frac, sk->accent);
 	}
 }
@@ -475,32 +513,17 @@ static void clock_text(char *out, size_t n, float secs)
 
 
 static void draw_bottom(const Skin *sk, const Button *buttons, int count,
-                        u32 used, bool buffering, int flash)
+                        int flash)
 {
 	if (lib.open) {
 		draw_native_list(sk);
 	} else {
-		// What is playing, and nothing about plumbing: the buffer level and
-		// the underrun count were a bridge's diagnostics, not a player's.
-		text_at(now_title[0] ? now_title : "Nada sonando", 16, 26, 0.56f,
-		        sk->text, 0);
-		text_at(now_artist, 16, 52, 0.46f, sk->dim, 0);
-		(void)used;
-		(void)buffering;
-
-		// Seek bar: the only place the touch screen can scrub, since the top
-		// screen cannot be touched.
-		float done = (now_dur > 0.5f) ? now_pos / now_dur : 0.0f;
-		if (done > 1.0f) done = 1.0f;
-		C2D_DrawRectSolid(SEEK_X, SEEK_Y, 0.0f, SEEK_W, SEEK_H, sk->meter);
-		C2D_DrawRectSolid(SEEK_X, SEEK_Y, 0.1f, SEEK_W * done, SEEK_H, sk->accent);
-		C2D_DrawRectSolid(SEEK_X + SEEK_W * done - 2, SEEK_Y - 3, 0.2f, 5,
-		                  SEEK_H + 6, sk->text);
-		char a[12], b[12];
-		clock_text(a, sizeof(a), now_pos);
-		clock_text(b, sizeof(b), now_dur);
-		text_at(a, SEEK_X, SEEK_Y + SEEK_H + 2, 0.32f, sk->dim, 0);
-		text_at(b, SEEK_X + SEEK_W, SEEK_Y + SEEK_H + 2, 0.32f, sk->dim, C2D_AlignRight);
+		// The top screen already shows what is playing; repeating it here
+		// would just be noise. This screen is for the controls.
+		C2D_DrawRectSolid(0, 0, 0.0f, BOT_W, BAND_H, sk->panel);
+		text_fit(now_title[0] ? now_title : "Nada sonando", LIST_X, 9, 0.58f,
+		         sk->text, BOT_W - 32);
+		text_fit(now_artist, LIST_X, 54, 0.48f, sk->dim, BOT_W - 32);
 	}
 	for (int i = 0; i < count; i++)
 		if (buttons[i].w > 0.0f)
@@ -511,22 +534,21 @@ static void draw_bottom(const Skin *sk, const Button *buttons, int count,
 enum { B_PLAY, B_MUTE, B_LIST, B_SEARCH, B_COUNT };
 
 // Two arrangements over one array. Zero width hides a button in that mode.
-// Touch targets stay large even though nothing is drawn around them: a finger
-// needs the area, the eye does not need the border.
+// Touch targets stay large even though almost nothing is drawn around them:
+// a finger needs the area, the eye does not need the border.
 static void layout_buttons(Button *b, bool split)
 {
+	// The action bar: full width, under everything else, always reachable.
+	b[B_PLAY]   = (Button){0, BAR_Y, BOT_W, SCR_H - BAR_Y, IC_PLAY, true,
+	                       "Reproducir"};
 	if (split) {
-		// The list owns the screen; the controls shrink to the edges.
-		b[B_MUTE]   = (Button){ 92, 200, 48, 40, IC_SOUND,  false};
-		b[B_PLAY]   = (Button){148, 198, 44, 44, IC_PLAY,   true };
-		b[B_SEARCH] = (Button){248,   4, 36, 32, IC_SEARCH, false};
-		b[B_LIST]   = (Button){284,   4, 32, 32, IC_CLOSE,  false};
+		b[B_SEARCH] = (Button){BOT_W - 76, 2, 36, 36, IC_SEARCH, false, NULL};
+		b[B_LIST]   = (Button){BOT_W - 38, 2, 36, 36, IC_CLOSE,  false, NULL};
+		b[B_MUTE]   = (Button){0, 0, 0, 0, IC_SOUND, false, NULL};
 	} else {
-		// One centred row, the way a player looks rather than a keypad.
-		b[B_MUTE]   = (Button){ 72, 136, 56, 56, IC_SOUND, false};
-		b[B_PLAY]   = (Button){136, 130, 60, 60, IC_PLAY,  true };
-		b[B_LIST]   = (Button){204, 136, 56, 56, IC_LIST,  false};
-		b[B_SEARCH] = (Button){0, 0, 0, 0, IC_SEARCH, false};
+		b[B_MUTE]   = (Button){ 96, 120, 56, 56, IC_SOUND, false, NULL};
+		b[B_LIST]   = (Button){168, 120, 56, 56, IC_LIST,  false, NULL};
+		b[B_SEARCH] = (Button){0, 0, 0, 0, IC_SEARCH, false, NULL};
 	}
 }
 
@@ -591,6 +613,7 @@ int main(int argc, char **argv)
 {
 	(void)argc;
 	gfxInitDefault();
+	skin_init();
 	// The token belongs beside the .3dsx, like every other app here; without
 	// this it would land at the card root and not match the probes.
 	cfg_set_path((argv && argv[0]) ? argv[0] : NULL);
@@ -862,7 +885,14 @@ skip_input:
 		}
 
 		const Skin *sk = &SKIN;
-		buttons[B_PLAY].icon = server_playing ? IC_PAUSE : IC_PLAY;
+		{
+			native_state ns = native_playback_state();
+			buttons[B_PLAY].icon = (ns == NATIVE_PLAYING) ? IC_PAUSE : IC_PLAY;
+			buttons[B_PLAY].label =
+				ns == NATIVE_PLAYING ? "Detener" :
+				ns == NATIVE_LOADING ? "Cargando..." :
+				lib.open             ? "Reproducir" : "Elegir un tema";
+		}
 		buttons[B_MUTE].icon = muted ? IC_MUTED : IC_SOUND;
 
 		// The slider is the user's control: at zero the right eye is never
@@ -880,7 +910,7 @@ skip_input:
 		}
 		C2D_TargetClear(bottom, sk->bottom_bg);
 		C2D_SceneBegin(bottom);
-		draw_bottom(sk, buttons, B_COUNT, ring_used(), buffering, flash);
+		draw_bottom(sk, buttons, B_COUNT, flash);
 		C3D_FrameEnd(0);
 	}
 
