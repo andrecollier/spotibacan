@@ -1,0 +1,30 @@
+3DS Spotify -- access point (phase 3)
+built 23:15:25
+
+Refreshing the access token...
+  access token 296 chars
+  device id 78f84170543d6243b488643b11b57961b4d3cbce
+Access point: ap-guc3.spotify.com:4070
+  tcp 166 ms  handshake 343 ms  login 376 ms
+
+  *** APWelcome ***
+  account: 31xn3ibkyttdciogihibyz6jjuym
+  account type: 0 (0 = Spotify)
+  reusable credentials: 195 bytes (not stored)
+
+Holding the session. B disconnects.
+  Ping -> Pong (1)
+  packet 0x02 ?, 336 bytes
+  packet 0x76 LegacyWelcome, 2 bytes
+  CountryCode: EC
+  packet 0x50 SecretBlock, 4368 bytes
+  packet 0x1f ?, 17 bytes
+  packet 0x69 ?, 0 bytes
+  packet 0xb5 MercuryReq, 481 bytes
+  packet 0x4a PongAck, 4 bytes
+  (quiet for 10s)
+  (quiet for 20s)
+  (quiet for 30s)
+  (quiet for 40s)
+  Ping -> Pong (2)
+  packet 0x4a PongAck, 4 bytes

@@ -24,6 +24,7 @@ APPS = {
     "audio3ds":  (["source"], [], None),
     "probe_tls":  (["probe_tls", "platform3ds"], ["-DPROBE_BUILD"], "probe"),
     "probe_pair": (["probe_pair", "platform3ds"], ["-DPROBE_BUILD"], "probe"),
+    "probe_ap":   (["probe_ap", "platform3ds"], ["-DPROBE_BUILD"], "probe"),
 }
 
 
