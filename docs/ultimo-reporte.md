@@ -62,3 +62,60 @@ Qué se puede hacer, documentado en `docs/modo-nativo.md`:
    petición de un segundo no puede congelar la interfaz.
 2. Las dos funciones de lista usaban anchos de URI distintos (96 y 64). Unificado en 64:
    `spotify:playlist:` más 22 caracteres son 39, así que sobra.
+
+---
+
+# La clave de audio: caso cerrado (11-oct-2026)
+
+Apareció **Spoti3DS** (kxrbystar, [hilo en GBAtemp](https://gbatemp.net/threads/wip-spoti3ds-native-spotify-connect-client-for-3ds.682623/)),
+un cliente nativo de Spotify Connect para 3DS que **suena en hardware real**. Eso obligó a
+revisar si nuestro método estaba mal. No lo está.
+
+## Qué hace Spoti3DS
+
+Su lista: login5, generación de token, registro como dispositivo Connect, WebSocket al Dealer
+por TLS 1.3, obtención del stream desde el CDN, decodificación. **No menciona el access point
+ni las claves de audio en ningún momento**, lo que parecía la pista: si no hace el handshake
+del AP, conseguiría la clave de otra forma.
+
+No es así. Y lo descarta la investigación del propio issue de librespot.
+
+## Lo que dice librespot#1649, 155 comentarios y abierto desde nov-2025
+
+El comentario más completo es de **JesperNaarttijarvi (26-mar-2026)**, que probó en la **misma
+máquina, el mismo código y el mismo flujo de autenticación, cambiando solo la cuenta**:
+
+- Cuenta con nombre de usuario corto (las viejas, personalizadas): funciona **siempre**.
+- Cuenta con nombre generado largo (las nuevas): **error de clave en todas las pistas**, tres
+  cuentas probadas.
+- Probó **el Player directo, sin Spirc** → mismo error. *Eso descarta que el registro como
+  dispositivo Connect tenga algo que ver.*
+- Probó quitar el usuario de las credenciales guardadas → el servidor rechaza la sesión.
+- Probó su propio client ID registrado → sin permiso de streaming. Probó la clave de Android →
+  el client ID no lo permite.
+- "El pedido de clave de audio ni siquiera contiene el nombre de usuario, así que tiene que ser
+  algo de la sesión misma."
+
+Y **ayer mismo** (10-oct-2026), fherrera124: *"The AES issue with new accounts is definitely a
+roadblock now, though luckily it hasn't affected my older account yet."*
+
+El nombre de usuario de esta cuenta, `31xn3ibkyttdciogihibyz6jjuym`, tiene **28 caracteres** —
+exactamente el patrón de cuenta nueva que describen.
+
+## Conclusión
+
+1. **El código es correcto.** Tres implementaciones independientes —la nuestra, librespot y
+   PSPotify— hacen el mismo pedido byte por byte y reciben el mismo rechazo con esta cuenta.
+2. **La variable es la cuenta, y es su antigüedad.** Restricción del lado de Spotify, de siete
+   meses, sin arreglo, que afecta a todo el ecosistema librespot.
+3. **Spoti3DS funciona porque su autor tiene una cuenta vieja.** Lo que sí demuestra, y es
+   valioso: una 3DS da de sobra para esto, audio incluido.
+4. No hay atajo técnico. Lo intentaron durante siete meses gente con más contexto que nosotros.
+
+Contexto: Spotify publicó **Soloist**, su reemplazo oficial para dispositivos Connect de
+terceros. El rumbo del ecosistema es ese.
+
+## Lo único que falta probar
+
+Una cuenta Premium más vieja. El cliente está escrito y verificado hasta la clave; si una
+cuenta así funciona, la Fase 5a se cierra en una tarde.
