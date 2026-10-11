@@ -1,0 +1,25 @@
+3DS Spotify -- reproduccion nativa (fase 5a)
+built 03:22:59
+
+1. token OAuth...
+2. access point...
+   ap-guc3.spotify.com:4070 como emiliojrobles
+3. token de biblioteca...
+4. pista, clave y descarga...
+   ... metadata
+   ... storage-resolve
+   ... clave de audio
+   ... descarga del CDN
+   ... descifrado
+   The Killers - Mr. Brightside
+   Vorbis 160, 1048576 bytes
+   resolve 4258  key 234  download 3118  decrypt 325 ms
+5. decodificar y sonar...
+   44100 Hz, 2 canales
+   sonando. START corta.
+
+
+   54.8 s reproducidos, 0 underruns
+   decodificador a 5.60x tiempo real
+
+START sale.

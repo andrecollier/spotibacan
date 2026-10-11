@@ -279,3 +279,37 @@ señuelo y decodifica el Vorbis ella sola.
 3. **Cambio de pista y cola**, que es donde PSPotify reporta sus peores latencias.
 4. Volcar la firmware del DSP con DSP1 para que Azahar también reproduzca: eso quita el cuello
    de botella de tener que probar cada cambio de audio en la consola.
+
+## Medido en hardware
+
+```
+resolve 4258  key 234  download 3118  decrypt 325 ms
+54.8 s reproducidos, 0 underruns
+decodificador a 5.60x tiempo real
+```
+
+**5.60x y cero underruns**, mejor que los 5.37x del decodificador solo — porque aquel archivo
+era de 230 kbps y este es el de 160 que sirve Spotify. Descifrar y la red **no** le quitan
+margen: ~18% de un núcleo, el resto sobra.
+
+La clave de audio, lo que más costó conseguir, resulta ser el paso más barato: **234 ms**.
+
+### El cuello de botella es el arranque: ~7.9 s hasta el primer sonido
+
+| Paso | ms | Qué es |
+|---|---|---|
+| resolve | 4258 | dos peticiones HTTPS con sus handshakes |
+| clave | 234 | |
+| descarga | 3118 | 1 MB a ~2.7 Mbit/s |
+| descifrado | 325 | ~3 MB/s por software |
+
+Los 3.1 s de descarga son autoinfligidos: se baja 1 MB antes de empezar cuando una pista de
+160 kbps consume 20 KB/s. **El enlace da 17 veces más caudal del que hace falta**, así que
+arrancar con ~150 KB pondría el primer sonido en ~0.4 s y el resto bajaría de fondo.
+
+Los 4.2 s de resolve son dos handshakes TLS contra el mismo host. `tls3ds` cachea un session
+ticket por host, así que el segundo debería ser barato: o no se está reusando, o un handshake
+en hardware cuesta ~2 s y conviene sostener la conexión en vez de reabrirla. Hay que medirlo
+por separado antes de decidir cuál.
+
+Con las dos cosas, el arranque debería quedar por debajo de 2 s.
