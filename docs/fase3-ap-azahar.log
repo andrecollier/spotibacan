@@ -28,3 +28,7 @@ Holding the session. B disconnects.
   (quiet for 40s)
   Ping -> Pong (2)
   packet 0x4a PongAck, 4 bytes
+  (quiet for 10s)
+  (quiet for 20s)
+  (quiet for 30s)
+  (quiet for 40s)
