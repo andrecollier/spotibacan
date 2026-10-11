@@ -248,3 +248,34 @@ que el AES no va a ser el cuello de botella ni en hardware.
 2. **Una conversión `%u` no se puede omitir como una `%s`.** Intercalar `Range` con ternarios
    dentro del formato imprimía un `0` cuando no había rango. Ahora la cabecera se arma en su
    propio buffer.
+
+## SUENA EN HARDWARE (11-oct-2026, ~03:30)
+
+Emilio copió `probe_play` a la SD de su New 3DS y **"Mr. Brightside" sonó**.
+
+Eso cierra la Fase 5a y con ella el objetivo del proyecto: un cliente nativo de Spotify en una
+3DS, sin puente y sin PC de por medio. La consola resuelve la pista, le pide la clave de audio
+al access point, baja el archivo del CDN, lo descifra con AES-128-CTR, salta los 167 bytes del
+señuelo y decodifica el Vorbis ella sola.
+
+### Estado de las fases
+
+| Fase | Estado |
+|---|---|
+| 1 — TLS 1.2 | verificado |
+| 2 — pairing por device code | verificado, sobrevive rearranques |
+| 3 — sesión con el access point | verificado, APWelcome y pings |
+| 4 — metadata, búsqueda, radio, playlists, Me gusta | verificado |
+| 5a — clave de audio, CDN, descifrado | **verificado en hardware** |
+| 5b — decodificador Vorbis + NDSP | verificado en hardware, 5.37x |
+| Modo nativo en `audio3ds` | navega; falta enchufarle la reproducción |
+
+### Lo que queda
+
+1. **Unir las dos mitades**: el modo nativo de `audio3ds` ya navega la biblioteca y `probe_play`
+   ya reproduce; falta que al elegir un tema se reproduzca.
+2. **Streaming en vez de descarga completa.** Hoy baja el archivo entero (o un tramo) antes de
+   empezar. Debería empezar a sonar con los primeros cientos de kilobytes y seguir bajando.
+3. **Cambio de pista y cola**, que es donde PSPotify reporta sus peores latencias.
+4. Volcar la firmware del DSP con DSP1 para que Azahar también reproduzca: eso quita el cuello
+   de botella de tener que probar cada cambio de audio en la consola.
