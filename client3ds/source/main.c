@@ -576,21 +576,69 @@ static void ring_sink_write(const unsigned char *pcm, unsigned len)
 }
 
 // Each step of the native sign-in takes a visible moment, so it says which.
+static char setup_step[64] = "";
+static char setup_code[16] = "";
+static char setup_url[128] = "";
+static char setup_error[192] = "";
+
+static C3D_RenderTarget *g_top, *g_bottom;
+
+// One painted screen for everything that happens before the library exists:
+// signing in, pairing, failing. Same palette and spacing as the rest.
+static void draw_setup(void)
+{
+	const Skin *sk = &SKIN;
+	C2D_TextBufClear(text_buf);
+	C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+
+	C2D_TargetClear(g_top, sk->top_bg);
+	C2D_SceneBegin(g_top);
+	if (setup_error[0]) {
+		text_at("No se pudo entrar", 28, 40, 0.80f, sk->warm, 0);
+		text_fit(setup_error, 28, 86, 0.50f, sk->text, TOP_W - 56);
+	} else if (setup_code[0]) {
+		text_at("Vincula tu cuenta", 28, 36, 0.80f, sk->warm, 0);
+		text_at("En el navegador, entra a", 28, 84, 0.50f, sk->dim, 0);
+		text_fit(setup_url, 28, 108, 0.52f, sk->accent, TOP_W - 56);
+		text_at("y escribe el codigo que aparece abajo.", 28, 146, 0.50f,
+		        sk->dim, 0);
+	} else {
+		text_at("Spotify", 28, 40, 0.90f, sk->warm, 0);
+		text_fit(setup_step, 28, 96, 0.52f, sk->dim, TOP_W - 56);
+	}
+
+	C2D_TargetClear(g_bottom, sk->bottom_bg);
+	C2D_SceneBegin(g_bottom);
+	if (setup_code[0]) {
+		C2D_DrawRectSolid(0, 0, 0.0f, BOT_W, BAND_H, sk->panel);
+		text_at("CODIGO", 16, 12, 0.46f, sk->dim, 0);
+		text_at(setup_code, BOT_W / 2, 74, 1.30f, sk->text, C2D_AlignCenter);
+		C2D_DrawRectSolid(0, BAR_Y, 0.0f, BOT_W, SCR_H - BAR_Y, sk->accent);
+		text_at("B  Cancelar", BOT_W / 2, BAR_Y + 10, 0.54f, sk->on_accent,
+		        C2D_AlignCenter);
+	} else if (setup_error[0]) {
+		C2D_DrawRectSolid(0, BAR_Y, 0.0f, BOT_W, SCR_H - BAR_Y, sk->accent);
+		text_at("START  Salir", BOT_W / 2, BAR_Y + 10, 0.54f, sk->on_accent,
+		        C2D_AlignCenter);
+	} else {
+		text_fit(setup_step, 16, 100, 0.50f, sk->dim, BOT_W - 32);
+	}
+	C3D_FrameEnd(0);
+}
+
 static void native_progress(const char *step)
 {
-	printf("  %s\n", step);
-	gfxFlushBuffers();
-	gfxSwapBuffers();
-	gspWaitForVBlank();
+	snprintf(setup_step, sizeof(setup_step), "%s", step);
+	draw_setup();
 }
 
 // The pairing code has to stay readable while the user walks to a phone, so
 // it is printed once and the waiting happens under it.
 static void pair_show_code(const char *code, const char *url)
 {
-	printf("\n\n   Entra a:\n   %s\n", url);
-	printf("\n   y escribe este codigo:\n\n       %s\n\n", code);
-	printf("   Esperando (B cancela)");
+	snprintf(setup_code, sizeof(setup_code), "%s", code);
+	snprintf(setup_url, sizeof(setup_url), "%s", url);
+	draw_setup();
 }
 
 static bool pair_poll_frame(int attempt)
@@ -599,13 +647,7 @@ static bool pair_poll_frame(int attempt)
 	hidScanInput();
 	if (hidKeysDown() & KEY_B)
 		return false;
-	// One dot per second of waiting, so a stuck pairing is visible.
-	static int ticks = 0;
-	if (++ticks % 60 == 0)
-		printf(".");
-	gfxFlushBuffers();
-	gfxSwapBuffers();
-	gspWaitForVBlank();
+	draw_setup();
 	return aptMainLoop();
 }
 
@@ -644,45 +686,6 @@ int main(int argc, char **argv)
 		audio = linearAlloc(buf_bytes * WAVE_BUFFERS);
 		if (!audio) fail = "Audio memory failed.";
 	}
-	consoleInit(GFX_TOP, NULL);
-	printf("\n  audio3ds  %s\n", BUILD_STAMP);
-	printf("  config: %s\n", cfg_path());
-	printf("  token guardado: %s\n\n", native_has_token() ? "si" : "no");
-
-	if (!fail) {
-		static char nat_err[192];
-		static const native_sink sink = { ring_sink_write, ring_free_space };
-		// First run on a console: pair here rather than in a separate tool.
-		if (!native_has_token() &&
-		    native_pair(pair_show_code, pair_poll_frame, nat_err,
-		                sizeof(nat_err)) != 0) {
-			printf("\n\n  No se pudo parear:\n  %s\n", nat_err);
-			printf("\n  START para salir.\n");
-			while (aptMainLoop()) {
-				hidScanInput();
-				if (hidKeysDown() & KEY_START) break;
-				gfxFlushBuffers();
-				gfxSwapBuffers();
-				gspWaitForVBlank();
-			}
-			gfxExit();
-			return 1;
-		}
-		if (native_init(&sink, native_progress, nat_err, sizeof(nat_err)) != 0) {
-			printf("\n  No se pudo entrar:\n  %s\n", nat_err);
-			printf("\n  START para salir.\n");
-			while (aptMainLoop()) {
-				hidScanInput();
-				if (hidKeysDown() & KEY_START) break;
-				gfxFlushBuffers();
-				gfxSwapBuffers();
-				gspWaitForVBlank();
-			}
-			gfxExit();
-			return 1;
-		}
-		printf("  %s\n", native_account());
-	}
 	if (fail) { fail_screen(fail); gfxExit(); return 1; }
 
 	memset(waves, 0, sizeof(waves));
@@ -695,11 +698,47 @@ int main(int argc, char **argv)
 	C3D_Init(C3D_DEFAULT_CMDBUF_SIZE);
 	C2D_Init(C2D_DEFAULT_MAX_OBJECTS);
 	C2D_Prepare();
-	gfxSet3D(true);
+	// Up before signing in, so pairing and progress are drawn screens rather
+	// than a text console.
+	// No stereo. The right-eye buffer was only cleared when the slider was
+	// up, so with 3D off it kept whatever uninitialised memory it had -- and
+	// the hardware showed it. Nothing here needs depth, and this halves the
+	// drawing besides.
+	gfxSet3D(false);
 	C3D_RenderTarget *top = C2D_CreateScreenTarget(GFX_TOP, GFX_LEFT);
-	C3D_RenderTarget *top_right = C2D_CreateScreenTarget(GFX_TOP, GFX_RIGHT);
 	C3D_RenderTarget *bottom = C2D_CreateScreenTarget(GFX_BOTTOM, GFX_LEFT);
 	text_buf = C2D_TextBufNew(4096);
+	g_top = top;
+	g_bottom = bottom;
+
+	{
+		static char nat_err[192];
+		static const native_sink sink = { ring_sink_write, ring_free_space };
+		snprintf(setup_step, sizeof(setup_step), "Iniciando...");
+		draw_setup();
+
+		// First run on a console: pair here rather than in a separate tool.
+		bool ok = true;
+		if (!native_has_token())
+			ok = native_pair(pair_show_code, pair_poll_frame, nat_err,
+			                 sizeof(nat_err)) == 0;
+		setup_code[0] = '\0';
+		if (ok)
+			ok = native_init(&sink, native_progress, nat_err,
+			                 sizeof(nat_err)) == 0;
+		if (!ok) {
+			snprintf(setup_error, sizeof(setup_error), "%s", nat_err);
+			while (aptMainLoop()) {
+				hidScanInput();
+				if (hidKeysDown() & KEY_START) break;
+				draw_setup();
+			}
+			C2D_Fini();
+			C3D_Fini();
+			gfxExit();
+			return 1;
+		}
+	}
 	C3D_TexInit(&art_tex, ART_PIXELS, ART_PIXELS, GPU_RGB565);
 	C3D_TexSetFilter(&art_tex, GPU_LINEAR, GPU_LINEAR);
 
@@ -895,19 +934,11 @@ skip_input:
 		}
 		buttons[B_MUTE].icon = muted ? IC_MUTED : IC_SOUND;
 
-		// The slider is the user's control: at zero the right eye is never
-		// drawn, so 2D costs nothing extra.
-		float depth = osGet3DSliderState() * 4.0f;
 		C2D_TextBufClear(text_buf);
 		C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
 		C2D_TargetClear(top, sk->top_bg);
 		C2D_SceneBegin(top);
-		draw_top(sk, buffering, muted, -depth);
-		if (depth > 0.0f) {
-			C2D_TargetClear(top_right, sk->top_bg);
-			C2D_SceneBegin(top_right);
-			draw_top(sk, buffering, muted, depth);
-		}
+		draw_top(sk, buffering, muted, 0.0f);
 		C2D_TargetClear(bottom, sk->bottom_bg);
 		C2D_SceneBegin(bottom);
 		draw_bottom(sk, buttons, B_COUNT, flash);
