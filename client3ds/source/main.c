@@ -424,7 +424,13 @@ static void library_fetch(void)
 			lib.loading = true;
 			lib_retry_at = 0;
 			char err[160] = "";
-			int n = native_fetch(view, arg, nat_rows, NATIVE_ROWS,
+			/* Fetch into staging, never nat_rows: a fetch whose view is
+			 * discarded (the user navigated away mid-flight) must leave
+			 * the rows of whatever IS on screen untouched -- writing
+			 * straight into nat_rows painted downloads over the playlist
+			 * rows while nat_count still described the old view. */
+			static native_row stage[NATIVE_ROWS];
+			int n = native_fetch(view, arg, stage, NATIVE_ROWS,
 			                     err, sizeof(err));
 			/* The user moved on mid-fetch (a cancel also lands here):
 			 * results for a view nobody is showing must never be
@@ -454,6 +460,8 @@ static void library_fetch(void)
 				native_log("LISTA: fallo el fetch de la vista: %s\n", err);
 			} else {
 				nat_count = n;
+				memcpy(nat_rows, stage,
+				       (size_t)n * sizeof(native_row));
 				nat_status[0] = '\0';
 				nat_loaded_view = view;
 				snprintf(nat_loaded_arg, sizeof(nat_loaded_arg), "%s",
