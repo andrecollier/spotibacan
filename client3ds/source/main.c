@@ -752,22 +752,35 @@ static void draw_art(const Skin *sk, float x, float y, float size)
 // skin"; the current colour glides toward the target a few percent a frame.
 static u32 tint_cur = 0, tint_target = 0;
 
+/* A flat mean over all pixels trends to muddy grey, because opposing hues
+ * cancel. Weighting each pixel by its saturation lets the colours a person
+ * would actually name dominate, while near-grey pixels contribute little;
+ * very dark and blown-out pixels are skipped so black borders and white
+ * backgrounds do not wash the result out. Darkened 45% at the end so white
+ * text stays readable over it. */
 static u32 tint_from_pixels(const u8 *rgb565)
 {
-	u32 r = 0, g = 0, b = 0;
-	const int stride = 4;   // 4096 samples are plenty for an average
-	for (int i = 0; i < ART_PIXELS * ART_PIXELS; i += stride) {
+	u32 acc_r = 0, acc_g = 0, acc_b = 0, acc_w = 0;
+	for (int i = 0; i < ART_PIXELS * ART_PIXELS; i += 4) {
 		u16 v;
 		memcpy(&v, rgb565 + i * 2, 2);
-		r += (v >> 11) & 31;
-		g += (v >> 5) & 63;
-		b += v & 31;
+		u32 r = ((v >> 11) & 31) * 255 / 31;
+		u32 g = ((v >> 5) & 63) * 255 / 63;
+		u32 b = (v & 31) * 255 / 31;
+		u32 mx = r > g ? (r > b ? r : b) : (g > b ? g : b);
+		u32 mn = r < g ? (r < b ? r : b) : (g < b ? g : b);
+		if (mx < 32 || mn > 232)
+			continue;
+		u32 w = mx - mn + 1;   /* saturation */
+		acc_r += r * w;
+		acc_g += g * w;
+		acc_b += b * w;
+		acc_w += w;
 	}
-	const u32 n = (ART_PIXELS * ART_PIXELS) / stride;
-	r = r * 255 / (31 * n);
-	g = g * 255 / (63 * n);
-	b = b * 255 / (31 * n);
-	return C2D_Color32(r * 24 / 100, g * 24 / 100, b * 24 / 100, 0xFF);
+	if (!acc_w)
+		return C2D_Color32(18, 18, 19, 0xFF);   /* monochrome cover: slate */
+	u32 r = acc_r / acc_w, g = acc_g / acc_w, b = acc_b / acc_w;
+	return C2D_Color32(r * 45 / 100, g * 45 / 100, b * 45 / 100, 0xFF);
 }
 
 static u32 tint_step(u32 cur, u32 target)
@@ -788,11 +801,29 @@ static u32 tint_step(u32 cur, u32 target)
 // par is signed per eye and already scaled by the 3D slider.
 static void draw_top(const Skin *sk, bool buffering, bool muted, float par)
 {
-	/* The tint fades to black toward the hinge, so the screen reads as the
-	 * album's colour melting into the console rather than a flat fill. */
-	C2D_DrawRectangle(0.0f, 0.0f, 0.0f, TOP_W, 240.0f,
-	                  C2D_Color32(0, 0, 0, 0x00), C2D_Color32(0, 0, 0, 0x00),
-	                  C2D_Color32(0, 0, 0, 0xDC), C2D_Color32(0, 0, 0, 0xDC));
+	/* The reference client's wash: the cover's accent at full strength up
+	 * top, easing to black at the hinge. The ramp shape comes from its
+	 * mockup (stops at 0%, 46%, 78%, 100% of the height); the hue comes
+	 * from the current art. Four-corner colours give true vertex
+	 * interpolation, so three rects do the whole gradient. */
+	static const struct { float pos, ratio; } stops[] = {
+		{0.00f, 1.000f},
+		{0.46f, 0.935f},
+		{0.78f, 0.467f},
+		{1.00f, 0.000f},
+	};
+	const u32 tr_ = tint_cur & 0xFF, tg = (tint_cur >> 8) & 0xFF,
+	          tb_ = (tint_cur >> 16) & 0xFF;
+	for (int i = 0; i + 1 < (int)(sizeof stops / sizeof stops[0]); i++) {
+		const float y0 = stops[i].pos * 240.0f, y1 = stops[i + 1].pos * 240.0f;
+		const u32 c0 = C2D_Color32((u8)(tr_ * stops[i].ratio),
+		                           (u8)(tg * stops[i].ratio),
+		                           (u8)(tb_ * stops[i].ratio), 0xFF);
+		const u32 c1 = C2D_Color32((u8)(tr_ * stops[i + 1].ratio),
+		                           (u8)(tg * stops[i + 1].ratio),
+		                           (u8)(tb_ * stops[i + 1].ratio), 0xFF);
+		C2D_DrawRectangle(0.0f, y0, 0.0f, TOP_W, y1 - y0, c0, c0, c1, c1);
+	}
 
 	// Art on the left with a real margin, text beside it, and nothing else.
 	// The text column is measured, so a long title stops at the edge instead
@@ -2127,10 +2158,10 @@ int main(int argc, char **argv)
 		C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
 		const float par = osGet3DSliderState() * 1.5f;
 		tint_cur = tint_step(tint_cur, tint_target ? tint_target : sk->top_bg);
-		C2D_TargetClear(top, tint_cur);
+		C2D_TargetClear(top, 0xFF000000);
 		C2D_SceneBegin(top);
 		draw_top(sk, buffering, muted, -par);
-		C2D_TargetClear(topR, tint_cur);
+		C2D_TargetClear(topR, 0xFF000000);
 		C2D_SceneBegin(topR);
 		draw_top(sk, buffering, muted, par);
 		C2D_TargetClear(bottom, sk->bottom_bg);
