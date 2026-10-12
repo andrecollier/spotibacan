@@ -132,10 +132,15 @@ def main():
                    check=True)
 
     # Homebrew Launcher lists SD:/3ds/<name>/<name>.3dsx, so the folder and the
-    # executable must share a name.
+    # executable must share a name. The SMDH gives the entry its HOME-menu
+    # icon and title; it is optional so probes stay brandless.
     dest = ROOT / f"dist/3ds/{app}/{app}.3dsx"
     dest.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run([str(tc.packer), str(elf), str(dest)], check=True)
+    pack = [str(tc.packer), str(elf), str(dest)]
+    smdh = ROOT / "assets/icon.smdh"
+    if app == "audio3ds" and smdh.exists():
+        pack.append(f"--smdh={smdh}")
+    subprocess.run(pack, check=True)
     print(f"\nBuilt {dest}  ({dest.stat().st_size:,} bytes)")
     if app == "audio3ds":
         print(f"Copy dist/3ds/ to the SD root, then edit "
