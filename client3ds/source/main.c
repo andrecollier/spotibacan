@@ -785,6 +785,12 @@ static u32 tint_step(u32 cur, u32 target)
 // par is signed per eye and already scaled by the 3D slider.
 static void draw_top(const Skin *sk, bool buffering, bool muted, float par)
 {
+	/* The tint fades to black toward the hinge, so the screen reads as the
+	 * album's colour melting into the console rather than a flat fill. */
+	C2D_DrawRectangle(0.0f, 0.0f, 0.0f, TOP_W, 240.0f,
+	                  C2D_Color32(0, 0, 0, 0x00), C2D_Color32(0, 0, 0, 0x00),
+	                  C2D_Color32(0, 0, 0, 0xDC), C2D_Color32(0, 0, 0, 0xDC));
+
 	// Art on the left with a real margin, text beside it, and nothing else.
 	// The text column is measured, so a long title stops at the edge instead
 	// of running off it.

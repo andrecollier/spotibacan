@@ -12,15 +12,17 @@
  * baseline, a fixed header, and a display-only scrubber. */
 
 #define HEADER_H   30.0f
-#define ROW_Y      168.0f /* transport baseline */
+#define ROW_Y      152.0f /* transport baseline */
 #define CTRL_GAP   26.0f
 #define CTRL_SMALL 34.0f
 #define PLAY_R     20.0f /* 40px disc */
 
-#define SHELF_LABEL_Y 100.0f
-#define SHELF_Y      110.0f
-#define SHELF_TILE   40.0f
-#define SHELF_GAP    8.0f
+/* The shelf owns the middle: the track's name and artist already live on the
+ * top screen, so repeating them here was space the covers could use. */
+#define SHELF_LABEL_Y 44.0f
+#define SHELF_Y      58.0f
+#define SHELF_TILE   52.0f
+#define SHELF_GAP    10.0f
 #define SHELF_MAX    4
 
 #define SCRUB_TIMES_Y 196.0f
@@ -209,15 +211,13 @@ static void draw_header(const screen_player_args *a)
 	             press_clr(CLR_IDLE, mute_pressed, a->accent));
 	tb_add_hit(a->tb, 20.0f, HEADER_H / 2, 44.0f, BTN_P_MUTE);
 
-	/* The heart sits between mute and the title: Me gusta for the playing
-	 * track, accent-filled when it is already in the library. */
+	/* The heart sits between mute and the actions: Me gusta for the playing
+	 * track, accent-filled when it is already in the library. The track name
+	 * no longer prints here -- the top screen carries it. */
 	const bool like_pressed = a->pressed_id == BTN_P_LIKE;
 	draw_heart(48.0f, HEADER_H / 2, a->liked, a->accent,
 	           press_clr(CLR_IDLE, like_pressed, a->accent));
 	tb_add_hit(a->tb, 48.0f, HEADER_H / 2, 40.0f, BTN_P_LIKE);
-
-	ui_text(a->buf, a->track, 70.0f, ui_baseline(7.0f, TY_ROW_NAME),
-	        TY_ROW_NAME, 186.0f - 70.0f, CLR_WHITE);
 
 	/* Two wide hit zones on the right: lyrics and the library. The whole
 	 * stretch answers, the same way the reference gives its header labels a
@@ -247,29 +247,12 @@ static void draw_centre(const screen_player_args *a)
 		 * cover art the backend cannot fetch yet. */
 		const float tile = 50.0f;
 		const float x = 160.0f - tile / 2;
-		const float y = 42.0f;
+		const float y = 58.0f;
 		C2D_DrawRectSolid(x, y, 0.0f, tile, tile, CLR_TILE);
 		ui_now_playing_badge(x, y, tile, true, a->animation_ms, a->accent);
-		return;
 	}
-
-	/* No art yet, so the artist carries the centre the way the reference's
-	 * art-hidden layout does: large role, then the album below it. */
-	{
-		float y = ui_baseline(48.0f, TY_ARTIST_L);
-		float w = ui_text_width(a->buf, a->artist, TY_ARTIST_L);
-		if (w > 300.0f)
-			w = 300.0f;
-		ui_text(a->buf, a->artist, 160.0f - w / 2, y, TY_ARTIST_L,
-		        300.0f, CLR_WHITE);
-
-		y = ui_baseline(y + 6.0f, TY_ALBUM);
-		w = ui_text_width(a->buf, a->album, TY_ALBUM);
-		if (w > 300.0f)
-			w = 300.0f;
-		ui_text(a->buf, a->album, 160.0f - w / 2, y, TY_ALBUM, 300.0f,
-		        CLR_LABEL);
-	}
+	/* Otherwise the middle belongs to the shelf: the top screen already
+	 * carries the track's name, artist and album. */
 }
 
 static void draw_transport(const screen_player_args *a)
