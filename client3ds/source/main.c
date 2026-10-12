@@ -157,6 +157,14 @@ static int now_idx = -1;
 static native_view now_view = NATIVE_PLAYLISTS;
 static char now_arg[64] = "";
 
+/* The playback context: a snapshot of the list the playing track came from.
+ * Transport (prev/next, L/R, auto-advance) walks this copy, so it keeps
+ * working while the user browses other lists. */
+static char play_uris[NATIVE_ROWS][192];
+static char play_art[NATIVE_ROWS][200];
+static int play_count = 0;
+static int play_idx = -1;
+
 // The hardware slider owns the volume; the overlay only follows it. Mute
 // remains a local mix toggle, orthogonal to the slider.
 static int volume = 100;        // display value, mirrored from the slider
@@ -1403,7 +1411,6 @@ static void draw_bottom(const Skin *sk)
 		// reports: the backend streams a bounded fetch and there is
 		// nothing to seek inside yet.
 		native_state st = native_playback_state();
-		bool match = now_matches_view();
 
 		screen_player_args a = {0};
 		a.buf = text_buf;
@@ -1425,8 +1432,8 @@ static void draw_bottom(const Skin *sk)
 		a.dl_queue = native_dl_queue_count();
 		char tmp_title[128];
 		a.dl_active = native_dl_active(tmp_title, sizeof(tmp_title)) >= 0;
-		a.can_prev = match && now_idx > 0;
-		a.can_next = match && now_idx + 1 < nat_count;
+		a.can_prev = play_idx > 0;
+		a.can_next = play_idx >= 0 && play_idx + 1 < play_count;
 		a.progress_ms = (long)(now_pos * 1000.0f);
 		a.duration_ms = (long)(now_dur * 1000.0f);
 		a.pressed_id = g_touch.down ? g_touch.press_id : -1;
@@ -1461,21 +1468,24 @@ static void draw_bottom(const Skin *sk)
 	}
 }
 
-// Starts a track by URI alone, for the shelf: no list row to remember, so
-// prev/next grey out until a list play gives them bounds again.
+// Starts a track by URI alone, for the shelf: no list context to remember,
+// so prev/next grey out until a list play gives them bounds again.
 static void play_uri(const char *uri)
 {
 	native_play(uri);
 	now_idx = -1;
+	play_count = 0;   /* off-list: no neighbours to step to */
+	play_idx = -1;
 	buffering = true;
 	paused = false;
 	ndspChnSetPaused(0, false);
 	ring_clear();
 }
 
-// Starts a track from the cached rows and remembers where it sits, which is
-// what gives prev/next their bounds. Unpausing matters: a skip lands while
-// the channel may be paused, and NDSP would stay silent otherwise.
+// Starts a track from the cached rows and snapshots the whole list: that
+// snapshot -- not whatever list is on screen -- is what prev/next, L/R and
+// auto-advance walk, so the transport keeps working while the user browses
+// somewhere else.
 static void play_index(int idx)
 {
 	play_uri(nat_rows[idx].uri);
@@ -1483,10 +1493,32 @@ static void play_index(int idx)
 	 * Downloads and its long path would not fit the recent entry anyway. */
 	if (strncmp(nat_rows[idx].uri, "file:", 5) != 0)
 		recents_push(nat_rows[idx].uri, nat_rows[idx].art);
+	for (int i = 0; i < nat_count; i++) {
+		snprintf(play_uris[i], sizeof(play_uris[i]), "%s", nat_rows[i].uri);
+		snprintf(play_art[i], sizeof(play_art[i]), "%s", nat_rows[i].art);
+	}
+	play_count = nat_count;
+	play_idx = idx;
 	now_idx = idx;
 	now_view = nat_view;
 	snprintf(now_arg, sizeof(now_arg), "%s",
 	         nat_view == NATIVE_SEARCH ? lib.query : nat_arg);
+}
+
+// Plays a snapshot row (a manual or automatic skip). The snapshot stays the
+// context; the on-screen highlight keeps pointing at the origin view, where
+// the row index still matches if that list is the one displayed.
+static void play_step(int idx)
+{
+	if (strncmp(play_uris[idx], "file:", 5) != 0)
+		recents_push(play_uris[idx], play_art[idx]);
+	native_play(play_uris[idx]);
+	play_idx = idx;
+	now_idx = idx;
+	buffering = true;
+	paused = false;
+	ndspChnSetPaused(0, false);
+	ring_clear();
 }
 
 // Whether the list still shows the view the playing track came from.
@@ -1498,20 +1530,21 @@ static bool now_matches_view(void)
 }
 
 /* The row a manual or automatic skip lands on. Shuffle picks any row but the
- * current one; without a matching view there is no neighbour to go to. */
+ * current one. The bounds come from the playback snapshot, so skipping works
+ * from any screen, not just the list the track started in. */
 static int step_index(int dir)
 {
-	if (!now_matches_view() || nat_count == 0)
+	if (play_count == 0 || play_idx < 0)
 		return -1;
-	if (shuffle_on && nat_count > 1) {
+	if (shuffle_on && play_count > 1) {
 		int r;
 		do {
-			r = rand() % nat_count;
-		} while (r == now_idx);
+			r = rand() % play_count;
+		} while (r == play_idx);
 		return r;
 	}
-	const int t = now_idx + dir;
-	return (t >= 0 && t < nat_count) ? t : -1;
+	const int t = play_idx + dir;
+	return (t >= 0 && t < play_count) ? t : -1;
 }
 
 /* A track that finished on its own: repeat-one replays it, shuffle jumps
@@ -1524,11 +1557,10 @@ static void track_ended(void)
 		return;
 	}
 	int next = step_index(+1);
-	if (next < 0 && repeat_mode == 1 && !shuffle_on &&
-	    now_matches_view() && nat_count > 0)
+	if (next < 0 && repeat_mode == 1 && !shuffle_on && play_count > 0)
 		next = 0;
 	if (next >= 0)
-		play_index(next);
+		play_step(next);
 }
 
 // What activating an absolute list row means: the synthetic Liked Songs or
@@ -1982,13 +2014,13 @@ int main(int argc, char **argv)
 			case BTN_P_PREV: {
 				const int t = step_index(-1);
 				if (t >= 0)
-					play_index(t);
+					play_step(t);
 				break;
 			}
 			case BTN_P_NEXT: {
 				const int t = step_index(+1);
 				if (t >= 0)
-					play_index(t);
+					play_step(t);
 				break;
 			}
 			case BTN_P_SHUFFLE:
@@ -2214,7 +2246,7 @@ int main(int argc, char **argv)
 			const int dir = (down & KEY_DRIGHT) ? +1 : -1;
 			const int t = step_index(dir);
 			if (t >= 0)
-				play_index(t);
+				play_step(t);
 		}
 
 		// L/R are the physical prev/next: with the lid closed they are the
@@ -2224,7 +2256,7 @@ int main(int argc, char **argv)
 			const int dir = (down & KEY_R) ? +1 : -1;
 			const int t = step_index(dir);
 			if (t >= 0)
-				play_index(t);
+				play_step(t);
 		}
 
 		// The overlay mirrors the hardware slider; any move pops it up.
