@@ -1272,11 +1272,11 @@ int native_init(const native_sink *sink, void (*progress)(const char *step),
 	memcpy(g.cands, cands, (size_t)n * sizeof(ap_candidate));
 	g.cand_count = n;
 
-	/* The avatar is no longer fetched here: the Web API rate-limits this
-	 * shared client id often enough (HTTP 429) that a blocking call at init
-	 * mostly slowed the sign-in down to still come back empty. The cached
-	 * URL loads instead, and the art worker keeps retrying the fetch in the
-	 * background via native_profile_art_refresh() when there is none. */
+	/* The avatar is not fetched here: the Web API rate-limits this shared
+	 * client id often enough (HTTP 429) that a blocking call at init mostly
+	 * slowed the sign-in down to still come back empty. The cached URL loads
+	 * instead, and the art worker makes exactly one background attempt via
+	 * native_profile_art_refresh() when there is none. */
 	cfg_load_profile_art(g.profile_art, sizeof(g.profile_art));
 
 	step(progress, "Getting the library token...");

@@ -654,8 +654,7 @@ static char hero_loaded[200] = "";
 static void art_thread(void *arg)
 {
 	(void)arg;
-	u64 profile_try_at = 0;
-	unsigned profile_wait_s = 30;
+	static bool profile_done = false;   /* one avatar attempt, then never again */
 	u64 like_try_at = 0;
 	while (running) {
 		/* Queued likes ride out when the rate-limited Web API has a window;
@@ -690,59 +689,43 @@ static void art_thread(void *arg)
 			}
 		}
 
-		/* The avatar's first fetch races the Web API rate limit (HTTP 429 on
-		 * this shared client id), so retry it on an exponential backoff -
-		 * hammering a saturated quota only keeps it saturated. The same
-		 * timer re-offers the hero when the URL is known but the decode
-		 * failed: getting the URL and getting the pixels are two separate
-		 * round trips, and either can lose. The hero is only taken while
-		 * nothing has played yet: once track art owns the screen, the
-		 * avatar no longer displaces it. */
-		if (!hero_loaded[0] && !hero_new) {
-			const u64 now = osGetTime();
-			if (!profile_try_at ||
-			    now - profile_try_at >= (u64)profile_wait_s * 1000) {
-				profile_try_at = now;
+		/* The avatar gets exactly one shot: a local profile.png / profile.jpg
+		 * beside the app wins; otherwise a single /v1/me call. The Web API
+		 * rate-limits that endpoint so hard (HTTP 429 for hours on this shared
+		 * client id) that retrying only burned TLS handshakes the whole
+		 * session -- a failure is accepted and the hero stays the placeholder.
+		 * The hero is only taken while nothing has played yet: once track art
+		 * owns the screen, the avatar no longer displaces it. */
+		if (!profile_done && !hero_loaded[0] && !hero_new) {
+			profile_done = true;
 
-				/* A profile.png / profile.jpg beside the app wins over the
-				 * API: the Web API rate-limits /v1/me so hard that a file on
-				 * the card is the reliable avatar. */
-				char dir[320], pfile[352], ferr[64] = "";
-				cfg_dir(dir, sizeof(dir));
-				snprintf(pfile, sizeof(pfile), "%sprofile.png", dir);
-				bool got = artwork_load_file(pfile, ART_PIXELS, art_staging,
-				                             ferr, sizeof(ferr));
-				if (!got) {
-					snprintf(pfile, sizeof(pfile), "%sprofile.jpg", dir);
-					got = artwork_load_file(pfile, ART_PIXELS, art_staging,
-					                        ferr, sizeof(ferr));
-				}
-				if (got) {
-					snprintf(hero_loaded, sizeof(hero_loaded), "%s", pfile);
-					__sync_synchronize();
-					art_pending = true;
-					native_log("INIT: avatar local %s\n", pfile);
-					continue;
-				}
+			char dir[320], pfile[352], ferr[64] = "";
+			cfg_dir(dir, sizeof(dir));
+			snprintf(pfile, sizeof(pfile), "%sprofile.png", dir);
+			bool got = artwork_load_file(pfile, ART_PIXELS, art_staging,
+			                             ferr, sizeof(ferr));
+			if (!got) {
+				snprintf(pfile, sizeof(pfile), "%sprofile.jpg", dir);
+				got = artwork_load_file(pfile, ART_PIXELS, art_staging,
+				                        ferr, sizeof(ferr));
+			}
+			if (got) {
+				snprintf(hero_loaded, sizeof(hero_loaded), "%s", pfile);
+				__sync_synchronize();
+				art_pending = true;
+				native_log("INIT: avatar local %s\n", pfile);
+				continue;
+			}
 
-				const char *part = native_profile_art();
-				if (!part[0]) {
-					/* A 429 carries Retry-After: wait exactly that (plus a
-					 * small jitter) instead of a blind exponential backoff,
-					 * which both hammers the quota and waits too long. */
-					int hint = native_profile_art_refresh();
-					part = native_profile_art();
-					if (!part[0])
-						profile_wait_s = hint > 0 ? hint + 2 :
-						                 (profile_wait_s < 300
-						                  ? profile_wait_s * 2 : 300);
-				}
-				if (part[0]) {
-					profile_wait_s = 30;
-					snprintf((char *)hero_want, sizeof(hero_want), "%s", part);
-					__sync_synchronize();
-					hero_new = true;
-				}
+			const char *part = native_profile_art();
+			if (!part[0]) {
+				native_profile_art_refresh();
+				part = native_profile_art();
+			}
+			if (part[0]) {
+				snprintf((char *)hero_want, sizeof(hero_want), "%s", part);
+				__sync_synchronize();
+				hero_new = true;
 			}
 		}
 		if (hero_new) {

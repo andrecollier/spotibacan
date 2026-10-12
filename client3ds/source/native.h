@@ -106,8 +106,8 @@ const char  *native_now_art(void);
 /* The user's own avatar URL, for the idle hero art. Empty when the account
  * has no usable image. */
 const char  *native_profile_art(void);
-/* Retries the avatar fetch once; the startup call is rate-limited often
- * enough (HTTP 429) that the art worker polls this on a backoff instead. */
+/* Fetches the avatar URL once; the endpoint is rate-limited often enough
+ * (HTTP 429) that the art worker makes a single attempt and then stops. */
 int          native_profile_art_refresh(void);
 /* The URI last asked for; empty before the first play. */
 const char  *native_now_uri(void);
