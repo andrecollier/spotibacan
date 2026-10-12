@@ -142,10 +142,11 @@ int native_pair(void (*show_code)(const char *code, const char *url),
 	if (pair_begin(&req, err, errlen) != 0)
 		return -1;
 	nlog("PAIR: code %s\n", req.user_code);
+	/* Always the bare verification_uri: the _complete variant embeds the code
+	 * in the URL, and on screen it read as if the user had to type the whole
+	 * long address instead of just the short code below it. */
 	if (show_code)
-		show_code(req.user_code, req.verification_uri_complete[0]
-		                         ? req.verification_uri_complete
-		                         : req.verification_uri);
+		show_code(req.user_code, req.verification_uri);
 
 	int interval = req.interval_s > 0 ? req.interval_s : 5;
 	time_t deadline = time(NULL) + req.expires_in_s;
