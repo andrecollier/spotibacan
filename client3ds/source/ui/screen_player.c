@@ -192,6 +192,20 @@ static void draw_heart(float cx, float cy, bool liked, u32 clr_on, u32 clr_off)
 	                 cx, cy + 7.5f, clr, 0.0f);
 }
 
+/* Download: an arrow into a tray. Armed fills in the accent colour, idle
+ * stays in the header's grey. */
+static void draw_download(float cx, float cy, bool armed, u32 clr_on,
+                          u32 clr_off)
+{
+	const u32 clr = armed ? clr_on : clr_off;
+	C2D_DrawRectSolid(cx - 1.2f, cy - 8.0f, 0.0f, 2.4f, 6.5f, clr);
+	C2D_DrawTriangle(cx - 5.0f, cy - 2.5f, clr, cx + 5.0f, cy - 2.5f, clr,
+	                 cx, cy + 3.0f, clr, 0.0f);
+	C2D_DrawRectSolid(cx - 7.0f, cy + 4.5f, 0.0f, 14.0f, 2.0f, clr);
+	C2D_DrawRectSolid(cx - 7.0f, cy + 4.5f, 0.0f, 2.0f, 3.5f, clr);
+	C2D_DrawRectSolid(cx + 5.0f, cy + 4.5f, 0.0f, 2.0f, 3.5f, clr);
+}
+
 static void fmt_time(long ms, char *out, size_t out_sz)
 {
 	if (ms < 0)
@@ -218,6 +232,15 @@ static void draw_header(const screen_player_args *a)
 	draw_heart(48.0f, HEADER_H / 2, a->liked, a->accent,
 	           press_clr(CLR_IDLE, like_pressed, a->accent));
 	tb_add_hit(a->tb, 48.0f, HEADER_H / 2, 40.0f, BTN_P_LIKE);
+
+	/* The download button sits next to the heart, only for remote tracks:
+	 * a local file is already on the card. */
+	if (a->dl_show) {
+		const bool dl_pressed = a->pressed_id == BTN_P_DOWNLOAD;
+		draw_download(76.0f, HEADER_H / 2, a->dl_armed, a->accent,
+		              press_clr(CLR_IDLE, dl_pressed, a->accent));
+		tb_add_hit(a->tb, 76.0f, HEADER_H / 2, 40.0f, BTN_P_DOWNLOAD);
+	}
 
 	/* Two wide hit zones on the right: lyrics and the library. The whole
 	 * stretch answers, the same way the reference gives its header labels a

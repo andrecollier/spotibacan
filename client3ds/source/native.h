@@ -114,6 +114,10 @@ int          native_like(const char *uri, bool like, char *err,
                          size_t errlen, int *retry_after);
 /* When on, fully downloaded tracks are also written to the SD as .ogg. */
 void         native_set_downloads(bool on);
+/* The player's download button: arms/disarms saving the track now playing
+ * once its background download completes; armed state for the icon. */
+void         native_save_current(void);
+bool         native_save_armed(void);
 /* Appends a line to the same native.log the backend writes; for UI-side
  * failures that would otherwise leave no trace (a stuck view, a dead tap). */
 void         native_log(const char *fmt, ...);

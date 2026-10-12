@@ -1349,6 +1349,10 @@ static void draw_bottom(const Skin *sk)
 		a.shuffle = shuffle_on;
 		a.repeat = repeat_mode;
 		a.liked = uri_is_liked(native_now_uri());
+		a.dl_show = now_title[0] != '\0' &&
+		            strncmp(native_now_uri(), "file:", 5) != 0 &&
+		            !native_offline();
+		a.dl_armed = native_save_armed() || downloads_on;
 		a.can_prev = match && now_idx > 0;
 		a.can_next = match && now_idx + 1 < nat_count;
 		a.progress_ms = (long)(now_pos * 1000.0f);
@@ -1911,6 +1915,9 @@ int main(int argc, char **argv)
 				/* Local files have nothing to like on the server. */
 				if (strncmp(native_now_uri(), "file:", 5) != 0)
 					like_toggle(native_now_uri());
+				break;
+			case BTN_P_DOWNLOAD:
+				native_save_current();
 				break;
 			case BTN_P_LIBRARY:
 				lib.open = true;

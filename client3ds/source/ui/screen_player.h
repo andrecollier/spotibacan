@@ -29,6 +29,7 @@ enum {
 	BTN_P_SHUFFLE,
 	BTN_P_REPEAT,
 	BTN_P_LIKE,
+	BTN_P_DOWNLOAD,
 	BTN_P_RECENT0 = 0x10,   /* + index: replay a shelf item */
 };
 
@@ -46,6 +47,8 @@ typedef struct {
 	bool shuffle;         /* next track is a random row */
 	int  repeat;          /* 0 off, 1 all, 2 one */
 	bool liked;           /* the heart, for the playing track */
+	bool dl_show;         /* a remote track: the download button exists */
+	bool dl_armed;        /* it will save when the background download ends */
 	bool can_prev, can_next; /* no neighbour in the current view: greyed */
 
 	long progress_ms;

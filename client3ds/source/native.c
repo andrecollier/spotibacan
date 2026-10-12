@@ -133,12 +133,21 @@ static struct {
 	 * already decrypted for playback; saving them is a courtesy copy. */
 	volatile bool downloads_on;
 
+	/* The download button on the player screen: arms a one-shot save of the
+	 * track now playing. The file lands when its background download
+	 * completes, which a skip interrupts -- so it means "let this one
+	 * finish". Cleared when the track changes. */
+	volatile bool want_save;
+
 	/* Offline mode: the player thread runs but never touches the network.
 	 * Set once at init, read everywhere, never cleared. */
 	bool          offline;
 } g;
 
 void native_set_downloads(bool on) { g.downloads_on = on; }
+
+void native_save_current(void) { g.want_save = !g.want_save; }
+bool native_save_armed(void) { return g.want_save; }
 
 bool native_ready(void) { return g.ready; }
 bool native_offline(void) { return g.offline; }
@@ -664,6 +673,7 @@ static void player_thread(void *arg)
 			/* The download runs beside the decoder: `ts` lives on this
 			 * frame's stack and the thread is joined before it goes away. */
 			g.dl_stop = false;
+			g.want_save = false;   /* the button arms per track */
 			/* The fetch below runs a full TLS handshake (cert chain +
 			 * RSA bignum) on this stack; 48 KB was not always enough. */
 			Thread dl = threadCreate(download_thread, &ts, 96 * 1024,
@@ -679,7 +689,8 @@ static void player_thread(void *arg)
 			g.dl_stop = true;
 			threadJoin(dl, U64_MAX);
 			threadFree(dl);
-			if (g.downloads_on && ts.dl_done && !ts.dl_failed)
+			if ((g.downloads_on || g.want_save) && ts.dl_done &&
+			    !ts.dl_failed)
 				save_download(&ts);
 			track_stream_free(&ts);
 			if (g.state == NATIVE_PLAYING)
