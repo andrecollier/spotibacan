@@ -682,10 +682,12 @@ int sp_storage_resolve(const char *host, const char *token,
 }
 
 int sp_user_image(const char *token, char *url, size_t urllen,
-                  char *err, size_t errlen)
+                  char *err, size_t errlen, int *retry_after)
 {
 	http_reply r;
 	memset(&r, 0, sizeof(r));
+	if (retry_after)
+		*retry_after = 0;
 	if (http_get("api.spotify.com", "/v1/me", token, &r) != 0) {
 		snprintf(err, errlen, "perfil: %s", r.err);
 		http_reply_free(&r);
@@ -693,6 +695,8 @@ int sp_user_image(const char *token, char *url, size_t urllen,
 	}
 	if (r.status != 200) {
 		snprintf(err, errlen, "perfil: HTTP %d", r.status);
+		if (r.status == 429 && retry_after)
+			*retry_after = r.retry_after;
 		http_reply_free(&r);
 		return -1;
 	}

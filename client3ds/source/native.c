@@ -212,23 +212,27 @@ const char *native_now_art(void)    { return g.art; }
 const char *native_profile_art(void) { return g.profile_art; }
 
 /* One retry of the avatar fetch, from the art worker. No-op once the URL is
- * known, so the caller can poll on a timer without tracking state itself. */
-void native_profile_art_refresh(void)
+ * known, so the caller can poll on a timer without tracking state itself.
+ * Returns the server's Retry-After seconds on a 429, 0 on success, -1 on any
+ * other failure. */
+int native_profile_art_refresh(void)
 {
 	if (!g.ready || g.profile_art[0] || !g.access_token[0])
-		return;
+		return -1;
 	char url[80];
 	char perr[128] = "";
+	int retry_after = 0;
 	if (sp_user_image(g.access_token, url, sizeof(url), perr,
-	                  sizeof(perr)) == 0) {
+	                  sizeof(perr), &retry_after) == 0) {
 		snprintf(g.profile_art, sizeof(g.profile_art), "%s", url);
 		/* Cache it: /v1/me is so rate-limited that a success may not repeat
 		 * itself for hours, and the CDN URL outlives the session anyway. */
 		cfg_save_profile_art(url);
 		nlog("INIT: foto de perfil recuperada\n");
-	} else {
-		nlog("INIT: foto de perfil sigue sin llegar: %s\n", perr);
+		return 0;
 	}
+	nlog("INIT: foto de perfil sigue sin llegar: %s\n", perr);
+	return retry_after > 0 ? retry_after : -1;
 }
 const char *native_last_error(void) { return g.error; }
 

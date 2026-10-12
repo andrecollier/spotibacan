@@ -28,6 +28,9 @@ static bool header_present(const char *headers, const char *needle)
 	return false;
 }
 
+/* Defined below, beside the streaming reader that also uses it. */
+static const char *find_header(const char *headers, const char *name);
+
 size_t url_encode(const char *in, char *out, size_t outlen)
 {
 	static const char HEX[] = "0123456789ABCDEF";
@@ -162,6 +165,14 @@ static int finish(tls_conn *c, size_t limit, http_reply *out)
 	bool chunked = header_present(raw, "transfer-encoding: chunked");
 	if (chunked)
 		blen = dechunk(body, blen);
+
+	/* 429s carry how long the quota wants us to wait; surface it so callers
+	 * can retry on the server's clock instead of a guessed backoff. */
+	{
+		const char *ra = find_header(raw, "retry-after:");
+		if (ra)
+			out->retry_after = atoi(ra);
+	}
 
 	/* Hand back just the body, so callers never have to think about headers. */
 	char *only = malloc(blen + 1);

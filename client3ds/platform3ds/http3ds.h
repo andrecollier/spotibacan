@@ -14,6 +14,7 @@ typedef struct {
 	int    status;        /* HTTP status, or 0 if the request never completed */
 	char  *body;          /* NUL-terminated; caller frees */
 	size_t len;
+	int    retry_after;   /* seconds, from a 429's Retry-After; 0 otherwise */
 	char   err[160];
 } http_reply;
 

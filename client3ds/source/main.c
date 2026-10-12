@@ -434,10 +434,15 @@ static void art_thread(void *arg)
 
 				const char *part = native_profile_art();
 				if (!part[0]) {
-					native_profile_art_refresh();
+					/* A 429 carries Retry-After: wait exactly that (plus a
+					 * small jitter) instead of a blind exponential backoff,
+					 * which both hammers the quota and waits too long. */
+					int hint = native_profile_art_refresh();
 					part = native_profile_art();
-					if (!part[0] && profile_wait_s < 300)
-						profile_wait_s *= 2;
+					if (!part[0])
+						profile_wait_s = hint > 0 ? hint + 2 :
+						                 (profile_wait_s < 300
+						                  ? profile_wait_s * 2 : 300);
 				}
 				if (part[0]) {
 					profile_wait_s = 30;

@@ -96,7 +96,7 @@ const char  *native_now_art(void);
 const char  *native_profile_art(void);
 /* Retries the avatar fetch once; the startup call is rate-limited often
  * enough (HTTP 429) that the art worker polls this on a backoff instead. */
-void         native_profile_art_refresh(void);
+int          native_profile_art_refresh(void);
 /* The URI last asked for; empty before the first play. */
 const char  *native_now_uri(void);
 const char  *native_last_error(void);

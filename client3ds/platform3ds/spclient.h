@@ -127,8 +127,9 @@ const char *sp_format_name(int format);
  * are accepted: the hero art buffer is 80 chars and the CA bundle only
  * covers Spotify's own CDN, so a lookaside avatar is reported as "none"
  * rather than half-supported. Returns 0, or -1 when the account has no
- * usable image. */
+ * usable image. On HTTP 429, `retry_after` (when given) receives the
+ * server's Retry-After seconds so the caller waits on its clock. */
 int  sp_user_image(const char *token, char *url, size_t urllen,
-                   char *err, size_t errlen);
+                   char *err, size_t errlen, int *retry_after);
 
 #endif
