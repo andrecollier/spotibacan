@@ -87,6 +87,7 @@ static void refresh_nat_title(void)
 	case NATIVE_LIKED:     snprintf(nat_title, sizeof(nat_title), "%s", tr(S_LIKED)); break;
 	case NATIVE_RADIO:     snprintf(nat_title, sizeof(nat_title), "%s", tr(S_RADIO)); break;
 	case NATIVE_SEARCH:    snprintf(nat_title, sizeof(nat_title), "%s", tr(S_SEARCH_VIEW)); break;
+	case NATIVE_DOWNLOADS: snprintf(nat_title, sizeof(nat_title), "%s", tr(S_DL_VIEW)); break;
 	default: break;
 	}
 }
@@ -363,9 +364,9 @@ static void library_fetch(void)
 		}
 	}
 
-	// The playlists view carries one synthetic row for Liked Songs, which is
-	// not in the rootlist but is where most people look first.
-	lib.total = nat_count + (nat_view == NATIVE_PLAYLISTS ? 1 : 0);
+	// The playlists view carries two synthetic rows on top of the rootlist:
+	// Liked Songs first, then Downloads (local files, the offline path).
+	lib.total = nat_count + (nat_view == NATIVE_PLAYLISTS ? 2 : 0);
 	if (lib.sel >= lib.total) lib.sel = lib.total ? lib.total - 1 : 0;
 	lib.loading = false;
 }
@@ -891,7 +892,7 @@ static void draw_native_list(const Skin *sk)
 	bool loading = lib.loading || nat_view != nat_loaded_view ||
 	               strcmp(want_arg ? want_arg : "", nat_loaded_arg) != 0;
 
-	int extra = (nat_view == NATIVE_PLAYLISTS) ? 1 : 0;
+	int extra = (nat_view == NATIVE_PLAYLISTS) ? 2 : 0;
 	int first = (!loading && lib.total) ? (int)(lib.scroll / SL_ROW_H) : 0;
 	float frac = loading ? 0.0f : lib.scroll - first * SL_ROW_H;
 
@@ -902,6 +903,8 @@ static void draw_native_list(const Skin *sk)
 			sl_row *r = &rows[n++];
 			if (extra && i == 0) {
 				*r = (sl_row){tr(S_LIKED), "", "", true, false};
+			} else if (extra && i == 1) {
+				*r = (sl_row){tr(S_DL_VIEW), "", "", true, false};
 			} else {
 				const native_row *nr = &nat_rows[i - extra];
 				*r = (sl_row){nr->label, nr->sub, nr->art, nr->is_playlist,
@@ -1397,7 +1400,10 @@ static void play_uri(const char *uri)
 static void play_index(int idx)
 {
 	play_uri(nat_rows[idx].uri);
-	recents_push(nat_rows[idx].uri, nat_rows[idx].art);
+	/* The shelf is for Spotify art; a local file is one tap away in
+	 * Downloads and its long path would not fit the recent entry anyway. */
+	if (strncmp(nat_rows[idx].uri, "file:", 5) != 0)
+		recents_push(nat_rows[idx].uri, nat_rows[idx].art);
 	now_idx = idx;
 	now_view = nat_view;
 	snprintf(now_arg, sizeof(now_arg), "%s",
@@ -1446,16 +1452,20 @@ static void track_ended(void)
 		play_index(next);
 }
 
-// What activating an absolute list row means: the synthetic Liked Songs row,
-// drilling into a playlist, or playing a track.
+// What activating an absolute list row means: the synthetic Liked Songs or
+// Downloads rows, drilling into a playlist, or playing a track.
 static void activate_row(int abs)
 {
-	int extra = (nat_view == NATIVE_PLAYLISTS) ? 1 : 0;
+	int extra = (nat_view == NATIVE_PLAYLISTS) ? 2 : 0;
 	int idx = abs - extra;
 	if (extra && abs == 0) {
 		nat_view = NATIVE_LIKED;
 		nat_arg[0] = '\0';
 		snprintf(nat_title, sizeof(nat_title), "%s", tr(S_LIKED));
+	} else if (extra && abs == 1) {
+		nat_view = NATIVE_DOWNLOADS;
+		nat_arg[0] = '\0';
+		snprintf(nat_title, sizeof(nat_title), "%s", tr(S_DL_VIEW));
 	} else if (idx >= 0 && idx < nat_count && nat_rows[idx].is_playlist) {
 		snprintf(nat_arg, sizeof(nat_arg), "%s", nat_rows[idx].uri);
 		if (native_playlist_name(nat_arg, nat_title, sizeof(nat_title)) != 0)
@@ -1559,6 +1569,8 @@ static void draw_setup(void)
 	} else if (setup_error[0]) {
 		C2D_DrawRectSolid(0, BAR_Y, 0.0f, BOT_W, SCR_H - BAR_Y, sk->accent);
 		text_at(tr(S_START_QUIT), BOT_W / 2, BAR_Y + 10, 0.54f, sk->on_accent,
+		        C2D_AlignCenter);
+		text_at(tr(S_OFFLINE_A), BOT_W / 2, BAR_Y + 34, 0.50f, sk->on_accent,
 		        C2D_AlignCenter);
 	} else {
 		text_fit(setup_step, 16, 100, 0.50f, sk->dim, BOT_W - 32);
@@ -1677,16 +1689,30 @@ int main(int argc, char **argv)
 			                 sizeof(nat_err)) == 0;
 		if (!ok) {
 			snprintf(setup_error, sizeof(setup_error), "%s", nat_err);
+			/* No internet (or no account) should not brick the app: the
+			 * downloads are local files, so A drops into an offline player
+			 * that opens straight on them. */
 			while (aptMainLoop()) {
 				hidScanInput();
-				if (hidKeysDown() & KEY_START) break;
+				u32 d = hidKeysDown();
+				if (d & KEY_A) {
+					ok = native_init_offline(&sink) == 0;
+					if (ok) {
+						nat_view = NATIVE_DOWNLOADS;
+						refresh_nat_title();
+					}
+					break;
+				}
+				if (d & KEY_START) break;
 				draw_setup();
 			}
-			ui_exit();
-			C2D_Fini();
-			C3D_Fini();
-			gfxExit();
-			return 1;
+			if (!ok) {
+				ui_exit();
+				C2D_Fini();
+				C3D_Fini();
+				gfxExit();
+				return 1;
+			}
 		}
 	}
 	C3D_TexInit(&art_tex, ART_PIXELS, ART_PIXELS, GPU_RGB565);
@@ -1882,7 +1908,9 @@ int main(int argc, char **argv)
 				repeat_mode = (repeat_mode + 1) % 3;
 				break;
 			case BTN_P_LIKE:
-				like_toggle(native_now_uri());
+				/* Local files have nothing to like on the server. */
+				if (strncmp(native_now_uri(), "file:", 5) != 0)
+					like_toggle(native_now_uri());
 				break;
 			case BTN_P_LIBRARY:
 				lib.open = true;
@@ -2027,12 +2055,13 @@ int main(int argc, char **argv)
 				activate_row(lib.sel);
 			if (down & KEY_Y)
 				open_search = true;
-			if ((down & KEY_X) && lib.total) {
-				// X on a track seeds a radio from it.
-				int extra = (nat_view == NATIVE_PLAYLISTS) ? 1 : 0;
+			if ((down & KEY_X) && lib.total && !native_offline()) {
+				// X on a track seeds a radio from it (a network view).
+				int extra = (nat_view == NATIVE_PLAYLISTS) ? 2 : 0;
 				int idx = lib.sel - extra;
 				if (idx >= 0 && idx < nat_count &&
-				    !nat_rows[idx].is_playlist) {
+				    !nat_rows[idx].is_playlist &&
+				    strncmp(nat_rows[idx].uri, "file:", 5) != 0) {
 					snprintf(nat_arg, sizeof(nat_arg), "%s",
 					         nat_rows[idx].uri);
 					nat_view = NATIVE_RADIO;

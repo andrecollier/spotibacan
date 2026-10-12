@@ -21,12 +21,13 @@ typedef enum {
 	NATIVE_SEARCH,              /* uses the query */
 	NATIVE_RADIO,               /* seeded from the selected track */
 	NATIVE_TRACKS,              /* inside one playlist */
+	NATIVE_DOWNLOADS,           /* local files; the one view that works offline */
 } native_view;
 
 typedef struct {
 	char label[64];             /* what the row shows */
 	char sub[40];               /* artist, or the track count */
-	char uri[64];               /* spotify:track:... or spotify:playlist:... */
+	char uri[192];              /* spotify:track:... or file:<name>.ogg */
 	char art[80];               /* 64px cover URL, empty when there is none */
 	bool is_playlist;
 } native_row;
@@ -61,6 +62,12 @@ bool native_has_token(void);
  * each time. The player thread answers its pings while idle. */
 int  native_init(const native_sink *sink, void (*progress)(const char *step),
                  char *err, size_t errlen);
+
+/* Brings up just enough to play the files under music/: no sign-in, no
+ * network, but the same player thread. Used when init fails for want of
+ * internet, so the downloads stay reachable on the road. */
+int  native_init_offline(const native_sink *sink);
+bool native_offline(void);
 void native_exit(void);
 bool native_ready(void);
 

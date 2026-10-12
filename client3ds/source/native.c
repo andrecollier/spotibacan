@@ -12,9 +12,12 @@
 #include "stb_vorbis.h"
 
 #include <3ds.h>
+#include <dirent.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 
 /* The UI draws over the text console, so without a log this mode is opaque:
@@ -75,6 +78,7 @@ static const char *view_name(native_view v)
 	case NATIVE_SEARCH:    return "search";
 	case NATIVE_RADIO:     return "radio";
 	case NATIVE_TRACKS:    return "tracks";
+	case NATIVE_DOWNLOADS: return "downloads";
 	}
 	return "?";
 }
@@ -105,8 +109,9 @@ static struct {
 	LightLock      lock;
 	volatile bool  quit;
 	volatile bool  dl_stop;   /* tells the download thread the UI moved on */
-	/* Set by the UI thread, consumed by the player. */
-	char           want[64];
+	/* Set by the UI thread, consumed by the player. file:<name>.ogg means a
+	 * local download under the music folder, no network involved. */
+	char           want[192];
 	volatile bool  want_new;
 	volatile bool  want_stop;
 	/* Seek request in samples, -1 = none. Set by the UI, consumed by the
@@ -127,11 +132,16 @@ static struct {
 	 * plain .ogg beside the app (music/). The bytes are already here and
 	 * already decrypted for playback; saving them is a courtesy copy. */
 	volatile bool downloads_on;
+
+	/* Offline mode: the player thread runs but never touches the network.
+	 * Set once at init, read everywhere, never cleared. */
+	bool          offline;
 } g;
 
 void native_set_downloads(bool on) { g.downloads_on = on; }
 
 bool native_ready(void) { return g.ready; }
+bool native_offline(void) { return g.offline; }
 const char *native_account(void) { return g.username; }
 
 static void step(void (*progress)(const char *), const char *what)
@@ -468,6 +478,82 @@ static void play_stream(track_stream *ts)
 	nlog("PLAY fin: %u frames\n", g.frames_out);
 }
 
+/* A saved download is a complete file, so none of the streaming machinery
+ * (watermarks, restart-at, the Spotify header) applies: read it whole and
+ * decode straight through. Runs offline by construction. */
+static void play_local(const char *name)
+{
+	char path[400];
+	cfg_dir(path, sizeof(path));
+	snprintf(path + strlen(path), sizeof(path) - strlen(path),
+	         "music/%s", name);
+
+	FILE *f = fopen(path, "rb");
+	if (!f) {
+		snprintf(g.error, sizeof(g.error), "no se encontro el archivo");
+		g.state = NATIVE_FAILED;
+		return;
+	}
+	fseek(f, 0, SEEK_END);
+	long len = ftell(f);
+	fseek(f, 0, SEEK_SET);
+	u8 *data = malloc((size_t)len);
+	if (!data || fread(data, 1, (size_t)len, f) != (size_t)len) {
+		fclose(f);
+		free(data);
+		snprintf(g.error, sizeof(g.error), "no se pudo leer el archivo");
+		g.state = NATIVE_FAILED;
+		return;
+	}
+	fclose(f);
+
+	int verr = 0;
+	stb_vorbis *v = stb_vorbis_open_memory(data, (int)len, &verr, NULL);
+	if (!v) {
+		free(data);
+		snprintf(g.error, sizeof(g.error),
+		         "el decodificador rechazo el archivo (%d)", verr);
+		g.state = NATIVE_FAILED;
+		return;
+	}
+
+	/* The file is whole, so asking the decoder for the length is honest
+	 * here (unlike the streaming path, where the tail is still zeroed). */
+	g.total_frames = stb_vorbis_stream_length_in_samples(v);
+	g.frames_out = 0;
+	g.state = NATIVE_PLAYING;
+	nlog("PLAY local %s\n", name);
+
+	static s16 pcm[4096 * 2];
+	while (!g.quit && !g.want_stop && !g.want_new) {
+		long want = g.want_seek_frame;
+		if (want >= 0) {
+			g.want_seek_frame = -1;
+			__sync_synchronize();
+			if ((unsigned)want >= g.total_frames)
+				want = (long)g.total_frames - 1;
+			if (stb_vorbis_seek(v, (unsigned)want)) {
+				g.frames_out = (unsigned)want;
+				nlog("SEEK local ok -> %ld\n", want);
+			}
+		}
+		if (g.sink.free_space() < sizeof(pcm)) {
+			svcSleepThread(10000000LL);   // 10 ms
+			continue;
+		}
+		int got = stb_vorbis_get_samples_short_interleaved(v, 2, pcm,
+		                                                   4096 * 2);
+		if (got <= 0)
+			break;
+		g.sink.write((const unsigned char *)pcm, (unsigned)got * 4);
+		g.frames_out += (unsigned)got;
+	}
+
+	stb_vorbis_close(v);
+	free(data);
+	nlog("PLAY local fin: %u frames\n", g.frames_out);
+}
+
 /* Rebuilds the access point session with the credentials kept from init.
  * The access token may have expired since, so one token refresh is tried
  * before giving up. Runs on the player thread, the only owner of g.ap. */
@@ -509,7 +595,7 @@ static void player_thread(void *arg)
 	(void)arg;
 	while (!g.quit) {
 		if (g.want_new) {
-			char uri[64];
+			char uri[192];
 			LightLock_Lock(&g.lock);
 			snprintf(uri, sizeof(uri), "%s", g.want);
 			g.want_new = false;
@@ -519,6 +605,34 @@ static void player_thread(void *arg)
 			g.error[0] = '\0';
 			g.frames_out = g.total_frames = 0;
 			g.want_seek_frame = -1;   /* a seek belongs to its track */
+
+			/* A saved download: all local, no session to wait for. The
+			 * display name is the filename, split on the " - " the saver
+			 * writes. */
+			if (strncmp(uri, "file:", 5) == 0) {
+				nlog("FETCH local %s\n", uri + 5);
+				char base[160];
+				snprintf(base, sizeof(base), "%s", uri + 5);
+				char *dot = strstr(base, ".ogg");
+				if (dot)
+					*dot = '\0';
+				char *dash = strstr(base, " - ");
+				if (dash) {
+					*dash = '\0';
+					snprintf(g.artist, sizeof(g.artist), "%s", base);
+					snprintf(g.title, sizeof(g.title), "%s", dash + 3);
+				} else {
+					snprintf(g.title, sizeof(g.title), "%s", base);
+					g.artist[0] = '\0';
+				}
+				g.album[0] = '\0';
+				g.art[0] = '\0';
+				play_local(uri + 5);
+				if (g.state == NATIVE_PLAYING)
+					g.state = NATIVE_IDLE;
+				continue;
+			}
+
 			nlog("FETCH track %s\n", uri);
 
 			/* The idle loop drops g.ap when the access point hangs up; the
@@ -576,6 +690,12 @@ static void player_thread(void *arg)
 		if (g.want_stop) {
 			g.want_stop = false;
 			g.state = NATIVE_IDLE;
+		}
+
+		if (g.offline) {
+			/* No session to keep alive: local files only. */
+			svcSleepThread(20000000LL);   // 20 ms
+			continue;
 		}
 
 		/* The access point session is rebuilt in the background with a 5 s
@@ -710,6 +830,30 @@ int native_init(const native_sink *sink, void (*progress)(const char *step),
 	return 0;
 }
 
+int native_init_offline(const native_sink *sink)
+{
+	if (g.ready)
+		return 0;
+	if (!sink || !sink->write || !sink->free_space)
+		return -1;
+	g.sink = *sink;
+	g.offline = true;
+	snprintf(g.username, sizeof(g.username), "Sin conexion");
+	LightLock_Init(&g.lock);
+	g.want_seek_frame = -1;
+	g.state = NATIVE_IDLE;
+	g.ready = true;
+	/* No TLS on this thread in offline mode, but the same stack keeps the
+	 * player code identical in both modes. */
+	g.player = threadCreate(player_thread, NULL, 128 * 1024, 0x30, -2, false);
+	if (!g.player) {
+		g.ready = false;
+		return -1;
+	}
+	nlog("INIT: modo offline\n");
+	return 0;
+}
+
 void native_exit(void)
 {
 	if (!g.ready)
@@ -781,16 +925,62 @@ static int name_tracks(char uris[][64], int n, native_row *rows, int max,
 	return n;
 }
 
+/* Lists the .ogg files under music/ as playable rows, newest first (the
+ * order the saver produced them in is the order the user last heard).
+ * Pure filesystem: no session, no network. */
+static int fetch_downloads(native_row *rows, int max)
+{
+	char dir[352];
+	cfg_dir(dir, sizeof(dir));
+	strncat(dir, "music", sizeof(dir) - strlen(dir) - 1);
+
+	DIR *d = opendir(dir);
+	if (!d)
+		return 0;   /* nothing saved yet: an empty list, not an error */
+
+	int n = 0;
+	struct dirent *e;
+	while (n < max && (e = readdir(d))) {
+		size_t len = strlen(e->d_name);
+		if (len < 5 || strcasecmp(e->d_name + len - 4, ".ogg") != 0)
+			continue;
+		native_row *r = &rows[n++];
+		snprintf(r->uri, sizeof(r->uri), "file:%s", e->d_name);
+		snprintf(r->label, sizeof(r->label), "%.*s", (int)len - 4,
+		         e->d_name);
+		struct stat st;
+		char path[400];
+		snprintf(path, sizeof(path), "%s/%s", dir, e->d_name);
+		if (stat(path, &st) == 0)
+			snprintf(r->sub, sizeof(r->sub), "%.1f MB",
+			         (double)st.st_size / (1024.0 * 1024.0));
+	}
+	closedir(d);
+	nlog("FETCH downloads -> %d\n", n);
+	return n;
+}
+
 int native_fetch(native_view view, const char *arg, native_row *rows, int max,
                  char *err, size_t errlen)
 {
+	if (max > NATIVE_ROWS)
+		max = NATIVE_ROWS;
+	memset(rows, 0, sizeof(*rows) * (size_t)max);
+
+	/* The downloads shelf is the one view that owes nothing to the network:
+	 * it answers from the SD even before sign-in, which is what makes the
+	 * offline mode more than an error screen. */
+	if (view == NATIVE_DOWNLOADS)
+		return fetch_downloads(rows, max);
+
 	if (!g.ready) {
 		snprintf(err, errlen, "not signed in");
 		return -1;
 	}
-	if (max > NATIVE_ROWS)
-		max = NATIVE_ROWS;
-	memset(rows, 0, sizeof(*rows) * (size_t)max);
+	if (g.offline) {
+		snprintf(err, errlen, "sin conexion");
+		return -1;
+	}
 
 	static char uris[NATIVE_ROWS][64];
 	const char *token = g.l5.access_token;

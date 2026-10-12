@@ -82,6 +82,8 @@ typedef enum {
 	S_DOWNLOADS,
 	S_H_MODES,
 	S_H_HEART,
+	S_DL_VIEW,
+	S_OFFLINE_A,
 	S_COUNT
 } str_id;
 

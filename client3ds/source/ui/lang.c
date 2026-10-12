@@ -79,6 +79,8 @@ static const char *const s_strings[LANG_COUNT][S_COUNT] = {
 		[S_DOWNLOADS]         = "Guardar canciones en SD",
 		[S_H_MODES]           = "Laterales - Aleatorio y repetir",
 		[S_H_HEART]           = "Corazon - Me gusta (tras re-vincular)",
+		[S_DL_VIEW]           = "Descargas",
+		[S_OFFLINE_A]         = "A  Escuchar descargas",
 	},
 	[LANG_EN] = {
 		[S_NOTHING_PLAYING]   = "Nothing playing",
@@ -154,6 +156,8 @@ static const char *const s_strings[LANG_COUNT][S_COUNT] = {
 		[S_DOWNLOADS]         = "Save tracks to SD",
 		[S_H_MODES]           = "Side icons - Shuffle and repeat",
 		[S_H_HEART]           = "Heart - Like (needs re-linking)",
+		[S_DL_VIEW]           = "Downloads",
+		[S_OFFLINE_A]         = "A  Play downloads",
 	},
 };
 
