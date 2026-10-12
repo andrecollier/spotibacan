@@ -999,6 +999,81 @@ static void draw_search_recents(const Skin *sk)
 	ui_depth(0.0f);
 }
 
+// Help sheet on SELECT: the controls for the view the user is standing in,
+// plus the global ones. Single translated strings, so a button rename in one
+// language cannot drift from its description.
+static bool help_open = false;
+
+static void draw_help(const Skin *sk)
+{
+	static const str_id general[] = { S_H_START, S_H_SELECT, S_H_LID };
+	static const str_id list[] = {
+		S_H_DPAD, S_H_LR_PAGE, S_H_A_OPEN, S_H_X_RADIO, S_H_SEARCH,
+		S_H_HOLD_SEARCH, S_H_DRAG_LIST,
+	};
+	static const str_id player[] = {
+		S_H_A_PAUSE, S_H_Y_MUTE, S_H_SKIP, S_H_SCRUB, S_H_SHELF,
+		S_H_LETRA,
+	};
+	static const str_id lyrics[] = { S_H_B_BACK, S_H_DRAG_LYR };
+
+	str_id sec;
+	const str_id *rows;
+	int n;
+	if (lyr_open) {
+		sec = S_H_SEC_LYRICS;
+		rows = lyrics;
+		n = (int)(sizeof(lyrics) / sizeof(lyrics[0]));
+	} else if (lib.open) {
+		sec = S_H_SEC_LIST;
+		rows = list;
+		n = (int)(sizeof(list) / sizeof(list[0]));
+	} else {
+		sec = S_H_SEC_PLAYER;
+		rows = player;
+		n = (int)(sizeof(player) / sizeof(player[0]));
+	}
+	const int ng = (int)(sizeof(general) / sizeof(general[0]));
+
+	const u32 dim   = C2D_Color32(0x00, 0x00, 0x00, 0xA8);
+	const u32 bord  = C2D_Color32(0x38, 0x38, 0x38, 0xFF);
+	const u32 panel = C2D_Color32(0x1B, 0x1B, 0x1B, 0xFF);
+
+	C2D_DrawRectSolid(0.0f, 0.0f, 0.6f, BOT_W, SCR_H, dim);
+	const float px = 14.0f, py = 8.0f, pw = 292.0f, ph = 224.0f;
+	C2D_DrawRectSolid(px, py, 0.6f, pw, ph, bord);
+	C2D_DrawRectSolid(px + 1.0f, py + 1.0f, 0.6f, pw - 2.0f, ph - 2.0f,
+	                  panel);
+
+	ui_depth(0.7f);
+	float y = py + 8.0f;
+	ui_text(text_buf, tr(S_HELP_TITLE), px + 12.0f,
+	        ui_baseline(y, TY_ROW_NAME), TY_ROW_NAME, pw - 24.0f, sk->warm);
+	y += 22.0f;
+
+	ui_text_tracked(text_buf, tr(sec), px + 12.0f,
+	                ui_baseline(y, TY_MICRO), TY_MICRO, 1.0f, sk->accent);
+	y += 12.0f;
+	for (int i = 0; i < n; i++) {
+		ui_text(text_buf, tr(rows[i]), px + 18.0f,
+		        ui_baseline(y, TY_ROW_SUB), TY_ROW_SUB, pw - 36.0f,
+		        sk->text);
+		y += 14.5f;
+	}
+
+	y += 6.0f;
+	ui_text_tracked(text_buf, tr(S_H_SEC_GENERAL), px + 12.0f,
+	                ui_baseline(y, TY_MICRO), TY_MICRO, 1.0f, sk->accent);
+	y += 12.0f;
+	for (int i = 0; i < ng; i++) {
+		ui_text(text_buf, tr(general[i]), px + 18.0f,
+		        ui_baseline(y, TY_ROW_SUB), TY_ROW_SUB, pw - 36.0f,
+		        sk->dim);
+		y += 14.5f;
+	}
+	ui_depth(0.0f);
+}
+
 static void draw_bottom(const Skin *sk)
 {
 	if (lyr_open) {
@@ -1068,6 +1143,9 @@ static void draw_bottom(const Skin *sk)
 	} else if (srch_open) {
 		tb_reset(&g_tb);
 		draw_search_recents(sk);
+	} else if (help_open) {
+		tb_reset(&g_tb);
+		draw_help(sk);
 	}
 }
 
@@ -1461,6 +1539,16 @@ int main(int argc, char **argv)
 			down = 0;
 			g_touch.clicked = -1;
 			g_touch.long_pressed = -1;
+		} else if (help_open) {
+			// Any of the usual escape hatches closes the help sheet.
+			if (down & (KEY_B | KEY_START | KEY_SELECT | KEY_A))
+				help_open = false;
+			down = 0;
+			g_touch.clicked = -1;
+			g_touch.long_pressed = -1;
+		} else if (down & KEY_SELECT) {
+			help_open = true;
+			down = 0;
 		} else if (down & KEY_START) {
 			settings_open = true;
 			settings_sel = 0;
