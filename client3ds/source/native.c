@@ -954,8 +954,10 @@ static void player_thread(void *arg)
 			snprintf(g.album, sizeof(g.album), "%s", job->ts.meta.album);
 			snprintf(g.art, sizeof(g.art), "%s", job->ts.meta.art_large);
 
-			/* The download runs beside the decoder. */
-			job->save = g.downloads_on;
+			/* The download runs beside the decoder. An arm that landed
+			 * while the metadata fetch was still running has no job to
+			 * stick to yet, so it is honoured here instead of dropped. */
+			job->save = g.downloads_on || g.want_save;
 			g.want_save = false;   /* the button arms per track */
 			LightLock_Lock(&g.lock);
 			job->next = g.jobs;
@@ -1368,10 +1370,14 @@ static int name_tracks(char uris[][64], int n, native_row *rows, int max,
 		int chunk = n - base > 50 ? 50 : n - base;
 		for (int i = 0; i < chunk; i++)
 			ptrs[i] = uris[base + i];
+		TickCounter t;
+		osTickCounterStart(&t);
 		int named = sp_track_metadata_batch(g.sp_host, g.l5.access_token,
 		                                    ptrs, chunk, meta, err, errlen);
-		nlog("  chunk %d..%d -> %d named%s%s\n", base, base + chunk - 1,
-		     named, named < 0 ? ": " : "", named < 0 ? err : "");
+		osTickCounterUpdate(&t);
+		nlog("  chunk %d..%d -> %d named%s%s (%.0f ms)\n", base,
+		     base + chunk - 1, named, named < 0 ? ": " : "",
+		     named < 0 ? err : "", osTickCounterRead(&t));
 		if (named < 0)
 			continue;
 		for (int i = 0; i < named; i++) {

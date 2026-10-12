@@ -58,12 +58,30 @@ static struct {
 	mbedtls_ctr_drbg_context drbg;
 	mbedtls_x509_crt         anchors;
 	int                      anchor_count;
-	/* One ticket, for the host we last spoke to. Spotify's client talks to a
-	 * handful of hosts in bursts, so even a single slot saves a full ECDHE. */
-	mbedtls_ssl_session      ticket;
-	char                     ticket_host[128];
-	bool                     have_ticket;
+	/* A small ring of session tickets, keyed by host. Spotify's client talks
+	 * to a handful of hosts in bursts; with a single slot the art fetches and
+	 * API calls kept evicting each other's ticket, forcing a full ECDHE on
+	 * every metadata chunk. Four slots cover the working set. */
+#define TLS_TICKET_SLOTS 4
+	mbedtls_ssl_session      ticket[TLS_TICKET_SLOTS];
+	char                     ticket_host[TLS_TICKET_SLOTS][128];
+	bool                     have_ticket[TLS_TICKET_SLOTS];
+	int                      ticket_next;
 } g;
+
+/* The matching slot, or the next victim when the host has none yet. */
+static int ticket_slot(const char *host, bool *found)
+{
+	for (int i = 0; i < TLS_TICKET_SLOTS; i++)
+		if (g.have_ticket[i] && strcmp(g.ticket_host[i], host) == 0) {
+			*found = true;
+			return i;
+		}
+	*found = false;
+	int slot = g.ticket_next;
+	g.ticket_next = (g.ticket_next + 1) % TLS_TICKET_SLOTS;
+	return slot;
+}
 
 void tls_strerror(int code, char *out, size_t outlen)
 {
@@ -85,7 +103,8 @@ int tls_global_init(void)
 	mbedtls_entropy_init(&g.entropy);
 	mbedtls_ctr_drbg_init(&g.drbg);
 	mbedtls_x509_crt_init(&g.anchors);
-	mbedtls_ssl_session_init(&g.ticket);
+	for (int i = 0; i < TLS_TICKET_SLOTS; i++)
+		mbedtls_ssl_session_init(&g.ticket[i]);
 
 	static const char PERS[] = "3ds-spotify";
 	int rc = mbedtls_ctr_drbg_seed(&g.drbg, mbedtls_entropy_func, &g.entropy,
@@ -113,7 +132,8 @@ void tls_global_exit(void)
 {
 	if (!g.ready)
 		return;
-	mbedtls_ssl_session_free(&g.ticket);
+	for (int i = 0; i < TLS_TICKET_SLOTS; i++)
+		mbedtls_ssl_session_free(&g.ticket[i]);
 	mbedtls_x509_crt_free(&g.anchors);
 	mbedtls_ctr_drbg_free(&g.drbg);
 	mbedtls_entropy_free(&g.entropy);
@@ -264,8 +284,10 @@ tls_conn *tls_connect(const char *host, u16 port, int timeout_ms,
 	 * arms the hostname check against the leaf. */
 	if ((rc = mbedtls_ssl_set_hostname(&c->ssl, host)))
 		goto fail;
-	if (g.have_ticket && strcmp(g.ticket_host, host) == 0)
-		mbedtls_ssl_set_session(&c->ssl, &g.ticket);
+	bool found = false;
+	const int slot = ticket_slot(host, &found);
+	if (found)
+		mbedtls_ssl_set_session(&c->ssl, &g.ticket[slot]);
 
 	mbedtls_ssl_set_bio(&c->ssl, c, bio_send, bio_recv, NULL);
 
@@ -294,21 +316,22 @@ tls_conn *tls_connect(const char *host, u16 port, int timeout_ms,
 	         mbedtls_ssl_get_version(&c->ssl));
 	snprintf(st->ciphersuite, sizeof(st->ciphersuite), "%s",
 	         mbedtls_ssl_get_ciphersuite(&c->ssl));
-	st->resumed = mbedtls_ssl_is_handshake_over(&c->ssl) &&
-	              g.have_ticket && strcmp(g.ticket_host, host) == 0;
+	st->resumed = mbedtls_ssl_is_handshake_over(&c->ssl) && found;
 
 	const mbedtls_x509_crt *peer = mbedtls_ssl_get_peer_cert(&c->ssl);
 	if (peer)
 		mbedtls_x509_dn_gets(st->peer_cn, sizeof(st->peer_cn), &peer->subject);
 
-	/* Keep the ticket for the next connection to this host. */
-	mbedtls_ssl_session_free(&g.ticket);
-	mbedtls_ssl_session_init(&g.ticket);
-	if (mbedtls_ssl_get_session(&c->ssl, &g.ticket) == 0) {
-		snprintf(g.ticket_host, sizeof(g.ticket_host), "%s", host);
-		g.have_ticket = true;
+	/* Keep the ticket for the next connection to this host. The slot lookup
+	 * already ran before the handshake: a match is refreshed in place, a miss
+	 * lands on the ring's next victim. */
+	mbedtls_ssl_session_free(&g.ticket[slot]);
+	mbedtls_ssl_session_init(&g.ticket[slot]);
+	if (mbedtls_ssl_get_session(&c->ssl, &g.ticket[slot]) == 0) {
+		snprintf(g.ticket_host[slot], sizeof(g.ticket_host[slot]), "%s", host);
+		g.have_ticket[slot] = true;
 	} else {
-		g.have_ticket = false;
+		g.have_ticket[slot] = false;
 	}
 
 	return c;
