@@ -67,18 +67,13 @@ bool cfg_load_refresh_token(char *out, size_t outlen)
 	return read_key("refresh_token", out, outlen);
 }
 
-/* Written to a temporary file and renamed into place.
- *
- * This matters more than it looks: Spotify rotates the refresh token on every
- * exchange, so the moment a refresh succeeds the stored one is dead. A write
- * that is interrupted -- a closed lid, a yanked card, a full filesystem --
- * would then leave no usable token at all and force the user to pair again.
- * The rename is the step that cannot half-happen. */
-bool cfg_save_refresh_token(const char *token, const char *scope)
+bool cfg_load_profile_art(char *out, size_t outlen)
 {
-	if (!token || !token[0])
-		return false;
+	return read_key("profile_art", out, outlen);
+}
 
+static bool write_cfg(const char *token, const char *scope, const char *art)
+{
 	char tmp[sizeof(path) + 8];
 	snprintf(tmp, sizeof(tmp), "%s.new", cfg_path());
 
@@ -90,6 +85,8 @@ bool cfg_save_refresh_token(const char *token, const char *scope)
 	fprintf(f, "refresh_token=%s\n", token);
 	if (scope && scope[0])
 		fprintf(f, "scope=%s\n", scope);
+	if (art && art[0])
+		fprintf(f, "profile_art=%s\n", art);
 
 	bool ok = fflush(f) == 0 && ferror(f) == 0;
 	if (fclose(f) != 0)
@@ -108,6 +105,37 @@ bool cfg_save_refresh_token(const char *token, const char *scope)
 		return false;
 	}
 	return true;
+}
+
+/* Written to a temporary file and renamed into place.
+ *
+ * This matters more than it looks: Spotify rotates the refresh token on every
+ * exchange, so the moment a refresh succeeds the stored one is dead. A write
+ * that is interrupted -- a closed lid, a yanked card, a full filesystem --
+ * would then leave no usable token at all and force the user to pair again.
+ * The rename is the step that cannot half-happen. */
+bool cfg_save_refresh_token(const char *token, const char *scope)
+{
+	if (!token || !token[0])
+		return false;
+
+	/* The rewrite must carry the other keys over, or every token refresh
+	 * would silently drop the cached avatar. */
+	char art[96] = "";
+	read_key("profile_art", art, sizeof(art));
+	return write_cfg(token, scope, art);
+}
+
+bool cfg_save_profile_art(const char *url)
+{
+	if (!url || !url[0])
+		return false;
+
+	char token[512], scope[256] = "";
+	if (!read_key("refresh_token", token, sizeof(token)))
+		return false;
+	read_key("scope", scope, sizeof(scope));
+	return write_cfg(token, scope, url);
 }
 
 bool cfg_clear(void)

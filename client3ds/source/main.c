@@ -311,24 +311,30 @@ static void art_thread(void *arg)
 {
 	(void)arg;
 	u64 profile_try_at = 0;
+	unsigned profile_wait_s = 30;
 	while (running) {
 		/* The avatar's first fetch races the Web API rate limit (HTTP 429 on
-		 * this shared client id), so retry it here every 30 s until it
-		 * lands. The same backoff re-offers the hero when the URL is known
-		 * but the decode failed: getting the URL and getting the pixels are
-		 * two separate round trips, and either can lose. It only takes the
-		 * hero while nothing has played yet: once track art owns the
-		 * screen, the avatar no longer displaces it. */
+		 * this shared client id), so retry it on an exponential backoff -
+		 * hammering a saturated quota only keeps it saturated. The same
+		 * timer re-offers the hero when the URL is known but the decode
+		 * failed: getting the URL and getting the pixels are two separate
+		 * round trips, and either can lose. The hero is only taken while
+		 * nothing has played yet: once track art owns the screen, the
+		 * avatar no longer displaces it. */
 		if (!hero_loaded[0] && !hero_new) {
 			const u64 now = osGetTime();
-			if (!profile_try_at || now - profile_try_at >= 30000) {
+			if (!profile_try_at ||
+			    now - profile_try_at >= (u64)profile_wait_s * 1000) {
 				profile_try_at = now;
 				const char *part = native_profile_art();
 				if (!part[0]) {
 					native_profile_art_refresh();
 					part = native_profile_art();
+					if (!part[0] && profile_wait_s < 300)
+						profile_wait_s *= 2;
 				}
 				if (part[0]) {
+					profile_wait_s = 30;
 					snprintf((char *)hero_want, 80, "%s", part);
 					__sync_synchronize();
 					hero_new = true;

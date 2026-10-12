@@ -205,6 +205,9 @@ void native_profile_art_refresh(void)
 	if (sp_user_image(g.access_token, url, sizeof(url), perr,
 	                  sizeof(perr)) == 0) {
 		snprintf(g.profile_art, sizeof(g.profile_art), "%s", url);
+		/* Cache it: /v1/me is so rate-limited that a success may not repeat
+		 * itself for hours, and the CDN URL outlives the session anyway. */
+		cfg_save_profile_art(url);
 		nlog("INIT: foto de perfil recuperada\n");
 	} else {
 		nlog("INIT: foto de perfil sigue sin llegar: %s\n", perr);
@@ -594,8 +597,10 @@ int native_init(const native_sink *sink, void (*progress)(const char *step),
 
 	/* The avatar is no longer fetched here: the Web API rate-limits this
 	 * shared client id often enough (HTTP 429) that a blocking call at init
-	 * mostly slowed the sign-in down to still come back empty. The art worker
-	 * retries it in the background via native_profile_art_refresh(). */
+	 * mostly slowed the sign-in down to still come back empty. The cached
+	 * URL loads instead, and the art worker keeps retrying the fetch in the
+	 * background via native_profile_art_refresh() when there is none. */
+	cfg_load_profile_art(g.profile_art, sizeof(g.profile_art));
 
 	step(progress, "Getting the library token...");
 	if (login5_from_credentials(info.username, info.reusable, info.reusable_len,

@@ -17,6 +17,11 @@ const char *cfg_path(void);
 
 bool cfg_load_refresh_token(char *out, size_t outlen);
 bool cfg_save_refresh_token(const char *token, const char *scope);
+/* The avatar URL is not a secret, but it rides in the same file: the Web API
+ * rate-limits /v1/me so hard (shared client id) that once the fetch succeeds
+ * the answer is worth keeping across restarts. */
+bool cfg_load_profile_art(char *out, size_t outlen);
+bool cfg_save_profile_art(const char *url);
 bool cfg_clear(void);
 
 #endif
