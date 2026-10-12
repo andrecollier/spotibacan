@@ -562,6 +562,43 @@ static void draw_art(const Skin *sk, float x, float y, float size)
 	}
 }
 
+// Album-art tint for the top screen background, the reference client's best
+// trick: the cover's average colour, darkened hard, so the screen belongs to
+// the record without fighting the text. tint_target 0 means "no art, use the
+// skin"; the current colour glides toward the target a few percent a frame.
+static u32 tint_cur = 0, tint_target = 0;
+
+static u32 tint_from_pixels(const u8 *rgb565)
+{
+	u32 r = 0, g = 0, b = 0;
+	const int stride = 4;   // 4096 samples are plenty for an average
+	for (int i = 0; i < ART_PIXELS * ART_PIXELS; i += stride) {
+		u16 v;
+		memcpy(&v, rgb565 + i * 2, 2);
+		r += (v >> 11) & 31;
+		g += (v >> 5) & 63;
+		b += v & 31;
+	}
+	const u32 n = (ART_PIXELS * ART_PIXELS) / stride;
+	r = r * 255 / (31 * n);
+	g = g * 255 / (63 * n);
+	b = b * 255 / (31 * n);
+	return C2D_Color32(r * 24 / 100, g * 24 / 100, b * 24 / 100, 0xFF);
+}
+
+static u32 tint_step(u32 cur, u32 target)
+{
+	u32 out = 0xFF000000u;
+	for (int i = 0; i < 3; i++) {
+		int c = (cur >> (i * 8)) & 0xFF, t = (target >> (i * 8)) & 0xFF;
+		c += (t - c) / 8 + ((t > c) ? 1 : (t < c) ? -1 : 0);
+		if (c < 0) c = 0;
+		if (c > 255) c = 255;
+		out |= (u32)c << (i * 8);
+	}
+	return out;
+}
+
 // Stereo depth: each element shifts horizontally by its own amount, so the
 // cover sits clearly in front of the text and the text in front of the panel.
 // par is signed per eye and already scaled by the 3D slider.
@@ -765,6 +802,203 @@ static void draw_settings(const Skin *sk)
 }
 
 
+// Recently-played shelf on the player screen, kept locally: the Web API's
+// recently-played endpoint sits behind the same saturated quota as /v1/me,
+// while what this console played is something it already knows.
+#define RECENT_MAX 8
+typedef struct { char uri[64]; char art[80]; } recent_t;
+static recent_t recents[RECENT_MAX];
+static int recent_count = 0;
+
+static void recents_file(char *out, size_t n)
+{
+	char d[320];
+	cfg_dir(d, sizeof(d));
+	snprintf(out, n, "%srecents.txt", d);
+}
+
+static void recents_load(void)
+{
+	char path[352];
+	recents_file(path, sizeof(path));
+	FILE *f = fopen(path, "r");
+	if (!f)
+		return;
+	char line[160];
+	while (recent_count < RECENT_MAX && fgets(line, sizeof(line), f)) {
+		char *tab = strchr(line, '\t');
+		if (!tab)
+			continue;
+		*tab = '\0';
+		char *nl = strpbrk(tab + 1, "\r\n");
+		if (nl)
+			*nl = '\0';
+		snprintf(recents[recent_count].uri, 64, "%s", line);
+		snprintf(recents[recent_count].art, 80, "%s", tab + 1);
+		recent_count++;
+	}
+	fclose(f);
+}
+
+static void recents_save(void)
+{
+	char path[352], tmp[360];
+	recents_file(path, sizeof(path));
+	snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+	FILE *f = fopen(tmp, "w");
+	if (!f)
+		return;
+	for (int i = 0; i < recent_count; i++)
+		fprintf(f, "%s\t%s\n", recents[i].uri, recents[i].art);
+	fclose(f);
+	rename(tmp, path);
+}
+
+static void recents_push(const char *uri, const char *art)
+{
+	if (!uri || !*uri)
+		return;
+	int at = -1;
+	for (int i = 0; i < recent_count; i++)
+		if (strcmp(recents[i].uri, uri) == 0) {
+			at = i;
+			break;
+		}
+	if (at == 0)
+		return;   // already the freshest
+	if (at < 0) {
+		if (recent_count < RECENT_MAX)
+			recent_count++;
+		at = recent_count - 1;
+	}
+	memmove(&recents[1], &recents[0], (size_t)at * sizeof(recents[0]));
+	snprintf(recents[0].uri, sizeof(recents[0].uri), "%s", uri);
+	snprintf(recents[0].art, sizeof(recents[0].art), "%s", art ? art : "");
+	recents_save();
+}
+
+// Recent searches, kept locally for the long-press-on-the-magnifier popup:
+// the reference client's search shelf, fed by what was actually typed here.
+#define SRCH_MAX 8
+static char srch[SRCH_MAX][64];
+static int  srch_count = 0;
+static bool srch_open = false;
+#define SR_ROW0  0x7300
+#define SR_DEL0  0x7320
+#define SR_CLEAR 0x7340
+
+static void srch_file(char *out, size_t n)
+{
+	char d[320];
+	cfg_dir(d, sizeof(d));
+	snprintf(out, n, "%ssearches.txt", d);
+}
+
+static void srch_load(void)
+{
+	char path[352];
+	srch_file(path, sizeof(path));
+	FILE *f = fopen(path, "r");
+	if (!f)
+		return;
+	char line[80];
+	while (srch_count < SRCH_MAX && fgets(line, sizeof(line), f)) {
+		char *nl = strpbrk(line, "\r\n");
+		if (nl)
+			*nl = '\0';
+		if (!line[0])
+			continue;
+		snprintf(srch[srch_count], sizeof(srch[0]), "%s", line);
+		srch_count++;
+	}
+	fclose(f);
+}
+
+static void srch_save(void)
+{
+	char path[352], tmp[360];
+	srch_file(path, sizeof(path));
+	snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+	FILE *f = fopen(tmp, "w");
+	if (!f)
+		return;
+	for (int i = 0; i < srch_count; i++)
+		fprintf(f, "%s\n", srch[i]);
+	fclose(f);
+	rename(tmp, path);
+}
+
+static void srch_push(const char *query)
+{
+	if (!query || !*query)
+		return;
+	int at = -1;
+	for (int i = 0; i < srch_count; i++)
+		if (strcmp(srch[i], query) == 0) {
+			at = i;
+			break;
+		}
+	if (at == 0)
+		return;
+	if (at < 0) {
+		if (srch_count < SRCH_MAX)
+			srch_count++;
+		at = srch_count - 1;
+	}
+	memmove(&srch[1], &srch[0], (size_t)at * sizeof(srch[0]));
+	snprintf(srch[0], sizeof(srch[0]), "%s", query);
+	srch_save();
+}
+
+// The popup: a dimmed modal over the list, same recipe as the settings menu.
+static void draw_search_recents(const Skin *sk)
+{
+	const u32 dim   = C2D_Color32(0x00, 0x00, 0x00, 0xA8);
+	const u32 bord  = C2D_Color32(0x38, 0x38, 0x38, 0xFF);
+	const u32 panel = C2D_Color32(0x1B, 0x1B, 0x1B, 0xFF);
+
+	C2D_DrawRectSolid(0.0f, 0.0f, 0.6f, BOT_W, SCR_H, dim);
+	const float px = 30.0f, py = 30.0f, pw = 260.0f;
+	const float rh = 26.0f;
+	const float ph = 44.0f + rh * (srch_count > 0 ? srch_count : 1) + 10.0f;
+	C2D_DrawRectSolid(px, py, 0.6f, pw, ph, bord);
+	C2D_DrawRectSolid(px + 1.0f, py + 1.0f, 0.6f, pw - 2.0f, ph - 2.0f,
+	                  panel);
+
+	ui_depth(0.7f);
+	ui_text(text_buf, tr(S_RECENT_TITLE), px + 14.0f,
+	        ui_baseline(py + 8.0f, TY_ROW_NAME), TY_ROW_NAME, 140.0f,
+	        sk->warm);
+	if (srch_count > 0) {
+		float w = ui_text_width(text_buf, tr(S_CLEAR), TY_MICRO);
+		ui_text_tracked(text_buf, tr(S_CLEAR), px + pw - 14.0f - w,
+		                ui_baseline(py + 12.0f, TY_MICRO), TY_MICRO, 1.0f,
+		                sk->accent);
+		tb_add(&g_tb, px + pw - 20.0f - w, py + 4.0f, w + 12.0f, 28.0f,
+		       SR_CLEAR);
+	}
+
+	const float ry = py + 40.0f;
+	if (srch_count == 0) {
+		ui_text(text_buf, tr(S_EMPTY_LIST), px + 14.0f,
+		        ui_baseline(ry + 4.0f, TY_ROW_SUB), TY_ROW_SUB,
+		        pw - 28.0f, sk->dim);
+	}
+	for (int i = 0; i < srch_count; i++) {
+		const float y = ry + i * rh;
+		ui_text(text_buf, srch[i], px + 14.0f,
+		        ui_baseline(y + 4.0f, TY_ROW_NAME), TY_ROW_NAME,
+		        pw - 60.0f, sk->text);
+		/* A small X to forget one search. */
+		ui_text(text_buf, "x", px + pw - 24.0f,
+		        ui_baseline(y + 5.0f, TY_ROW_NAME), TY_ROW_NAME, 12.0f,
+		        sk->dim);
+		tb_add(&g_tb, px + 4.0f, y, pw - 44.0f, rh, SR_ROW0 + i);
+		tb_add(&g_tb, px + pw - 40.0f, y, 36.0f, rh, SR_DEL0 + i);
+	}
+	ui_depth(0.0f);
+}
+
 static void draw_bottom(const Skin *sk)
 {
 	if (lyr_open) {
@@ -813,6 +1047,12 @@ static void draw_bottom(const Skin *sk)
 		a.duration_ms = (long)(now_dur * 1000.0f);
 		a.pressed_id = g_touch.down ? g_touch.press_id : -1;
 		a.animation_ms = (unsigned)osGetTime();
+		static const char *shelf_art[RECENT_MAX];
+		for (int i = 0; i < recent_count; i++)
+			shelf_art[i] = recents[i].art;
+		a.recent_art = shelf_art;
+		a.recent_n = recent_count;
+		a.thumb = list_thumb;
 		a.accent = sk->accent;
 		a.on_accent = sk->on_accent;
 		a.panel = sk->panel;
@@ -825,7 +1065,22 @@ static void draw_bottom(const Skin *sk)
 		// taps meant for the menu.
 		tb_reset(&g_tb);
 		draw_settings(sk);
+	} else if (srch_open) {
+		tb_reset(&g_tb);
+		draw_search_recents(sk);
 	}
+}
+
+// Starts a track by URI alone, for the shelf: no list row to remember, so
+// prev/next grey out until a list play gives them bounds again.
+static void play_uri(const char *uri)
+{
+	native_play(uri);
+	now_idx = -1;
+	buffering = true;
+	paused = false;
+	ndspChnSetPaused(0, false);
+	ring_clear();
 }
 
 // Starts a track from the cached rows and remembers where it sits, which is
@@ -833,15 +1088,12 @@ static void draw_bottom(const Skin *sk)
 // the channel may be paused, and NDSP would stay silent otherwise.
 static void play_index(int idx)
 {
-	native_play(nat_rows[idx].uri);
+	play_uri(nat_rows[idx].uri);
+	recents_push(nat_rows[idx].uri, nat_rows[idx].art);
 	now_idx = idx;
 	now_view = nat_view;
 	snprintf(now_arg, sizeof(now_arg), "%s",
 	         nat_view == NATIVE_SEARCH ? lib.query : nat_arg);
-	buffering = true;
-	paused = false;
-	ndspChnSetPaused(0, false);
-	ring_clear();
 }
 
 // Whether the list still shows the view the playing track came from.
@@ -1007,6 +1259,8 @@ int main(int argc, char **argv)
 	cfg_set_path((argv && argv[0]) ? argv[0] : NULL);
 	prefs_load();
 	refresh_nat_title();
+	recents_load();
+	srch_load();
 
 	// Everything that can fail runs first, while a text console is still the
 	// only thing initialised and can report why.
@@ -1178,6 +1432,35 @@ int main(int argc, char **argv)
 			down = 0;
 			g_touch.clicked = -1;
 			g_touch.long_pressed = -1;
+		} else if (srch_open) {
+			// The recents popup: pick one, forget one, or wipe them all.
+			const int c = g_touch.clicked;
+			if (c >= SR_ROW0 && c < SR_ROW0 + srch_count) {
+				snprintf(lib.query, sizeof(lib.query), "%s",
+				         srch[c - SR_ROW0]);
+				srch_push(lib.query);
+				nat_view = NATIVE_SEARCH;
+				snprintf(nat_title, sizeof(nat_title), "%s",
+				         tr(S_SEARCH_VIEW));
+				lib.sel = 0;
+				lib.scroll = lib.velocity = 0.0f;
+				lib_reload = true;
+				srch_open = false;
+			} else if (c >= SR_DEL0 && c < SR_DEL0 + srch_count) {
+				const int i = c - SR_DEL0;
+				memmove(&srch[i], &srch[i + 1],
+				        (size_t)(srch_count - i - 1) * sizeof(srch[0]));
+				srch_count--;
+				srch_save();
+			} else if (c == SR_CLEAR) {
+				srch_count = 0;
+				srch_save();
+			}
+			if (down & (KEY_B | KEY_START))
+				srch_open = false;
+			down = 0;
+			g_touch.clicked = -1;
+			g_touch.long_pressed = -1;
 		} else if (down & KEY_START) {
 			settings_open = true;
 			settings_sel = 0;
@@ -1240,6 +1523,16 @@ int main(int argc, char **argv)
 				ndspChnSetMix(0, mix);
 				break;
 			}
+			if (g_touch.clicked >= BTN_P_RECENT0 &&
+			    g_touch.clicked < BTN_P_RECENT0 + recent_count) {
+				// The push reshuffles the shelf, so copy before it moves.
+				char uri[64], art[80];
+				const recent_t *r = &recents[g_touch.clicked - BTN_P_RECENT0];
+				snprintf(uri, sizeof(uri), "%s", r->uri);
+				snprintf(art, sizeof(art), "%s", r->art);
+				recents_push(uri, art);
+				play_uri(uri);
+			}
 		}
 
 		{
@@ -1281,6 +1574,7 @@ int main(int argc, char **argv)
 					__sync_synchronize();
 					hero_new = true;
 					art_present = false;
+					tint_target = 0;   // back to the skin until the cover lands
 				}
 			} else if (paused) {
 				// The track ended or failed under a paused channel; do not
@@ -1333,6 +1627,8 @@ int main(int argc, char **argv)
 			if (lib.scroll < 0.0f) { lib.scroll = 0.0f; lib.velocity = 0.0f; }
 			if (lib.scroll > maxs) { lib.scroll = maxs; lib.velocity = 0.0f; }
 
+			if (g_touch.long_pressed == SL_BTN_SEARCH)
+				srch_open = true;
 			if (g_touch.clicked == SL_BTN_SEARCH)
 				open_search = true;
 			else if (g_touch.clicked == SL_BTN_CLOSE)
@@ -1457,6 +1753,8 @@ int main(int argc, char **argv)
 			char typed[sizeof(lib.query)] = "";
 			if (swkbdInputText(&kb, typed, sizeof(typed)) == SWKBD_BUTTON_RIGHT) {
 				strncpy(lib.query, typed, sizeof(lib.query) - 1);
+				if (lib.query[0])
+					srch_push(lib.query);
 				nat_view = lib.query[0] ? NATIVE_SEARCH : NATIVE_PLAYLISTS;
 				snprintf(nat_title, sizeof(nat_title), "%s",
 				         lib.query[0] ? tr(S_SEARCH_VIEW) : tr(S_LISTS));
@@ -1472,6 +1770,7 @@ int main(int argc, char **argv)
 			artwork_tile_rgb565(art_staging, art_tiled, ART_PIXELS);
 			C3D_TexLoadImage(&art_tex, art_tiled, GPU_TEXFACE_2D, 0);
 			C3D_TexFlush(&art_tex);
+			tint_target = tint_from_pixels(art_staging);
 			art_present = true;
 			art_pending = false;
 		}
@@ -1483,10 +1782,11 @@ int main(int argc, char **argv)
 		tb_reset(&g_tb);
 		C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
 		const float par = osGet3DSliderState() * 1.5f;
-		C2D_TargetClear(top, sk->top_bg);
+		tint_cur = tint_step(tint_cur, tint_target ? tint_target : sk->top_bg);
+		C2D_TargetClear(top, tint_cur);
 		C2D_SceneBegin(top);
 		draw_top(sk, buffering, muted, -par);
-		C2D_TargetClear(topR, sk->top_bg);
+		C2D_TargetClear(topR, tint_cur);
 		C2D_SceneBegin(topR);
 		draw_top(sk, buffering, muted, par);
 		C2D_TargetClear(bottom, sk->bottom_bg);

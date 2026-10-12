@@ -51,6 +51,9 @@ typedef enum {
 	S_ACCENT_PURPLE,
 	S_ACCENT_BLUE,
 	S_ACCENT_ORANGE,
+	S_RECENTLY,
+	S_RECENT_TITLE,
+	S_CLEAR,
 	S_COUNT
 } str_id;
 

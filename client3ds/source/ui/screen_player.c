@@ -12,10 +12,16 @@
  * baseline, a fixed header, and a display-only scrubber. */
 
 #define HEADER_H   30.0f
-#define ROW_Y      150.0f /* transport baseline */
+#define ROW_Y      168.0f /* transport baseline */
 #define CTRL_GAP   26.0f
 #define CTRL_SMALL 34.0f
 #define PLAY_R     20.0f /* 40px disc */
+
+#define SHELF_LABEL_Y 100.0f
+#define SHELF_Y      110.0f
+#define SHELF_TILE   40.0f
+#define SHELF_GAP    8.0f
+#define SHELF_MAX    4
 
 #define SCRUB_TIMES_Y 196.0f
 
@@ -198,7 +204,7 @@ static void draw_centre(const screen_player_args *a)
 		 * cover art the backend cannot fetch yet. */
 		const float tile = 50.0f;
 		const float x = 160.0f - tile / 2;
-		const float y = 62.0f;
+		const float y = 42.0f;
 		C2D_DrawRectSolid(x, y, 0.0f, tile, tile, CLR_TILE);
 		ui_now_playing_badge(x, y, tile, true, a->animation_ms, a->accent);
 		return;
@@ -207,7 +213,7 @@ static void draw_centre(const screen_player_args *a)
 	/* No art yet, so the artist carries the centre the way the reference's
 	 * art-hidden layout does: large role, then the album below it. */
 	{
-		float y = ui_baseline(70.0f, TY_ARTIST_L);
+		float y = ui_baseline(48.0f, TY_ARTIST_L);
 		float w = ui_text_width(a->buf, a->artist, TY_ARTIST_L);
 		if (w > 300.0f)
 			w = 300.0f;
@@ -287,10 +293,44 @@ static void draw_scrubber(const screen_player_args *a)
 	       SCRUB_BAR_W + 16.0f, 24.0f, BTN_P_SCRUB);
 }
 
+/* The shelf: the last few tracks this console played, as tappable covers.
+ * Tracked locally because the Web API's recently-played endpoint sits behind
+ * the same saturated quota as /v1/me. */
+static void draw_shelf(const screen_player_args *a)
+{
+	if (a->recent_n <= 0)
+		return;
+	int n = a->recent_n < SHELF_MAX ? a->recent_n : SHELF_MAX;
+
+	float w = ui_text_width(a->buf, tr(S_RECENTLY), TY_MICRO);
+	ui_text_tracked(a->buf, tr(S_RECENTLY), 160.0f - w / 2,
+	                ui_baseline(SHELF_LABEL_Y, TY_MICRO), TY_MICRO, 1.0f,
+	                CLR_LABEL);
+
+	const float row_w = n * SHELF_TILE + (n - 1) * SHELF_GAP;
+	float x = 160.0f - row_w / 2;
+	for (int i = 0; i < n; i++) {
+		const C2D_Image *img = a->thumb ? a->thumb(a->recent_art[i],
+		                                           a->thumb_ctx) : NULL;
+		if (img)
+			C2D_DrawImageAt(*img, x, SHELF_Y, 0.0f, NULL,
+			                SHELF_TILE / 64.0f, SHELF_TILE / 64.0f);
+		else
+			C2D_DrawRectSolid(x, SHELF_Y, 0.0f, SHELF_TILE, SHELF_TILE,
+			                  CLR_TILE);
+		if (a->pressed_id == BTN_P_RECENT0 + i)
+			C2D_DrawRectSolid(x, SHELF_Y, 0.1f, SHELF_TILE, SHELF_TILE,
+			                  with_alpha(a->accent, 0x66));
+		tb_add(a->tb, x, SHELF_Y, SHELF_TILE, SHELF_TILE, BTN_P_RECENT0 + i);
+		x += SHELF_TILE + SHELF_GAP;
+	}
+}
+
 void screen_player_draw(const screen_player_args *a)
 {
 	draw_header(a);
 	draw_centre(a);
+	draw_shelf(a);
 	draw_transport(a);
 	draw_scrubber(a);
 }

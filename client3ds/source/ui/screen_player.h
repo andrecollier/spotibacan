@@ -26,6 +26,7 @@ enum {
 	BTN_P_MUTE,
 	BTN_P_LYRICS,
 	BTN_P_SCRUB,
+	BTN_P_RECENT0 = 0x10,   /* + index: replay a shelf item */
 };
 
 typedef struct {
@@ -49,6 +50,13 @@ typedef struct {
 	int  pressed_id;
 
 	unsigned animation_ms; /* drives the loading badge */
+
+	/* Recently-played shelf: art URLs of the last tracks this console
+	 * played, tapped to replay. recent_n <= 4 are drawn. */
+	const char *const *recent_art;
+	int recent_n;
+	const C2D_Image *(*thumb)(const char *url, void *ctx);
+	void *thumb_ctx;
 
 	u32 accent;      /* the app's green: pressed glyphs and active states */
 	u32 on_accent;

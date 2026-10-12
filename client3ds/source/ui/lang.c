@@ -48,6 +48,9 @@ static const char *const s_strings[LANG_COUNT][S_COUNT] = {
 		[S_ACCENT_PURPLE]     = "Morado",
 		[S_ACCENT_BLUE]       = "Azul",
 		[S_ACCENT_ORANGE]     = "Naranja",
+		[S_RECENTLY]          = "RECIEN SONADAS",
+		[S_RECENT_TITLE]      = "Recientes",
+		[S_CLEAR]             = "BORRAR",
 	},
 	[LANG_EN] = {
 		[S_NOTHING_PLAYING]   = "Nothing playing",
@@ -92,6 +95,9 @@ static const char *const s_strings[LANG_COUNT][S_COUNT] = {
 		[S_ACCENT_PURPLE]     = "Purple",
 		[S_ACCENT_BLUE]       = "Blue",
 		[S_ACCENT_ORANGE]     = "Orange",
+		[S_RECENTLY]          = "RECENTLY PLAYED",
+		[S_RECENT_TITLE]      = "Recent",
+		[S_CLEAR]             = "CLEAR",
 	},
 };
 
