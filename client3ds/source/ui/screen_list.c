@@ -56,7 +56,7 @@ static void draw_row(const screen_list_args *a, const sl_row *r, int abs_idx,
 		C2D_DrawRectSolid(THUMB_X, y + 4.0f, 0.0f, THUMB_SZ, THUMB_SZ,
 		                  a->panel);
 		ui_now_playing_badge(THUMB_X, y + 4.0f, THUMB_SZ, true,
-		                     a->animation_ms);
+		                     a->animation_ms, a->accent);
 	} else {
 		const C2D_Image *img = r->art_url[0]
 		                       ? a->thumb(r->art_url, a->thumb_ctx) : NULL;

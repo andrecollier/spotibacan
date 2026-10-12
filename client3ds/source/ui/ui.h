@@ -95,9 +95,10 @@ void ui_disc(float cx, float cy, float r, u32 clr);
 void ui_polyline(const float *pts, int count, float thickness, u32 clr);
 
 /* Darken cover art and draw the four-bar current-playback indicator. Active
- * playback animates slowly; paused playback remains at a fixed silhouette. */
+ * playback animates slowly; paused playback remains at a fixed silhouette.
+ * The bars take the accent colour so they follow the settings choice. */
 void ui_now_playing_badge(float x, float y, float size, bool playing,
-                          unsigned animation_ms);
+                          unsigned animation_ms, u32 accent);
 
 /* Bottom-screen playback progress used by non-player views. The player has
  * its own interactive scrubber instead. */

@@ -200,7 +200,7 @@ static void draw_centre(const screen_player_args *a)
 		const float x = 160.0f - tile / 2;
 		const float y = 62.0f;
 		C2D_DrawRectSolid(x, y, 0.0f, tile, tile, CLR_TILE);
-		ui_now_playing_badge(x, y, tile, true, a->animation_ms);
+		ui_now_playing_badge(x, y, tile, true, a->animation_ms, a->accent);
 		return;
 	}
 

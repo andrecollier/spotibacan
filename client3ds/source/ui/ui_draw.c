@@ -479,7 +479,7 @@ void ui_polyline(const float *pts, int count, float thickness, u32 clr)
 }
 
 void ui_now_playing_badge(float x, float y, float size, bool playing,
-                          unsigned animation_ms)
+                          unsigned animation_ms, u32 accent)
 {
 	static const unsigned char active_heights[8][4] = {
 		{7, 16, 10, 14}, {10, 18, 7, 12}, {14, 12, 9, 17}, {17, 8, 13, 11},
@@ -515,7 +515,7 @@ void ui_now_playing_badge(float x, float y, float size, bool playing,
 		}
 		const float h = height * scale;
 		C2D_DrawRectSolid(bx + (bar_w + gap) * i, base - h, 0.0f, bar_w, h,
-		                  C2D_Color32(0x1D, 0xB9, 0x54, 0xFF));
+		                  accent);
 	}
 }
 

@@ -100,6 +100,10 @@ static touch_builder g_tb;
 // accidental press (a palm, a pocket) used to close the app mid-track.
 static bool settings_open = false;
 static int  settings_sel = 0;
+/* Applying a preference writes the SD card, which stalls the frame long
+ * enough to read as a freeze. So a tap only arms the change; the menu draws
+ * once with a busy hint, and the write happens on the next frame. */
+static int  settings_pending = -1;
 
 // File scope because both the input loop and the drawers consult them.
 static bool muted = false;
@@ -703,6 +707,15 @@ static void draw_settings(const Skin *sk)
 	ui_text(text_buf, tr(S_SETTINGS), px + 16.0f,
 	        ui_baseline(py + 8.0f, TY_ROW_NAME), TY_ROW_NAME, pw - 32.0f,
 	        sk->warm);
+	if (settings_pending >= 0) {
+		// Three animated dots while the armed change applies next frame.
+		char dots[4] = "...";
+		dots[(osGetTime() / 250) % 3 + 1] = '\0';
+		float tw = ui_text_width(text_buf, tr(S_SETTINGS), TY_ROW_NAME);
+		ui_text(text_buf, dots, px + 20.0f + tw,
+		        ui_baseline(py + 8.0f, TY_ROW_NAME), TY_ROW_NAME, 24.0f,
+		        sk->accent);
+	}
 
 	const char *labels[SETTINGS_ROWS] = {
 		tr(S_LANGUAGE), tr(S_ACCENT), tr(S_UNLINK), tr(S_QUIT),
@@ -1106,6 +1119,23 @@ int main(int argc, char **argv)
 		// of them are rebuilt below.
 		touch_update(&g_touch, g_tb.rects, g_tb.n);
 
+		// A settings change armed last frame applies now: the menu already
+		// showed its busy hint, so the SD write stalls behind feedback
+		// instead of looking like a freeze.
+		if (settings_pending >= 0) {
+			const int row = settings_pending;
+			settings_pending = -1;
+			if (row == 0) {
+				lang_set(lang_get() == LANG_EN ? LANG_ES : LANG_EN);
+				cfg_set("lang", lang_get() == LANG_EN ? "en" : "es");
+				refresh_nat_title();
+			} else if (row == 1) {
+				accent_idx = (accent_idx + 1) % ACCENT_COUNT;
+				apply_accent();
+				cfg_set("accent", ACCENT_KEYS[accent_idx]);
+			}
+		}
+
 		// START opens the settings menu, and the menu owns every key and
 		// touch until it is answered. Quitting is a row in it, so leaving
 		// the app takes two deliberate presses.
@@ -1123,15 +1153,9 @@ int main(int argc, char **argv)
 			    g_touch.clicked < SET_ROW0 + SETTINGS_ROWS)
 				row = g_touch.clicked - SET_ROW0;
 			switch (row) {
-			case 0:   // language
-				lang_set(lang_get() == LANG_EN ? LANG_ES : LANG_EN);
-				cfg_set("lang", lang_get() == LANG_EN ? "en" : "es");
-				refresh_nat_title();
-				break;
-			case 1:   // accent colour
-				accent_idx = (accent_idx + 1) % ACCENT_COUNT;
-				apply_accent();
-				cfg_set("accent", ACCENT_KEYS[accent_idx]);
+			case 0:   // language -- applied next frame, after the busy hint
+			case 1:   // accent colour -- same
+				settings_pending = row;
 				break;
 			case 2:   // unlink: wipe the token (and prefs) and leave
 				cfg_clear();
