@@ -102,8 +102,10 @@ static bool settings_open = false;
 static int  settings_sel = 0;
 /* Applying a preference writes the SD card, which stalls the frame long
  * enough to read as a freeze. So a tap only arms the change; the menu draws
- * once with a busy hint, and the write happens on the next frame. */
+ * with a busy hint, the write happens on the next frame, and the hint
+ * lingers a moment so it reads as feedback rather than a blink. */
 static int  settings_pending = -1;
+static u64  settings_busy_until = 0;
 
 // File scope because both the input loop and the drawers consult them.
 static bool muted = false;
@@ -707,13 +709,13 @@ static void draw_settings(const Skin *sk)
 	ui_text(text_buf, tr(S_SETTINGS), px + 16.0f,
 	        ui_baseline(py + 8.0f, TY_ROW_NAME), TY_ROW_NAME, pw - 32.0f,
 	        sk->warm);
-	if (settings_pending >= 0) {
-		// Three animated dots while the armed change applies next frame.
+	if (settings_pending >= 0 || osGetTime() < settings_busy_until) {
+		// Three animated dots while the change applies and a beat after.
 		char dots[4] = "...";
-		dots[(osGetTime() / 250) % 3 + 1] = '\0';
+		dots[(osGetTime() / 200) % 3 + 1] = '\0';
 		float tw = ui_text_width(text_buf, tr(S_SETTINGS), TY_ROW_NAME);
-		ui_text(text_buf, dots, px + 20.0f + tw,
-		        ui_baseline(py + 8.0f, TY_ROW_NAME), TY_ROW_NAME, 24.0f,
+		ui_text(text_buf, dots, px + 28.0f + tw,
+		        ui_baseline(py + 8.0f, TY_ROW_NAME), TY_ROW_NAME, 32.0f,
 		        sk->accent);
 	}
 
@@ -1134,6 +1136,7 @@ int main(int argc, char **argv)
 				apply_accent();
 				cfg_set("accent", ACCENT_KEYS[accent_idx]);
 			}
+			settings_busy_until = osGetTime() + 700;
 		}
 
 		// START opens the settings menu, and the menu owns every key and
