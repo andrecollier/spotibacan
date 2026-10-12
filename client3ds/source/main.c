@@ -337,6 +337,66 @@ static void audio_thread(void *arg)
 
 static u64 lib_retry_at = 0;   /* ms; when a failed view should refetch */
 
+/* A small in-memory cache of whole views. Round trips are the expensive
+ * part on this console -- a 500-song list is a dozen sequential TLS
+ * handshakes -- so going back to a list you just opened should not pay
+ * them again. Entries live ten minutes; the Downloads shelf is never
+ * cached, it is local and must reflect the card. LRU by age. */
+#define VIEW_CACHE_MAX 4
+#define VIEW_CACHE_TTL_MS (10 * 60 * 1000)
+static struct {
+	native_view view;
+	char arg[64];
+	int count;
+	unsigned long long at;   /* osGetTime() when stored, 0 = empty */
+	native_row rows[NATIVE_ROWS];
+} vcache[VIEW_CACHE_MAX];
+
+/* Copies a fresh cached view into nat_rows and returns its row count,
+ * or -1 on a miss. */
+static int vcache_lookup(native_view view, const char *arg)
+{
+	if (view == NATIVE_DOWNLOADS)
+		return -1;
+	const unsigned long long now = osGetTime();
+	for (int i = 0; i < VIEW_CACHE_MAX; i++) {
+		if (!vcache[i].at || vcache[i].view != view ||
+		    strcmp(vcache[i].arg, arg ? arg : "") != 0)
+			continue;
+		if (now - vcache[i].at > VIEW_CACHE_TTL_MS)
+			return -1;
+		memcpy(nat_rows, vcache[i].rows,
+		       (size_t)vcache[i].count * sizeof(native_row));
+		lib.loading = false;   /* no spinner: the rows are already here */
+		return vcache[i].count;
+	}
+	return -1;
+}
+
+static void vcache_store(native_view view, const char *arg, int count)
+{
+	if (view == NATIVE_DOWNLOADS || count <= 0)
+		return;
+	int slot = 0;
+	for (int i = 0; i < VIEW_CACHE_MAX; i++) {
+		if (vcache[i].view == view &&
+		    strcmp(vcache[i].arg, arg ? arg : "") == 0) {
+			slot = i;
+			break;
+		}
+		if (!vcache[i].at ||
+		    (vcache[slot].at && vcache[i].at < vcache[slot].at))
+			slot = i;
+	}
+	vcache[slot].view = view;
+	snprintf(vcache[slot].arg, sizeof(vcache[slot].arg), "%s",
+	         arg ? arg : "");
+	vcache[slot].count = count;
+	vcache[slot].at = osGetTime();
+	memcpy(vcache[slot].rows, nat_rows,
+	       (size_t)count * sizeof(native_row));
+}
+
 // Pulls one view from Spotify and caches the rows. The fetch is cached by
 // view and argument: scrolling must not cost a round trip, because on this
 // console round trips are the expensive part.
@@ -347,6 +407,15 @@ static void library_fetch(void)
 	            strcmp(arg ? arg : "", nat_loaded_arg) == 0;
 
 	if (!same) {
+		int cached = vcache_lookup(nat_view, arg);
+		if (cached >= 0) {
+			nat_count = cached;
+			nat_status[0] = '\0';
+			nat_loaded_view = nat_view;
+			snprintf(nat_loaded_arg, sizeof(nat_loaded_arg), "%s",
+			         arg ? arg : "");
+			lib_retry_at = 0;
+		} else {
 		lib.loading = true;
 		lib_retry_at = 0;
 		char err[160] = "";
@@ -371,6 +440,8 @@ static void library_fetch(void)
 			nat_loaded_view = nat_view;
 			snprintf(nat_loaded_arg, sizeof(nat_loaded_arg), "%s",
 			         arg ? arg : "");
+			vcache_store(nat_view, arg, n);
+		}
 		}
 	}
 
@@ -525,6 +596,10 @@ static void like_toggle(const char *uri)
 		return;
 	const bool like = !uri_is_liked(uri);
 	liked_set(uri, like);
+	/* The Liked list changed: its cache entry is a lie now. */
+	for (int i = 0; i < VIEW_CACHE_MAX; i++)
+		if (vcache[i].view == NATIVE_LIKED)
+			vcache[i].at = 0;
 	for (int i = 0; i < like_pending_n; i++)
 		if (strcmp(like_pending[i].uri, uri) == 0) {
 			memmove(&like_pending[i], &like_pending[i + 1],
