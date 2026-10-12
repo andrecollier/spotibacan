@@ -118,6 +118,8 @@ void         native_set_downloads(bool on);
  * once its background download completes; armed state for the icon. */
 void         native_save_current(void);
 bool         native_save_armed(void);
+/* True once the playing track's .ogg exists on the card (cached per URI). */
+bool         native_current_saved(void);
 /* Appends a line to the same native.log the backend writes; for UI-side
  * failures that would otherwise leave no trace (a stuck view, a dead tap). */
 void         native_log(const char *fmt, ...);

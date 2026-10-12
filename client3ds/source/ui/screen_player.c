@@ -192,12 +192,17 @@ static void draw_heart(float cx, float cy, bool liked, u32 clr_on, u32 clr_off)
 	                 cx, cy + 7.5f, clr, 0.0f);
 }
 
-/* Download: an arrow into a tray. Armed fills in the accent colour, idle
- * stays in the header's grey. */
-static void draw_download(float cx, float cy, bool armed, u32 clr_on,
-                          u32 clr_off)
+/* Download: an arrow into a tray; once the file is on the card it becomes
+ * a check. Armed fills in the accent colour, idle stays in the grey. */
+static void draw_download(float cx, float cy, bool armed, bool saved,
+                          u32 clr_on, u32 clr_off)
 {
-	const u32 clr = armed ? clr_on : clr_off;
+	const u32 clr = (armed || saved) ? clr_on : clr_off;
+	if (saved) {
+		ui_polyline((float[]){cx - 6.0f, cy + 0.5f, cx - 1.5f, cy + 5.5f,
+		                      cx + 6.5f, cy - 4.5f}, 3, 2.4f, clr);
+		return;
+	}
 	C2D_DrawRectSolid(cx - 1.2f, cy - 8.0f, 0.0f, 2.4f, 6.5f, clr);
 	C2D_DrawTriangle(cx - 5.0f, cy - 2.5f, clr, cx + 5.0f, cy - 2.5f, clr,
 	                 cx, cy + 3.0f, clr, 0.0f);
@@ -237,8 +242,8 @@ static void draw_header(const screen_player_args *a)
 	 * a local file is already on the card. */
 	if (a->dl_show) {
 		const bool dl_pressed = a->pressed_id == BTN_P_DOWNLOAD;
-		draw_download(76.0f, HEADER_H / 2, a->dl_armed, a->accent,
-		              press_clr(CLR_IDLE, dl_pressed, a->accent));
+		draw_download(76.0f, HEADER_H / 2, a->dl_armed, a->dl_saved,
+		              a->accent, press_clr(CLR_IDLE, dl_pressed, a->accent));
 		tb_add_hit(a->tb, 76.0f, HEADER_H / 2, 40.0f, BTN_P_DOWNLOAD);
 	}
 

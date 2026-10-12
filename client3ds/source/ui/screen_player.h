@@ -49,6 +49,7 @@ typedef struct {
 	bool liked;           /* the heart, for the playing track */
 	bool dl_show;         /* a remote track: the download button exists */
 	bool dl_armed;        /* it will save when the background download ends */
+	bool dl_saved;        /* already on the card: the icon is a check */
 	bool can_prev, can_next; /* no neighbour in the current view: greyed */
 
 	long progress_ms;

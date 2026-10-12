@@ -1352,7 +1352,8 @@ static void draw_bottom(const Skin *sk)
 		a.dl_show = now_title[0] != '\0' &&
 		            strncmp(native_now_uri(), "file:", 5) != 0 &&
 		            !native_offline();
-		a.dl_armed = native_save_armed() || downloads_on;
+		a.dl_saved = native_current_saved();
+		a.dl_armed = !a.dl_saved && (native_save_armed() || downloads_on);
 		a.can_prev = match && now_idx > 0;
 		a.can_next = match && now_idx + 1 < nat_count;
 		a.progress_ms = (long)(now_pos * 1000.0f);

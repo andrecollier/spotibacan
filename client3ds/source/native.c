@@ -278,10 +278,10 @@ int native_like(const char *uri, bool like, char *err, size_t errlen,
 	                         retry_after);
 }
 
-/* Writes the finished download as a plain .ogg under music/ beside the app.
- * Only called once dl_done: a partial file is worthless. The Spotify key
- * header is stripped, so what lands is the Ogg stream itself. */
-static void save_download(const track_stream *ts)
+/* Builds the music/ path a track saves to, so the writer and the "already
+ * saved?" check can never disagree on the name. */
+static void download_path(const char *artist, const char *title,
+                          char *out, size_t outlen)
 {
 	char dir[352];
 	cfg_dir(dir, sizeof(dir));
@@ -290,27 +290,60 @@ static void save_download(const track_stream *ts)
 
 	char name[160];
 	int n = 0;
-	for (const char *p = ts->meta.artist; *p && n < 60; p++)
+	for (const char *p = artist; *p && n < 60; p++)
 		if (*p != '/' && *p != '\\' && *p != ':' && *p != '"' &&
 		    *p != '?' && *p != '*' && *p != '<' && *p != '>' && *p != '|')
 			name[n++] = *p;
 	n += snprintf(name + n, sizeof(name) - n, " - ");
-	for (const char *p = ts->meta.name; *p && n < 130; p++)
+	for (const char *p = title; *p && n < 130; p++)
 		if (*p != '/' && *p != '\\' && *p != ':' && *p != '"' &&
 		    *p != '?' && *p != '*' && *p != '<' && *p != '>' && *p != '|')
 			name[n++] = *p;
 	snprintf(name + n, sizeof(name) - n, ".ogg");
 
+	snprintf(out, outlen, "%s/%s", dir, name);
+}
+
+/* Whether the playing track already sits on the card. One stat per track:
+ * the answer is cached against the URI, because the UI asks every frame. */
+static char saved_checked_uri[192];
+static bool saved_flag;
+
+bool native_current_saved(void)
+{
+	if (strncmp(g.want, "file:", 5) == 0)
+		return true;   /* a local file is on the card by definition */
+	if (!g.title[0])
+		return false;
+	if (strcmp(saved_checked_uri, g.want) != 0) {
+		snprintf(saved_checked_uri, sizeof(saved_checked_uri), "%s", g.want);
+		char path[520];
+		download_path(g.artist, g.title, path, sizeof(path));
+		struct stat st;
+		saved_flag = stat(path, &st) == 0 && st.st_size > 0;
+	}
+	return saved_flag;
+}
+
+/* Writes the finished download as a plain .ogg under music/ beside the app.
+ * Only called once dl_done: a partial file is worthless. The Spotify key
+ * header is stripped, so what lands is the Ogg stream itself. */
+static void save_download(const track_stream *ts)
+{
 	char path[520];
-	snprintf(path, sizeof(path), "%s/%s", dir, name);
+	download_path(ts->meta.artist, ts->meta.name, path, sizeof(path));
+
 	FILE *f = fopen(path, "wb");
 	if (!f) {
-		nlog("DL: no se pudo guardar %s\n", name);
+		nlog("DL: no se pudo guardar %s\n", path);
 		return;
 	}
 	fwrite(ts->data + SPOTIFY_OGG_HEADER, 1, ts->len - SPOTIFY_OGG_HEADER, f);
 	fclose(f);
-	nlog("DL: guardada %s (%.1f MB)\n", name,
+	/* The saved check caches per URI; the file exists now. */
+	g.want_save = false;
+	saved_flag = true;
+	nlog("DL: guardada %s (%.1f MB)\n", path,
 	     (double)(ts->len - SPOTIFY_OGG_HEADER) / (1024.0 * 1024.0));
 }
 
