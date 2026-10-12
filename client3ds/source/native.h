@@ -100,6 +100,13 @@ int          native_profile_art_refresh(void);
 /* The URI last asked for; empty before the first play. */
 const char  *native_now_uri(void);
 const char  *native_last_error(void);
+/* Likes/unlikes a track URI ("Me gusta"). 0 done, 1 missing scope
+ * (re-pair needed), -1 other failure; on 429 *retry_after gets the server's
+ * seconds. Runs from the art worker. */
+int          native_like(const char *uri, bool like, char *err,
+                         size_t errlen, int *retry_after);
+/* When on, fully downloaded tracks are also written to the SD as .ogg. */
+void         native_set_downloads(bool on);
 /* Appends a line to the same native.log the backend writes; for UI-side
  * failures that would otherwise leave no trace (a stuck view, a dead tap). */
 void         native_log(const char *fmt, ...);

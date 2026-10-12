@@ -728,3 +728,31 @@ int sp_user_image(const char *token, char *url, size_t urllen,
 	}
 	return 0;
 }
+
+int sp_library_modify(const char *token, const char *track_id, bool save,
+                      char *err, size_t errlen, int *retry_after)
+{
+	if (retry_after)
+		*retry_after = 0;
+	char path[96];
+	snprintf(path, sizeof(path), "/v1/me/tracks?ids=%s", track_id);
+	http_reply r;
+	memset(&r, 0, sizeof(r));
+	/* The ids query form takes an empty body; the JSON body form would need
+	 * a Content-Type the tiny client does not bother with elsewhere. */
+	if (http_request("api.spotify.com", path, save ? "PUT" : "DELETE",
+	                 token, NULL, NULL, NULL, 0, 0, &r) != 0) {
+		snprintf(err, errlen, "me gusta: %s", r.err);
+		http_reply_free(&r);
+		return -1;
+	}
+	if (r.status == 429 && retry_after)
+		*retry_after = r.retry_after;
+	if (r.status != 200) {
+		snprintf(err, errlen, "me gusta: HTTP %d", r.status);
+		http_reply_free(&r);
+		return r.status == 403 ? 1 : -1;   /* 1: missing scope, re-pair */
+	}
+	http_reply_free(&r);
+	return 0;
+}

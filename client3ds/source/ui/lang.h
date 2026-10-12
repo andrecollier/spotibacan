@@ -79,6 +79,9 @@ typedef enum {
 	S_H_LID,
 	S_KEY_LENS,
 	S_KEY_FINGER,
+	S_DOWNLOADS,
+	S_H_MODES,
+	S_H_HEART,
 	S_COUNT
 } str_id;
 

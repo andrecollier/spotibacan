@@ -111,6 +111,12 @@ static u64  settings_busy_until = 0;
 static bool muted = false;
 static bool paused = false;
 
+// Playback modes and the downloads preference; the settings drawer and the
+// transport both read them. The like queue lives with the files below.
+static bool shuffle_on = false;
+static int  repeat_mode = 0;   // 0 off, 1 all, 2 one
+static bool downloads_on = false;
+
 // Lid-closed playback. Closing the lid normally sleeps the console, and even
 // awake it flips the wifi from infrastructure to StreetPass; either one kills
 // the stream. While a track is playing or paused, sleep is refused and the
@@ -243,6 +249,8 @@ static void prefs_load(void)
 				apply_accent();
 				break;
 			}
+	if (cfg_get("downloads", v, sizeof(v)) && v[0] == '1')
+		downloads_on = true;
 }
 
 // ---------------------------------------------------------------- ring buffer
@@ -383,6 +391,146 @@ static void native_library_thread(void *arg)
 	}
 }
 
+// The library heart. The like is optimistic: the heart fills at once, the
+// PUT rides a queue the art worker drains when the rate-limited Web API has
+// a window (same 429 quota as /v1/me).
+
+#define LIKE_MAX 64
+static char liked_ids[LIKE_MAX][40];
+static int  liked_n = 0;
+typedef struct { char uri[64]; bool like; } like_op;
+static like_op like_pending[LIKE_MAX];
+static int  like_pending_n = 0;
+static bool like_scope_missing = false;
+static int  like_wait_s = 0;
+
+static void likes_file(char *out, size_t n, const char *name)
+{
+	char d[320];
+	cfg_dir(d, sizeof(d));
+	snprintf(out, n, "%s%s", d, name);
+}
+
+static void liked_load(void)
+{
+	char path[352];
+	likes_file(path, sizeof(path), "liked.txt");
+	FILE *f = fopen(path, "r");
+	if (!f)
+		return;
+	char line[48];
+	while (liked_n < LIKE_MAX && fgets(line, sizeof(line), f)) {
+		char *nl = strpbrk(line, "\r\n");
+		if (nl)
+			*nl = '\0';
+		if (line[0])
+			snprintf(liked_ids[liked_n++], 40, "%s", line);
+	}
+	fclose(f);
+}
+
+static void liked_save(void)
+{
+	char path[352], tmp[360];
+	likes_file(path, sizeof(path), "liked.txt");
+	snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+	FILE *f = fopen(tmp, "w");
+	if (!f)
+		return;
+	for (int i = 0; i < liked_n; i++)
+		fprintf(f, "%s\n", liked_ids[i]);
+	fclose(f);
+	rename(tmp, path);
+}
+
+static void like_pending_load(void)
+{
+	char path[352];
+	likes_file(path, sizeof(path), "likes_pending.txt");
+	FILE *f = fopen(path, "r");
+	if (!f)
+		return;
+	char line[80];
+	while (like_pending_n < LIKE_MAX && fgets(line, sizeof(line), f)) {
+		char *tab = strchr(line, '\t');
+		if (!tab)
+			continue;
+		*tab = '\0';
+		snprintf(like_pending[like_pending_n].uri, 64, "%s", line);
+		like_pending[like_pending_n].like = tab[1] == '1';
+		like_pending_n++;
+	}
+	fclose(f);
+}
+
+static void like_pending_save(void)
+{
+	char path[352], tmp[360];
+	likes_file(path, sizeof(path), "likes_pending.txt");
+	snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+	FILE *f = fopen(tmp, "w");
+	if (!f)
+		return;
+	for (int i = 0; i < like_pending_n; i++)
+		fprintf(f, "%s\t%c\n", like_pending[i].uri,
+		        like_pending[i].like ? '1' : '0');
+	fclose(f);
+	rename(tmp, path);
+}
+
+static bool uri_is_liked(const char *uri)
+{
+	if (!uri || !*uri)
+		return false;
+	for (int i = 0; i < liked_n; i++)
+		if (strcmp(liked_ids[i], uri) == 0)
+			return true;
+	return false;
+}
+
+static void liked_set(const char *uri, bool like)
+{
+	int at = -1;
+	for (int i = 0; i < liked_n; i++)
+		if (strcmp(liked_ids[i], uri) == 0) {
+			at = i;
+			break;
+		}
+	if (like && at < 0 && liked_n < LIKE_MAX)
+		snprintf(liked_ids[liked_n++], 40, "%s", uri);
+	else if (!like && at >= 0) {
+		memmove(&liked_ids[at], &liked_ids[at + 1],
+		        (size_t)(liked_n - at - 1) * sizeof(liked_ids[0]));
+		liked_n--;
+	}
+	liked_save();
+}
+
+/* Queue the Web API call; the heart has already moved. A newer tap on the
+ * same track replaces the queued one. */
+static void like_toggle(const char *uri)
+{
+	if (!uri || !*uri)
+		return;
+	const bool like = !uri_is_liked(uri);
+	liked_set(uri, like);
+	for (int i = 0; i < like_pending_n; i++)
+		if (strcmp(like_pending[i].uri, uri) == 0) {
+			memmove(&like_pending[i], &like_pending[i + 1],
+			        (size_t)(like_pending_n - i - 1) * sizeof(like_pending[0]));
+			like_pending_n--;
+			break;
+		}
+	if (like_pending_n < LIKE_MAX) {
+		snprintf(like_pending[like_pending_n].uri, 64, "%s", uri);
+		like_pending[like_pending_n].like = like;
+		like_pending_n++;
+		like_pending_save();
+	}
+	native_log("LIKE: %s %s (cola %d)\n", like ? "me gusta" : "ya no",
+	           uri, like_pending_n);
+}
+
 // The art worker: fetches and decodes covers off the render loop. The hero
 // goes first -- it is what the user is looking at; the row thumbnails queue
 // behind it. Pixels land in staging buffers and the render thread uploads
@@ -396,7 +544,40 @@ static void art_thread(void *arg)
 	(void)arg;
 	u64 profile_try_at = 0;
 	unsigned profile_wait_s = 30;
+	u64 like_try_at = 0;
 	while (running) {
+		/* Queued likes ride out when the rate-limited Web API has a window;
+		 * same Retry-After discipline as the avatar fetch below. A 403 means
+		 * the token predates the library-modify scope: stop and say so. */
+		if (like_pending_n && !like_scope_missing) {
+			const u64 now = osGetTime();
+			if (!like_try_at ||
+			    now - like_try_at >= (u64)(like_wait_s > 0 ? like_wait_s : 5) * 1000) {
+				like_try_at = now;
+				like_wait_s = 20;
+				const like_op op = like_pending[0];
+				char lerr[128] = "";
+				int ra = 0;
+				const int rc = native_like(op.uri, op.like, lerr,
+				                           sizeof(lerr), &ra);
+				if (rc == 0) {
+					memmove(&like_pending[0], &like_pending[1],
+					        (size_t)(like_pending_n - 1) * sizeof(like_pending[0]));
+					like_pending_n--;
+					like_pending_save();
+					native_log("LIKE: aplicado %s\n", op.uri);
+				} else if (rc == 1) {
+					like_scope_missing = true;
+					native_log("LIKE: falta el scope user-library-modify; "
+					           "desvincula en ajustes y vincula de nuevo\n");
+				} else {
+					if (ra > 0)
+						like_wait_s = ra + 2;
+					native_log("LIKE: sigue pendiente: %s\n", lerr);
+				}
+			}
+		}
+
 		/* The avatar's first fetch races the Web API rate limit (HTTP 429 on
 		 * this shared client id), so retry it on an exponential backoff -
 		 * hammering a saturated quota only keeps it saturated. The same
@@ -732,7 +913,7 @@ static void clock_text(char *out, size_t n, float secs)
 // palm cannot kill the music. Rows draw up to z=0.1 and the list header at
 // 0.5, so the panel lives at 0.6 and its type at 0.7. It takes over the
 // touch map wholesale, so the view below cannot answer taps meant for it.
-#define SETTINGS_ROWS 5
+#define SETTINGS_ROWS 6
 #define SET_ROW0      0x7100
 
 static void draw_settings(const Skin *sk)
@@ -742,7 +923,7 @@ static void draw_settings(const Skin *sk)
 	const u32 panel = C2D_Color32(0x1B, 0x1B, 0x1B, 0xFF);
 
 	C2D_DrawRectSolid(0.0f, 0.0f, 0.6f, BOT_W, SCR_H, dim);
-	const float px = 20.0f, py = 26.0f, pw = 280.0f, ph = 188.0f;
+	const float px = 20.0f, py = 10.0f, pw = 280.0f, ph = 222.0f;
 	C2D_DrawRectSolid(px, py, 0.6f, pw, ph, bord);
 	C2D_DrawRectSolid(px + 1.0f, py + 1.0f, 0.6f, pw - 2.0f, ph - 2.0f,
 	                  panel);
@@ -762,10 +943,10 @@ static void draw_settings(const Skin *sk)
 	}
 
 	const char *labels[SETTINGS_ROWS] = {
-		tr(S_LANGUAGE), tr(S_ACCENT), tr(S_UNLINK), tr(S_QUIT),
-		tr(S_BACK_MENU),
+		tr(S_LANGUAGE), tr(S_ACCENT), tr(S_DOWNLOADS), tr(S_UNLINK),
+		tr(S_QUIT), tr(S_BACK_MENU),
 	};
-	const float rh = 30.0f, ry = py + 34.0f;
+	const float rh = 27.0f, ry = py + 32.0f;
 	for (int i = 0; i < SETTINGS_ROWS; i++) {
 		const float y = ry + i * rh;
 		if (i == settings_sel)
@@ -775,7 +956,7 @@ static void draw_settings(const Skin *sk)
 		ui_text(text_buf, labels[i], px + 16.0f,
 		        ui_baseline(y + 2.0f, TY_ROW_NAME), TY_ROW_NAME,
 		        pw - 100.0f, fg);
-		// The two preference rows show their current value on the right.
+		// The preference rows show their current value on the right.
 		if (i == 0) {
 			const char *v = lang_get() == LANG_EN ? "English" : "Espanol";
 			float w = ui_text_width(text_buf, v, TY_ROW_SUB);
@@ -791,8 +972,14 @@ static void draw_settings(const Skin *sk)
 			        px + pw - 16.0f - w,
 			        ui_baseline(y + 5.0f, TY_ROW_SUB), TY_ROW_SUB, w, fg);
 		} else if (i == 2) {
+			const char *v = downloads_on ? "ON" : "OFF";
+			float w = ui_text_width(text_buf, v, TY_ROW_SUB);
+			ui_text(text_buf, v, px + pw - 16.0f - w,
+			        ui_baseline(y + 5.0f, TY_ROW_SUB), TY_ROW_SUB, w,
+			        downloads_on ? fg : sk->dim);
+		} else if (i == 3) {
 			ui_text(text_buf, tr(S_UNLINKED_NOTE), px + 16.0f,
-			        ui_baseline(y + 15.0f, TY_MICRO), TY_MICRO,
+			        ui_baseline(y + 14.0f, TY_MICRO), TY_MICRO,
 			        pw - 32.0f, i == settings_sel ? fg : sk->dim);
 		}
 		tb_add(&g_tb, px + 6.0f, y - 3.0f, pw - 12.0f, rh - 2.0f,
@@ -1012,8 +1199,8 @@ static void draw_help(const Skin *sk)
 		S_H_HOLD_SEARCH, S_H_DRAG_LIST,
 	};
 	static const str_id player[] = {
-		S_H_A_PAUSE, S_H_Y_MUTE, S_H_SKIP, S_H_SCRUB, S_H_SHELF,
-		S_H_LETRA,
+		S_H_A_PAUSE, S_H_Y_MUTE, S_H_SKIP, S_H_SCRUB, S_H_MODES,
+		S_H_HEART, S_H_SHELF, S_H_LETRA,
 	};
 	static const str_id lyrics[] = { S_H_B_BACK, S_H_DRAG_LYR };
 
@@ -1116,6 +1303,9 @@ static void draw_bottom(const Skin *sk)
 		a.playing = st == NATIVE_PLAYING && !paused;
 		a.loading = st == NATIVE_LOADING;
 		a.muted = muted;
+		a.shuffle = shuffle_on;
+		a.repeat = repeat_mode;
+		a.liked = uri_is_liked(native_now_uri());
 		a.can_prev = match && now_idx > 0;
 		a.can_next = match && now_idx + 1 < nat_count;
 		a.progress_ms = (long)(now_pos * 1000.0f);
@@ -1180,6 +1370,40 @@ static bool now_matches_view(void)
 	const char *arg = nat_view == NATIVE_SEARCH ? lib.query : nat_arg;
 	return now_idx >= 0 && now_view == nat_view &&
 	       strcmp(now_arg, arg ? arg : "") == 0;
+}
+
+/* The row a manual or automatic skip lands on. Shuffle picks any row but the
+ * current one; without a matching view there is no neighbour to go to. */
+static int step_index(int dir)
+{
+	if (!now_matches_view() || nat_count == 0)
+		return -1;
+	if (shuffle_on && nat_count > 1) {
+		int r;
+		do {
+			r = rand() % nat_count;
+		} while (r == now_idx);
+		return r;
+	}
+	const int t = now_idx + dir;
+	return (t >= 0 && t < nat_count) ? t : -1;
+}
+
+/* A track that finished on its own: repeat-one replays it, shuffle jumps
+ * anywhere, repeat-all wraps at the end, and otherwise the next row plays.
+ * Anything played off-list (the shelf) simply stops. */
+static void track_ended(void)
+{
+	if (repeat_mode == 2 && native_now_uri()[0]) {
+		play_uri(native_now_uri());
+		return;
+	}
+	int next = step_index(+1);
+	if (next < 0 && repeat_mode == 1 && !shuffle_on &&
+	    now_matches_view() && nat_count > 0)
+		next = 0;
+	if (next >= 0)
+		play_index(next);
 }
 
 // What activating an absolute list row means: the synthetic Liked Songs row,
@@ -1339,6 +1563,10 @@ int main(int argc, char **argv)
 	refresh_nat_title();
 	recents_load();
 	srch_load();
+	liked_load();
+	like_pending_load();
+	native_set_downloads(downloads_on);
+	srand((unsigned)osGetTime());
 
 	// Everything that can fail runs first, while a text console is still the
 	// only thing initialised and can report why.
@@ -1472,6 +1700,10 @@ int main(int argc, char **argv)
 				accent_idx = (accent_idx + 1) % ACCENT_COUNT;
 				apply_accent();
 				cfg_set("accent", ACCENT_KEYS[accent_idx]);
+			} else if (row == 2) {
+				downloads_on = !downloads_on;
+				native_set_downloads(downloads_on);
+				cfg_set("downloads", downloads_on ? "1" : "0");
 			}
 			settings_busy_until = osGetTime() + 700;
 		}
@@ -1495,12 +1727,13 @@ int main(int argc, char **argv)
 			switch (row) {
 			case 0:   // language -- applied next frame, after the busy hint
 			case 1:   // accent colour -- same
+			case 2:   // downloads toggle -- same
 				settings_pending = row;
 				break;
-			case 2:   // unlink: wipe the token (and prefs) and leave
+			case 3:   // unlink: wipe the token (and prefs) and leave
 				cfg_clear();
 				goto quit;
-			case 3:   // quit
+			case 4:   // quit
 				goto quit;
 			default:
 				break;
@@ -1580,9 +1813,6 @@ int main(int argc, char **argv)
 
 		// Player-mode touches fire on release.
 		if (!lib.open && !lyr_open && g_touch.clicked >= 0) {
-			// The same bounds the draw used to grey prev/next out: a
-			// greyed control still has a rect, so the tap is checked here.
-			bool match = now_matches_view();
 			switch (g_touch.clicked) {
 			case BTN_P_PLAY:
 				if (native_playback_state() == NATIVE_PLAYING) {
@@ -1590,13 +1820,26 @@ int main(int argc, char **argv)
 					ndspChnSetPaused(0, paused);
 				}
 				break;
-			case BTN_P_PREV:
-				if (match && now_idx > 0)
-					play_index(now_idx - 1);
+			case BTN_P_PREV: {
+				const int t = step_index(-1);
+				if (t >= 0)
+					play_index(t);
 				break;
-			case BTN_P_NEXT:
-				if (match && now_idx + 1 < nat_count)
-					play_index(now_idx + 1);
+			}
+			case BTN_P_NEXT: {
+				const int t = step_index(+1);
+				if (t >= 0)
+					play_index(t);
+				break;
+			}
+			case BTN_P_SHUFFLE:
+				shuffle_on = !shuffle_on;
+				break;
+			case BTN_P_REPEAT:
+				repeat_mode = (repeat_mode + 1) % 3;
+				break;
+			case BTN_P_LIKE:
+				like_toggle(native_now_uri());
 				break;
 			case BTN_P_LIBRARY:
 				lib.open = true;
@@ -1627,11 +1870,14 @@ int main(int argc, char **argv)
 			// The player runs on its own thread; this just mirrors it.
 			native_state st = native_playback_state();
 			if (st != nat_state_seen) {
+				const int prev_state = nat_state_seen;
 				nat_state_seen = (int)st;
 				if (st == NATIVE_PLAYING)
 					lid_mode_set(true);
 				else if (st == NATIVE_IDLE || st == NATIVE_FAILED)
 					lid_mode_set(false);
+				if (st == NATIVE_IDLE && prev_state == NATIVE_PLAYING)
+					track_ended();
 				switch (st) {
 				case NATIVE_LOADING:
 					snprintf(now_title, sizeof(now_title), "%s", tr(S_LOADING_DOTS));
@@ -1781,25 +2027,23 @@ int main(int argc, char **argv)
 			ndspChnSetMix(0, mix);
 		}
 
-		// D-pad left/right are the physical prev/next, under the same bounds
-		// the on-screen glyphs grey out with.
+		// D-pad left/right are the physical prev/next; shuffle may reroute
+		// them to a random row.
 		if (!lib.open && !lyr_open && (down & (KEY_DLEFT | KEY_DRIGHT))) {
-			bool match = now_matches_view();
-			if ((down & KEY_DRIGHT) && match && now_idx + 1 < nat_count)
-				play_index(now_idx + 1);
-			if ((down & KEY_DLEFT) && match && now_idx > 0)
-				play_index(now_idx - 1);
+			const int dir = (down & KEY_DRIGHT) ? +1 : -1;
+			const int t = step_index(dir);
+			if (t >= 0)
+				play_index(t);
 		}
 
 		// L/R are the physical prev/next: with the lid closed they are the
 		// only transport within reach. Volume lives on the hardware slider,
 		// so these keys are free for the job that actually needs them.
 		if (!lib.open && !lyr_open && (down & (KEY_L | KEY_R))) {
-			bool match = now_matches_view();
-			if ((down & KEY_R) && match && now_idx + 1 < nat_count)
-				play_index(now_idx + 1);
-			if ((down & KEY_L) && match && now_idx > 0)
-				play_index(now_idx - 1);
+			const int dir = (down & KEY_R) ? +1 : -1;
+			const int t = step_index(dir);
+			if (t >= 0)
+				play_index(t);
 		}
 
 		// The overlay mirrors the hardware slider; any move pops it up.

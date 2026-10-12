@@ -132,4 +132,11 @@ const char *sp_format_name(int format);
 int  sp_user_image(const char *token, char *url, size_t urllen,
                    char *err, size_t errlen, int *retry_after);
 
+/* Adds or removes a track in the user's library ("Me gusta"): PUT/DELETE
+ * /v1/me/tracks?ids=<id>. Needs the user-library-modify scope, which tokens
+ * paired before it was added do not carry -- a 403 means re-pair. On 429
+ * `retry_after` gets the server's seconds, like sp_user_image. */
+int  sp_library_modify(const char *token, const char *track_id, bool save,
+                       char *err, size_t errlen, int *retry_after);
+
 #endif

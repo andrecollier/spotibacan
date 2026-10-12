@@ -154,6 +154,42 @@ static void draw_speaker(float cx, float cy, bool muted, u32 clr)
 	}
 }
 
+/* Shuffle: two crossing paths with arrowheads. Repeat: a loop with an
+ * arrowhead; repeat-one adds a small 1. Heart: two discs over a wedge. */
+static void draw_shuffle(float cx, float cy, u32 clr)
+{
+	const float hi[8] = {cx - 9, cy - 6, cx - 4, cy - 6, cx + 4, cy + 6,
+	                     cx + 7, cy + 6};
+	const float lo[8] = {cx - 9, cy + 6, cx - 4, cy + 6, cx + 4, cy - 6,
+	                     cx + 7, cy - 6};
+	ui_polyline(hi, 4, 1.8f, clr);
+	ui_polyline(lo, 4, 1.8f, clr);
+	tri_right(cx + 6.0f, cy - 9.0f, 6.0f, 6.0f, clr);
+	tri_right(cx + 6.0f, cy + 3.0f, 6.0f, 6.0f, clr);
+}
+
+static void draw_repeat(float cx, float cy, bool one, u32 clr)
+{
+	const float pts[14] = {
+		cx + 2, cy - 8,  cx - 4, cy - 8,  cx - 8, cy - 4,
+		cx - 8, cy + 4,  cx - 4, cy + 8,  cx + 4, cy + 8,
+		cx + 8, cy + 4,
+	};
+	ui_polyline(pts, 7, 1.8f, clr);
+	tri_right(cx + 4.0f, cy - 11.0f, 6.0f, 6.0f, clr);
+	if (one)
+		ui_disc(cx + 7.0f, cy - 7.0f, 3.0f, clr);
+}
+
+static void draw_heart(float cx, float cy, bool liked, u32 clr_on, u32 clr_off)
+{
+	const u32 clr = liked ? clr_on : clr_off;
+	ui_disc(cx - 3.5f, cy - 2.5f, 4.0f, clr);
+	ui_disc(cx + 3.5f, cy - 2.5f, 4.0f, clr);
+	C2D_DrawTriangle(cx - 7.0f, cy - 1.5f, clr, cx + 7.0f, cy - 1.5f, clr,
+	                 cx, cy + 7.5f, clr, 0.0f);
+}
+
 static void fmt_time(long ms, char *out, size_t out_sz)
 {
 	if (ms < 0)
@@ -173,8 +209,15 @@ static void draw_header(const screen_player_args *a)
 	             press_clr(CLR_IDLE, mute_pressed, a->accent));
 	tb_add_hit(a->tb, 20.0f, HEADER_H / 2, 44.0f, BTN_P_MUTE);
 
-	ui_text(a->buf, a->track, 44.0f, ui_baseline(7.0f, TY_ROW_NAME),
-	        TY_ROW_NAME, 186.0f - 44.0f, CLR_WHITE);
+	/* The heart sits between mute and the title: Me gusta for the playing
+	 * track, accent-filled when it is already in the library. */
+	const bool like_pressed = a->pressed_id == BTN_P_LIKE;
+	draw_heart(48.0f, HEADER_H / 2, a->liked, a->accent,
+	           press_clr(CLR_IDLE, like_pressed, a->accent));
+	tb_add_hit(a->tb, 48.0f, HEADER_H / 2, 40.0f, BTN_P_LIKE);
+
+	ui_text(a->buf, a->track, 70.0f, ui_baseline(7.0f, TY_ROW_NAME),
+	        TY_ROW_NAME, 186.0f - 70.0f, CLR_WHITE);
 
 	/* Two wide hit zones on the right: lyrics and the library. The whole
 	 * stretch answers, the same way the reference gives its header labels a
@@ -256,6 +299,23 @@ static void draw_transport(const screen_player_args *a)
 	tb_add_hit(a->tb, play_x, ROW_Y, 44.0f, BTN_P_PLAY);
 	tb_add_hit(a->tb, prev_x, ROW_Y, 44.0f, BTN_P_PREV);
 	tb_add_hit(a->tb, next_x, ROW_Y, 44.0f, BTN_P_NEXT);
+
+	/* Shuffle and repeat flank the row, like the reference client; an active
+	 * mode is accent with a dot underneath. */
+	const float shuf_x = 44.0f, rep_x = 276.0f;
+	const u32 shuf_clr = a->shuffle ? a->accent : CLR_IDLE;
+	const u32 rep_clr  = a->repeat ? a->accent : CLR_IDLE;
+	draw_shuffle(shuf_x, ROW_Y,
+	             press_clr(shuf_clr, a->pressed_id == BTN_P_SHUFFLE,
+	                       CLR_WHITE));
+	draw_repeat(rep_x, ROW_Y, a->repeat == 2,
+	            press_clr(rep_clr, a->pressed_id == BTN_P_REPEAT, CLR_WHITE));
+	if (a->shuffle)
+		ui_disc(shuf_x, ROW_Y + 14.0f, 2.0f, a->accent);
+	if (a->repeat)
+		ui_disc(rep_x, ROW_Y + 14.0f, 2.0f, a->accent);
+	tb_add_hit(a->tb, shuf_x, ROW_Y, 40.0f, BTN_P_SHUFFLE);
+	tb_add_hit(a->tb, rep_x, ROW_Y, 40.0f, BTN_P_REPEAT);
 }
 
 static void draw_scrubber(const screen_player_args *a)

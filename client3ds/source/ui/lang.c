@@ -76,6 +76,9 @@ static const char *const s_strings[LANG_COUNT][S_COUNT] = {
 		[S_H_LID]             = "Tapa cerrada - Sigue sonando, L/R cambian",
 		[S_KEY_LENS]          = "Lupa",
 		[S_KEY_FINGER]        = "Dedo",
+		[S_DOWNLOADS]         = "Guardar canciones en SD",
+		[S_H_MODES]           = "Laterales - Aleatorio y repetir",
+		[S_H_HEART]           = "Corazon - Me gusta (tras re-vincular)",
 	},
 	[LANG_EN] = {
 		[S_NOTHING_PLAYING]   = "Nothing playing",
@@ -148,6 +151,9 @@ static const char *const s_strings[LANG_COUNT][S_COUNT] = {
 		[S_H_LID]             = "Lid closed - Keeps playing, L/R skip",
 		[S_KEY_LENS]          = "Lens",
 		[S_KEY_FINGER]        = "Finger",
+		[S_DOWNLOADS]         = "Save tracks to SD",
+		[S_H_MODES]           = "Side icons - Shuffle and repeat",
+		[S_H_HEART]           = "Heart - Like (needs re-linking)",
 	},
 };
 

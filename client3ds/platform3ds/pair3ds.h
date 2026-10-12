@@ -22,7 +22,7 @@
  * scope fails the request -- so this cannot be probed by asking for extras. */
 #define SPOTIFY_SCOPES \
 	"streaming playlist-read-private playlist-read-collaborative " \
-	"user-library-read user-read-email user-read-private"
+	"user-library-read user-library-modify user-read-email user-read-private"
 
 typedef struct {
 	char user_code[16];                 /* shown to the user */

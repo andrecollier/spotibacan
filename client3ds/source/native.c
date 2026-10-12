@@ -15,6 +15,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 
 /* The UI draws over the text console, so without a log this mode is opaque:
  * a failed fetch would show as an empty list and nothing else. Same approach
@@ -121,7 +122,14 @@ static struct {
 	char          error[192];
 	volatile unsigned frames_out;
 	volatile unsigned total_frames;
+
+	/* When on, every fully-downloaded track is also written to the SD as a
+	 * plain .ogg beside the app (music/). The bytes are already here and
+	 * already decrypted for playback; saving them is a courtesy copy. */
+	volatile bool downloads_on;
 } g;
+
+void native_set_downloads(bool on) { g.downloads_on = on; }
 
 bool native_ready(void) { return g.ready; }
 const char *native_account(void) { return g.username; }
@@ -235,6 +243,57 @@ int native_profile_art_refresh(void)
 	return retry_after > 0 ? retry_after : -1;
 }
 const char *native_last_error(void) { return g.error; }
+
+/* Likes/unlikes any track URI with whatever access token is current. Runs
+ * from the art worker; mirrors sp_library_modify's contract, including the
+ * 403-means-re-pair return. */
+int native_like(const char *uri, bool like, char *err, size_t errlen,
+                int *retry_after)
+{
+	const char *id = strrchr(uri, ':');
+	if (!id || !id[1] || !g.access_token[0]) {
+		snprintf(err, errlen, "uri o token invalido");
+		return -1;
+	}
+	return sp_library_modify(g.access_token, id + 1, like, err, errlen,
+	                         retry_after);
+}
+
+/* Writes the finished download as a plain .ogg under music/ beside the app.
+ * Only called once dl_done: a partial file is worthless. The Spotify key
+ * header is stripped, so what lands is the Ogg stream itself. */
+static void save_download(const track_stream *ts)
+{
+	char dir[352];
+	cfg_dir(dir, sizeof(dir));
+	strncat(dir, "music", sizeof(dir) - strlen(dir) - 1);
+	mkdir(dir, 0777);
+
+	char name[160];
+	int n = 0;
+	for (const char *p = ts->meta.artist; *p && n < 60; p++)
+		if (*p != '/' && *p != '\\' && *p != ':' && *p != '"' &&
+		    *p != '?' && *p != '*' && *p != '<' && *p != '>' && *p != '|')
+			name[n++] = *p;
+	n += snprintf(name + n, sizeof(name) - n, " - ");
+	for (const char *p = ts->meta.name; *p && n < 130; p++)
+		if (*p != '/' && *p != '\\' && *p != ':' && *p != '"' &&
+		    *p != '?' && *p != '*' && *p != '<' && *p != '>' && *p != '|')
+			name[n++] = *p;
+	snprintf(name + n, sizeof(name) - n, ".ogg");
+
+	char path[520];
+	snprintf(path, sizeof(path), "%s/%s", dir, name);
+	FILE *f = fopen(path, "wb");
+	if (!f) {
+		nlog("DL: no se pudo guardar %s\n", name);
+		return;
+	}
+	fwrite(ts->data + SPOTIFY_OGG_HEADER, 1, ts->len - SPOTIFY_OGG_HEADER, f);
+	fclose(f);
+	nlog("DL: guardada %s (%.1f MB)\n", name,
+	     (double)(ts->len - SPOTIFY_OGG_HEADER) / (1024.0 * 1024.0));
+}
 
 float native_position(void)
 {
@@ -504,6 +563,8 @@ static void player_thread(void *arg)
 			g.dl_stop = true;
 			threadJoin(dl, U64_MAX);
 			threadFree(dl);
+			if (g.downloads_on && ts.dl_done && !ts.dl_failed)
+				save_download(&ts);
 			track_stream_free(&ts);
 			if (g.state == NATIVE_PLAYING)
 				g.state = NATIVE_IDLE;

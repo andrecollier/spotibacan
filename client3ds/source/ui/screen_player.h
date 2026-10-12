@@ -26,6 +26,9 @@ enum {
 	BTN_P_MUTE,
 	BTN_P_LYRICS,
 	BTN_P_SCRUB,
+	BTN_P_SHUFFLE,
+	BTN_P_REPEAT,
+	BTN_P_LIKE,
 	BTN_P_RECENT0 = 0x10,   /* + index: replay a shelf item */
 };
 
@@ -40,6 +43,9 @@ typedef struct {
 	bool playing;         /* the disc shows the pause glyph */
 	bool loading;         /* centre block shows the animated badge instead */
 	bool muted;
+	bool shuffle;         /* next track is a random row */
+	int  repeat;          /* 0 off, 1 all, 2 one */
+	bool liked;           /* the heart, for the playing track */
 	bool can_prev, can_next; /* no neighbour in the current view: greyed */
 
 	long progress_ms;
