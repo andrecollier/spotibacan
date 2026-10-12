@@ -11,6 +11,11 @@
 bool artwork_fetch_decode(const char *url, int px, uint8_t *out_rgb565,
                           char *err, size_t errlen);
 
+/* Same decode from a local PNG/JPEG file -- the user-supplied avatar on the
+ * SD card, which never touches the network. */
+bool artwork_load_file(const char *filepath, int px, uint8_t *out_rgb565,
+                       char *err, size_t errlen);
+
 /* Shuffles a linear RGB565 buffer into the PICA200's texture layout: 8x8
  * tiles whose pixels follow a Morton (Z-order) curve. C3D_TexLoadImage copies
  * bytes verbatim and expects them already tiled -- feeding it a linear image

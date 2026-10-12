@@ -16,6 +16,7 @@
 #include "lyrics3ds.h"
 #include "native.h"
 #include "ui/artwork.h"
+#include "ui/lang.h"
 #include "ui/screen_list.h"
 #include "ui/screen_lyrics.h"
 #include "ui/screen_player.h"
@@ -69,7 +70,7 @@ static volatile bool lib_reload = false;
 
 static native_view nat_view = NATIVE_PLAYLISTS;
 static char nat_arg[64] = "";
-static char nat_title[48] = "Listas";
+static char nat_title[48];
 static native_row nat_rows[NATIVE_ROWS];
 static int  nat_count = 0;
 static char nat_status[64] = "";
@@ -77,16 +78,28 @@ static char nat_status[64] = "";
 static native_view nat_loaded_view = (native_view)-1;
 static char nat_loaded_arg[64] = "\x01";
 
+/* Fixed views get their title from the string table, so a language change
+ * renames them; TRACKS keeps the playlist name it drilled into. */
+static void refresh_nat_title(void)
+{
+	switch (nat_view) {
+	case NATIVE_PLAYLISTS: snprintf(nat_title, sizeof(nat_title), "%s", tr(S_LISTS)); break;
+	case NATIVE_LIKED:     snprintf(nat_title, sizeof(nat_title), "%s", tr(S_LIKED)); break;
+	case NATIVE_RADIO:     snprintf(nat_title, sizeof(nat_title), "%s", tr(S_RADIO)); break;
+	case NATIVE_SEARCH:    snprintf(nat_title, sizeof(nat_title), "%s", tr(S_SEARCH_VIEW)); break;
+	default: break;
+	}
+}
+
 // Touch is rebuilt every frame: each screen registers its hit rects as it
 // draws, and the state machine consumes the previous frame's set.
 static touch_state g_touch;
 static touch_builder g_tb;
 
-// START asks before killing the music: an accidental press (a palm, a
-// pocket) used to close the app mid-track with no way back.
-static bool exit_confirm = false;
-#define EXIT_BTN_QUIT   0x7001
-#define EXIT_BTN_CANCEL 0x7002
+// START opens the settings menu instead of killing the music outright: an
+// accidental press (a palm, a pocket) used to close the app mid-track.
+static bool settings_open = false;
+static int  settings_sel = 0;
 
 // File scope because both the input loop and the drawers consult them.
 static bool muted = false;
@@ -173,18 +186,57 @@ typedef struct {
 
 static Skin SKIN;
 
+/* Accent choices for the settings menu. accent_keys doubles as the cfg
+ * value; the display name is translated. RGBC is the constant-foldable
+ * twin of RGB (C2D_Color32 is an inline function, illegal in a static
+ * initialiser). */
+#define RGBC(r, g, b) \
+	((u32)0xFF000000u | ((u32)(b) << 16) | ((u32)(g) << 8) | (u32)(r))
+#define ACCENT_COUNT 4
+static const u32 ACCENTS[ACCENT_COUNT] = {
+	RGBC(0x3D, 0xE8, 0x5B),   // green, the action bar's own
+	RGBC(0xB8, 0x8A, 0xF5),   // purple
+	RGBC(0x55, 0xC0, 0xF0),   // blue
+	RGBC(0xF5, 0x96, 0x4A),   // orange
+};
+static const char *const ACCENT_KEYS[ACCENT_COUNT] =
+	{"green", "purple", "blue", "orange"};
+static const str_id ACCENT_NAMES[ACCENT_COUNT] =
+	{S_ACCENT_GREEN, S_ACCENT_PURPLE, S_ACCENT_BLUE, S_ACCENT_ORANGE};
+static int accent_idx = 0;
+
+static void apply_accent(void)
+{
+	SKIN.accent = ACCENTS[accent_idx];
+}
+
 static void skin_init(void)
 {
 	SKIN.top_bg    = RGB(0x12, 0x14, 0x13);
 	SKIN.bottom_bg = RGB(0x1B, 0x1E, 0x1C);
 	SKIN.panel     = RGB(0x26, 0x2A, 0x27);
-	SKIN.accent    = RGB(0x3D, 0xE8, 0x5B);   // the green of the action bar
 	SKIN.on_accent = RGB(0x0E, 0x14, 0x10);
 	SKIN.text      = RGB(0xF2, 0xF4, 0xF2);
 	SKIN.dim       = RGB(0x8E, 0x96, 0x90);
 	SKIN.meter     = RGB(0x33, 0x39, 0x35);
 	SKIN.warm      = RGB(0xFF, 0x8A, 0x70);   // headings, against all the green
 	SKIN.dark      = true;
+	apply_accent();
+}
+
+// UI preferences, kept beside the token so they survive reinstalls.
+static void prefs_load(void)
+{
+	char v[16];
+	if (cfg_get("lang", v, sizeof(v)))
+		lang_set(strcmp(v, "en") == 0 ? LANG_EN : LANG_ES);
+	if (cfg_get("accent", v, sizeof(v)))
+		for (int i = 0; i < ACCENT_COUNT; i++)
+			if (strcmp(v, ACCENT_KEYS[i]) == 0) {
+				accent_idx = i;
+				apply_accent();
+				break;
+			}
 }
 
 // ---------------------------------------------------------------- ring buffer
@@ -352,6 +404,28 @@ static void art_thread(void *arg)
 			if (!profile_try_at ||
 			    now - profile_try_at >= (u64)profile_wait_s * 1000) {
 				profile_try_at = now;
+
+				/* A profile.png / profile.jpg beside the app wins over the
+				 * API: the Web API rate-limits /v1/me so hard that a file on
+				 * the card is the reliable avatar. */
+				char dir[320], pfile[352], ferr[64] = "";
+				cfg_dir(dir, sizeof(dir));
+				snprintf(pfile, sizeof(pfile), "%sprofile.png", dir);
+				bool got = artwork_load_file(pfile, ART_PIXELS, art_staging,
+				                             ferr, sizeof(ferr));
+				if (!got) {
+					snprintf(pfile, sizeof(pfile), "%sprofile.jpg", dir);
+					got = artwork_load_file(pfile, ART_PIXELS, art_staging,
+					                        ferr, sizeof(ferr));
+				}
+				if (got) {
+					snprintf(hero_loaded, sizeof(hero_loaded), "%s", pfile);
+					__sync_synchronize();
+					art_pending = true;
+					native_log("INIT: avatar local %s\n", pfile);
+					continue;
+				}
+
 				const char *part = native_profile_art();
 				if (!part[0]) {
 					native_profile_art_refresh();
@@ -492,14 +566,14 @@ static void draw_top(const Skin *sk, bool buffering, bool muted, float par)
 
 	draw_art(sk, AX + par * 3.0f, AY, ART);
 
-	text_fit(now_title[0] ? now_title : "Nada sonando", TX + par * 2.0f, AY + 2,
+	text_fit(now_title[0] ? now_title : tr(S_NOTHING_PLAYING), TX + par * 2.0f, AY + 2,
 	         0.70f, sk->text, TW);
 	text_fit(now_artist, TX + par * 1.4f, AY + 36, 0.54f, sk->dim, TW);
 	text_fit(now_album, TX + par * 1.0f, AY + 60, 0.46f, sk->meter, TW);
 
-	const char *state = buffering ? "CARGANDO" :
-	                    paused    ? "PAUSA" :
-	                    muted     ? "SIN SONIDO" : "SONANDO";
+	const char *state = buffering ? tr(S_STATE_LOADING) :
+	                    paused    ? tr(S_STATE_PAUSED) :
+	                    muted     ? tr(S_STATE_MUTED) : tr(S_STATE_PLAYING);
 	C2D_DrawCircleSolid(TX + 5 + par * 0.8f, AY + 112, 0.1f, 4,
 	                    buffering ? sk->warm : sk->accent);
 	text_at(state, TX + 18 + par * 0.8f, AY + 103, 0.46f, sk->dim, 0);
@@ -558,7 +632,7 @@ static void draw_native_list(const Skin *sk)
 		for (int i = first; i < lib.total && n < 7; i++) {
 			sl_row *r = &rows[n++];
 			if (extra && i == 0) {
-				*r = (sl_row){"Me gusta", "", "", true, false};
+				*r = (sl_row){tr(S_LIKED), "", "", true, false};
 			} else {
 				const native_row *nr = &nat_rows[i - extra];
 				*r = (sl_row){nr->label, nr->sub, nr->art, nr->is_playlist,
@@ -578,8 +652,8 @@ static void draw_native_list(const Skin *sk)
 	a.title = nat_title;
 	a.can_back = nat_view != NATIVE_PLAYLISTS;
 	a.count = count[0] ? count : NULL;
-	a.empty = loading ? "Cargando" :
-	          nat_status[0] ? nat_status : "Nada por aqui";
+	a.empty = loading ? tr(S_LOADING) :
+	          nat_status[0] ? nat_status : tr(S_EMPTY_LIST);
 	a.loading = loading;
 	a.rows = rows;
 	a.n = n;
@@ -605,45 +679,69 @@ static void clock_text(char *out, size_t n, float secs)
 	snprintf(out, n, "%d:%02d", t / 60, t % 60);
 }
 
-// The exit confirmation: a small modal over the bottom view. Rows draw up to
-// z=0.1 and the list header at 0.5, so the panel lives at 0.6 and its type
-// at 0.7. It also takes over the touch map wholesale, so the view below
-// cannot answer taps meant for the dialog.
-static void draw_exit_dialog(const Skin *sk)
+// The settings menu: START opens it, and it is also the quit barrier Emilio
+// asked for -- leaving the app now takes START, then "Salir", so a stray
+// palm cannot kill the music. Rows draw up to z=0.1 and the list header at
+// 0.5, so the panel lives at 0.6 and its type at 0.7. It takes over the
+// touch map wholesale, so the view below cannot answer taps meant for it.
+#define SETTINGS_ROWS 5
+#define SET_ROW0      0x7100
+
+static void draw_settings(const Skin *sk)
 {
 	const u32 dim   = C2D_Color32(0x00, 0x00, 0x00, 0xA8);
 	const u32 bord  = C2D_Color32(0x38, 0x38, 0x38, 0xFF);
 	const u32 panel = C2D_Color32(0x1B, 0x1B, 0x1B, 0xFF);
-	const u32 grey  = C2D_Color32(0x35, 0x35, 0x35, 0xFF);
 
 	C2D_DrawRectSolid(0.0f, 0.0f, 0.6f, BOT_W, SCR_H, dim);
-	const float px = 30.0f, py = 76.0f, pw = 260.0f, ph = 88.0f;
+	const float px = 20.0f, py = 26.0f, pw = 280.0f, ph = 188.0f;
 	C2D_DrawRectSolid(px, py, 0.6f, pw, ph, bord);
 	C2D_DrawRectSolid(px + 1.0f, py + 1.0f, 0.6f, pw - 2.0f, ph - 2.0f,
 	                  panel);
 
 	ui_depth(0.7f);
-	ui_text(text_buf, "Cerrar Spotify?", px + 16.0f,
-	        ui_baseline(py + 12.0f, TY_ROW_NAME), TY_ROW_NAME, pw - 32.0f,
-	        sk->text);
+	ui_text(text_buf, tr(S_SETTINGS), px + 16.0f,
+	        ui_baseline(py + 8.0f, TY_ROW_NAME), TY_ROW_NAME, pw - 32.0f,
+	        sk->warm);
 
-	const float bw = 108.0f, bh = 28.0f, by = py + ph - 12.0f - bh;
-	const char *cancel = "Cancelar", *quit = "Salir";
-	const float cw = ui_text_width(text_buf, cancel, TY_ROW_NAME);
-	const float qw = ui_text_width(text_buf, quit, TY_ROW_NAME);
-	const float qx = px + pw - 16.0f - bw;
-
-	C2D_DrawRectSolid(px + 16.0f, by, 0.6f, bw, bh, grey);
-	ui_text(text_buf, cancel, px + 16.0f + (bw - cw) / 2.0f,
-	        ui_baseline(by + 8.0f, TY_ROW_NAME), TY_ROW_NAME, cw, sk->text);
-	C2D_DrawRectSolid(qx, by, 0.6f, bw, bh, sk->accent);
-	ui_text(text_buf, quit, qx + (bw - qw) / 2.0f,
-	        ui_baseline(by + 8.0f, TY_ROW_NAME), TY_ROW_NAME, qw,
-	        sk->on_accent);
+	const char *labels[SETTINGS_ROWS] = {
+		tr(S_LANGUAGE), tr(S_ACCENT), tr(S_UNLINK), tr(S_QUIT),
+		tr(S_BACK_MENU),
+	};
+	const float rh = 30.0f, ry = py + 34.0f;
+	for (int i = 0; i < SETTINGS_ROWS; i++) {
+		const float y = ry + i * rh;
+		if (i == settings_sel)
+			C2D_DrawRectSolid(px + 6.0f, y - 3.0f, 0.65f, pw - 12.0f,
+			                  rh - 2.0f, sk->accent);
+		const u32 fg = i == settings_sel ? sk->on_accent : sk->text;
+		ui_text(text_buf, labels[i], px + 16.0f,
+		        ui_baseline(y + 2.0f, TY_ROW_NAME), TY_ROW_NAME,
+		        pw - 100.0f, fg);
+		// The two preference rows show their current value on the right.
+		if (i == 0) {
+			const char *v = lang_get() == LANG_EN ? "English" : "Espanol";
+			float w = ui_text_width(text_buf, v, TY_ROW_SUB);
+			ui_text(text_buf, v, px + pw - 16.0f - w,
+			        ui_baseline(y + 5.0f, TY_ROW_SUB), TY_ROW_SUB, w, fg);
+		} else if (i == 1) {
+			float w = ui_text_width(text_buf, tr(ACCENT_NAMES[accent_idx]),
+			                        TY_ROW_SUB);
+			C2D_DrawRectSolid(px + pw - 16.0f - w - 18.0f, y + 5.0f,
+			                  0.65f, 12.0f, 12.0f,
+			                  ACCENTS[accent_idx]);
+			ui_text(text_buf, tr(ACCENT_NAMES[accent_idx]),
+			        px + pw - 16.0f - w,
+			        ui_baseline(y + 5.0f, TY_ROW_SUB), TY_ROW_SUB, w, fg);
+		} else if (i == 2) {
+			ui_text(text_buf, tr(S_UNLINKED_NOTE), px + 16.0f,
+			        ui_baseline(y + 15.0f, TY_MICRO), TY_MICRO,
+			        pw - 32.0f, i == settings_sel ? fg : sk->dim);
+		}
+		tb_add(&g_tb, px + 6.0f, y - 3.0f, pw - 12.0f, rh - 2.0f,
+		       SET_ROW0 + i);
+	}
 	ui_depth(0.0f);
-
-	tb_add(&g_tb, px + 16.0f, by, bw, bh, EXIT_BTN_CANCEL);
-	tb_add(&g_tb, qx, by, bw, bh, EXIT_BTN_QUIT);
 }
 
 
@@ -653,7 +751,7 @@ static void draw_bottom(const Skin *sk)
 		screen_lyrics_args a = {0};
 		a.buf = text_buf;
 		a.tb = &g_tb;
-		a.track = now_title[0] ? now_title : "Nada sonando";
+		a.track = now_title[0] ? now_title : tr(S_NOTHING_PLAYING);
 		a.state = (screen_lyrics_state)lyr_state;
 		a.error = lyr_error;
 		a.doc = &lyr_doc;
@@ -683,7 +781,7 @@ static void draw_bottom(const Skin *sk)
 		screen_player_args a = {0};
 		a.buf = text_buf;
 		a.tb = &g_tb;
-		a.track = now_title[0] ? now_title : "Nada sonando";
+		a.track = now_title[0] ? now_title : tr(S_NOTHING_PLAYING);
 		a.artist = now_artist;
 		a.album = now_album;
 		a.playing = st == NATIVE_PLAYING && !paused;
@@ -702,11 +800,11 @@ static void draw_bottom(const Skin *sk)
 	}
 	text_at(BUILD_STAMP, BOT_W - 6, SCR_H - 14, 0.40f, sk->meter, C2D_AlignRight);
 
-	if (exit_confirm) {
+	if (settings_open) {
 		// Modal: it replaces the touch map so the view below cannot answer
-		// taps meant for the dialog.
+		// taps meant for the menu.
 		tb_reset(&g_tb);
-		draw_exit_dialog(sk);
+		draw_settings(sk);
 	}
 }
 
@@ -743,11 +841,11 @@ static void activate_row(int abs)
 	if (extra && abs == 0) {
 		nat_view = NATIVE_LIKED;
 		nat_arg[0] = '\0';
-		snprintf(nat_title, sizeof(nat_title), "Me gusta");
+		snprintf(nat_title, sizeof(nat_title), "%s", tr(S_LIKED));
 	} else if (idx >= 0 && idx < nat_count && nat_rows[idx].is_playlist) {
 		snprintf(nat_arg, sizeof(nat_arg), "%s", nat_rows[idx].uri);
 		if (native_playlist_name(nat_arg, nat_title, sizeof(nat_title)) != 0)
-			snprintf(nat_title, sizeof(nat_title), "Lista");
+			snprintf(nat_title, sizeof(nat_title), "%s", tr(S_PLAYLIST_FALLBACK));
 		nat_view = NATIVE_TRACKS;
 	} else if (idx >= 0 && idx < nat_count) {
 		play_index(idx);
@@ -822,16 +920,16 @@ static void draw_setup(void)
 	C2D_TargetClear(g_top, sk->top_bg);
 	C2D_SceneBegin(g_top);
 	if (setup_error[0]) {
-		text_at("No se pudo entrar", 28, 40, 0.80f, sk->warm, 0);
+		text_at(tr(S_SIGNIN_FAIL), 28, 40, 0.80f, sk->warm, 0);
 		text_fit(setup_error, 28, 86, 0.50f, sk->text, TOP_W - 56);
 	} else if (setup_code[0]) {
-		text_at("Vincula tu cuenta", 28, 36, 0.80f, sk->warm, 0);
-		text_at("En el navegador, entra a", 28, 84, 0.50f, sk->dim, 0);
+		text_at(tr(S_PAIR_TITLE), 28, 36, 0.80f, sk->warm, 0);
+		text_at(tr(S_PAIR_LINE1), 28, 84, 0.50f, sk->dim, 0);
 		text_fit(setup_url, 28, 108, 0.52f, sk->accent, TOP_W - 56);
-		text_at("y escribe el codigo que aparece abajo.", 28, 146, 0.50f,
+		text_at(tr(S_PAIR_LINE2), 28, 146, 0.50f,
 		        sk->dim, 0);
 	} else {
-		text_at("Spotify", 28, 40, 0.90f, sk->warm, 0);
+		text_at("SpotiBacan", 28, 40, 0.90f, sk->warm, 0);
 		text_fit(setup_step, 28, 96, 0.52f, sk->dim, TOP_W - 56);
 	}
 
@@ -839,14 +937,14 @@ static void draw_setup(void)
 	C2D_SceneBegin(g_bottom);
 	if (setup_code[0]) {
 		C2D_DrawRectSolid(0, 0, 0.0f, BOT_W, BAND_H, sk->panel);
-		text_at("CODIGO", 16, 12, 0.46f, sk->dim, 0);
+		text_at(tr(S_CODE), 16, 12, 0.46f, sk->dim, 0);
 		text_at(setup_code, BOT_W / 2, 74, 1.30f, sk->text, C2D_AlignCenter);
 		C2D_DrawRectSolid(0, BAR_Y, 0.0f, BOT_W, SCR_H - BAR_Y, sk->accent);
-		text_at("B  Cancelar", BOT_W / 2, BAR_Y + 10, 0.54f, sk->on_accent,
+		text_at(tr(S_B_CANCEL), BOT_W / 2, BAR_Y + 10, 0.54f, sk->on_accent,
 		        C2D_AlignCenter);
 	} else if (setup_error[0]) {
 		C2D_DrawRectSolid(0, BAR_Y, 0.0f, BOT_W, SCR_H - BAR_Y, sk->accent);
-		text_at("START  Salir", BOT_W / 2, BAR_Y + 10, 0.54f, sk->on_accent,
+		text_at(tr(S_START_QUIT), BOT_W / 2, BAR_Y + 10, 0.54f, sk->on_accent,
 		        C2D_AlignCenter);
 	} else {
 		text_fit(setup_step, 16, 100, 0.50f, sk->dim, BOT_W - 32);
@@ -887,6 +985,8 @@ int main(int argc, char **argv)
 	// The token belongs beside the .3dsx, like every other app here; without
 	// this it would land at the card root and not match the probes.
 	cfg_set_path((argv && argv[0]) ? argv[0] : NULL);
+	prefs_load();
+	refresh_nat_title();
 
 	// Everything that can fail runs first, while a text console is still the
 	// only thing initialised and can report why.
@@ -929,12 +1029,10 @@ int main(int argc, char **argv)
 	C2D_Prepare();
 	// Up before signing in, so pairing and progress are drawn screens rather
 	// than a text console.
-	// No stereo. The right-eye buffer was only cleared when the slider was
-	// up, so with 3D off it kept whatever uninitialised memory it had -- and
-	// the hardware showed it. Nothing here needs depth, and this halves the
-	// drawing besides.
+	// Setup screens draw mono; stereo turns on for the main loop below.
 	gfxSet3D(false);
 	C3D_RenderTarget *top = C2D_CreateScreenTarget(GFX_TOP, GFX_LEFT);
+	C3D_RenderTarget *topR = C2D_CreateScreenTarget(GFX_TOP, GFX_RIGHT);
 	C3D_RenderTarget *bottom = C2D_CreateScreenTarget(GFX_BOTTOM, GFX_LEFT);
 	text_buf = C2D_TextBufNew(4096);
 	ui_init();
@@ -945,7 +1043,7 @@ int main(int argc, char **argv)
 	{
 		static char nat_err[192];
 		static const native_sink sink = { ring_sink_write, ring_free_space };
-		snprintf(setup_step, sizeof(setup_step), "Iniciando...");
+		snprintf(setup_step, sizeof(setup_step), "%s", tr(S_STARTING));
 		draw_setup();
 
 		// First run on a console: pair here rather than in a separate tool.
@@ -992,6 +1090,12 @@ int main(int argc, char **argv)
 	// second of cushion is a second of lag after a skip.
 	prebuffer_bytes = (u32)SAMPLE_RATE * 4;
 
+	/* Stereo for the main screens. Both eyes are cleared and drawn every
+	 * frame -- the old bug was a right buffer that only got cleared with the
+	 * slider up, so the hardware showed uninitialised memory. Parallax comes
+	 * from the slider, scaled by each layer's depth inside draw_top. */
+	gfxSet3D(true);
+
 
 	while (aptMainLoop()) {
 		hidScanInput();
@@ -1002,19 +1106,49 @@ int main(int argc, char **argv)
 		// of them are rebuilt below.
 		touch_update(&g_touch, g_tb.rects, g_tb.n);
 
-		// START raises a confirmation instead of killing the music outright,
-		// and the modal owns every key and touch until it is answered.
-		if (exit_confirm) {
-			if (g_touch.clicked == EXIT_BTN_QUIT ||
-			    (down & (KEY_A | KEY_START)))
+		// START opens the settings menu, and the menu owns every key and
+		// touch until it is answered. Quitting is a row in it, so leaving
+		// the app takes two deliberate presses.
+		if (settings_open) {
+			if (down & KEY_DUP)
+				settings_sel = settings_sel > 0 ? settings_sel - 1
+				                                : SETTINGS_ROWS - 1;
+			if (down & KEY_DDOWN)
+				settings_sel = settings_sel + 1 < SETTINGS_ROWS
+				               ? settings_sel + 1 : 0;
+			int row = -1;
+			if (down & KEY_A)
+				row = settings_sel;
+			if (g_touch.clicked >= SET_ROW0 &&
+			    g_touch.clicked < SET_ROW0 + SETTINGS_ROWS)
+				row = g_touch.clicked - SET_ROW0;
+			switch (row) {
+			case 0:   // language
+				lang_set(lang_get() == LANG_EN ? LANG_ES : LANG_EN);
+				cfg_set("lang", lang_get() == LANG_EN ? "en" : "es");
+				refresh_nat_title();
 				break;
-			if (g_touch.clicked == EXIT_BTN_CANCEL || (down & KEY_B))
-				exit_confirm = false;
+			case 1:   // accent colour
+				accent_idx = (accent_idx + 1) % ACCENT_COUNT;
+				apply_accent();
+				cfg_set("accent", ACCENT_KEYS[accent_idx]);
+				break;
+			case 2:   // unlink: wipe the token (and prefs) and leave
+				cfg_clear();
+				goto quit;
+			case 3:   // quit
+				goto quit;
+			default:
+				break;
+			}
+			if (row == SETTINGS_ROWS - 1 || (down & (KEY_B | KEY_START)))
+				settings_open = false;
 			down = 0;
 			g_touch.clicked = -1;
 			g_touch.long_pressed = -1;
 		} else if (down & KEY_START) {
-			exit_confirm = true;
+			settings_open = true;
+			settings_sel = 0;
 			down = 0;
 		}
 
@@ -1087,12 +1221,12 @@ int main(int argc, char **argv)
 					lid_mode_set(false);
 				switch (st) {
 				case NATIVE_LOADING:
-					snprintf(now_title, sizeof(now_title), "Cargando...");
+					snprintf(now_title, sizeof(now_title), "%s", tr(S_LOADING_DOTS));
 					now_artist[0] = '\0';
 					now_album[0] = '\0';
 					break;
 				case NATIVE_FAILED:
-					snprintf(now_title, sizeof(now_title), "No se pudo reproducir");
+					snprintf(now_title, sizeof(now_title), "%s", tr(S_PLAY_FAIL));
 					snprintf(now_artist, sizeof(now_artist), "%s",
 					         native_last_error());
 					break;
@@ -1176,7 +1310,7 @@ int main(int argc, char **argv)
 				// Same trip the B button makes: up to the playlists.
 				nat_view = NATIVE_PLAYLISTS;
 				nat_arg[0] = '\0';
-				snprintf(nat_title, sizeof(nat_title), "Listas");
+				snprintf(nat_title, sizeof(nat_title), "%s", tr(S_LISTS));
 				lib.sel = 0;
 				lib.scroll = lib.velocity = 0.0f;
 				lib_reload = true;
@@ -1197,7 +1331,7 @@ int main(int argc, char **argv)
 					snprintf(nat_arg, sizeof(nat_arg), "%s",
 					         nat_rows[idx].uri);
 					nat_view = NATIVE_RADIO;
-					snprintf(nat_title, sizeof(nat_title), "Radio");
+					snprintf(nat_title, sizeof(nat_title), "%s", tr(S_RADIO));
 					lib.sel = 0;
 					lib.scroll = lib.velocity = 0.0f;
 					lib_reload = true;
@@ -1207,7 +1341,7 @@ int main(int argc, char **argv)
 				if (nat_view != NATIVE_PLAYLISTS) {
 					nat_view = NATIVE_PLAYLISTS;
 					nat_arg[0] = '\0';
-					snprintf(nat_title, sizeof(nat_title), "Listas");
+					snprintf(nat_title, sizeof(nat_title), "%s", tr(S_LISTS));
 					lib.sel = 0;
 					lib.scroll = lib.velocity = 0.0f;
 					lib_reload = true;
@@ -1286,14 +1420,14 @@ int main(int argc, char **argv)
 			// because it lives on its own thread.
 			SwkbdState kb;
 			swkbdInit(&kb, SWKBD_TYPE_QWERTY, 2, sizeof(lib.query) - 1);
-			swkbdSetHintText(&kb, "Buscar en Spotify");
+			swkbdSetHintText(&kb, tr(S_SEARCH_HINT));
 			swkbdSetInitialText(&kb, lib.query);
 			char typed[sizeof(lib.query)] = "";
 			if (swkbdInputText(&kb, typed, sizeof(typed)) == SWKBD_BUTTON_RIGHT) {
 				strncpy(lib.query, typed, sizeof(lib.query) - 1);
 				nat_view = lib.query[0] ? NATIVE_SEARCH : NATIVE_PLAYLISTS;
 				snprintf(nat_title, sizeof(nat_title), "%s",
-				         lib.query[0] ? "Busqueda" : "Listas");
+				         lib.query[0] ? tr(S_SEARCH_VIEW) : tr(S_LISTS));
 				lib.sel = 0;
 				lib.scroll = lib.velocity = 0.0f;
 				lib_reload = true;
@@ -1316,15 +1450,20 @@ int main(int argc, char **argv)
 		C2D_TextBufClear(text_buf);
 		tb_reset(&g_tb);
 		C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+		const float par = osGet3DSliderState() * 1.5f;
 		C2D_TargetClear(top, sk->top_bg);
 		C2D_SceneBegin(top);
-		draw_top(sk, buffering, muted, 0.0f);
+		draw_top(sk, buffering, muted, -par);
+		C2D_TargetClear(topR, sk->top_bg);
+		C2D_SceneBegin(topR);
+		draw_top(sk, buffering, muted, par);
 		C2D_TargetClear(bottom, sk->bottom_bg);
 		C2D_SceneBegin(bottom);
 		draw_bottom(sk);
 		C3D_FrameEnd(0);
 	}
 
+quit:
 	running = false;
 	threadJoin(lister, 2000000000LL);
 	threadJoin(snd, 2000000000LL);

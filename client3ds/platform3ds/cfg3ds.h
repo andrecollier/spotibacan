@@ -1,4 +1,4 @@
-/* The refresh token on the SD card, and nothing else.
+/* The app config on the SD card: a tiny key=value file.
  *
  * An SD card has no permissions to hide behind, so what protects this is
  * keeping it small and keeping it off the screen and out of the log: the file
@@ -14,6 +14,13 @@
  * back to the card root when argv[0] is not a path the console can open. */
 void cfg_set_path(const char *argv0);
 const char *cfg_path(void);
+/* The directory the config lives in (for native.log, a user avatar file). */
+void cfg_dir(char *out, size_t outlen);
+
+/* Generic key access: every writer preserves the other keys, so the refresh
+ * token, the cached avatar URL, and the UI preferences survive each other. */
+bool cfg_get(const char *key, char *out, size_t outlen);
+bool cfg_set(const char *key, const char *value);
 
 bool cfg_load_refresh_token(char *out, size_t outlen);
 bool cfg_save_refresh_token(const char *token, const char *scope);

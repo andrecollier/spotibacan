@@ -4,41 +4,18 @@
 #include "stb_image.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* Covers are JPEGs of a few tens of KB; the cap only guards against a
  * broken or hostile edge. */
 #define ART_MAX_BYTES (1024 * 1024)
 
-bool artwork_fetch_decode(const char *url, int px, uint8_t *out_rgb565,
-                          char *err, size_t errlen)
+/* Box-average downscale: sources are 64/300/640px and targets 48/128,
+ * so every output pixel averages a small source patch. */
+static void downscale_rgb565(const unsigned char *rgb, int w, int h, int px,
+                             uint8_t *out_rgb565)
 {
-	if (!url || !*url) {
-		snprintf(err, errlen, "no art url");
-		return false;
-	}
-
-	http_reply r;
-	memset(&r, 0, sizeof(r));
-	if (http_get_url(url, ART_MAX_BYTES, &r) != 0 ||
-	    (r.status != 200 && r.status != 206)) {
-		snprintf(err, errlen, "%s", r.err[0] ? r.err : "cover fetch failed");
-		http_reply_free(&r);
-		return false;
-	}
-
-	int w = 0, h = 0, ch = 0;
-	unsigned char *rgb =
-	    stbi_load_from_memory((const unsigned char *)r.body, (int)r.len,
-	                          &w, &h, &ch, 3);
-	http_reply_free(&r);
-	if (!rgb) {
-		snprintf(err, errlen, "jpeg decode failed");
-		return false;
-	}
-
-	/* Box-average downscale: sources are 64/300/640px and targets 48/128,
-	 * so every output pixel averages a small source patch. */
 	for (int y = 0; y < px; y++) {
 		for (int x = 0; x < px; x++) {
 			int x0 = x * w / px, x1 = (x + 1) * w / px;
@@ -67,6 +44,76 @@ bool artwork_fetch_decode(const char *url, int px, uint8_t *out_rgb565,
 			out_rgb565[(y * px + x) * 2 + 1] = (uint8_t)(v >> 8);
 		}
 	}
+}
+
+bool artwork_fetch_decode(const char *url, int px, uint8_t *out_rgb565,
+                          char *err, size_t errlen)
+{
+	if (!url || !*url) {
+		snprintf(err, errlen, "no art url");
+		return false;
+	}
+
+	http_reply r;
+	memset(&r, 0, sizeof(r));
+	if (http_get_url(url, ART_MAX_BYTES, &r) != 0 ||
+	    (r.status != 200 && r.status != 206)) {
+		snprintf(err, errlen, "%s", r.err[0] ? r.err : "cover fetch failed");
+		http_reply_free(&r);
+		return false;
+	}
+
+	int w = 0, h = 0, ch = 0;
+	unsigned char *rgb =
+	    stbi_load_from_memory((const unsigned char *)r.body, (int)r.len,
+	                          &w, &h, &ch, 3);
+	http_reply_free(&r);
+	if (!rgb) {
+		snprintf(err, errlen, "jpeg decode failed");
+		return false;
+	}
+
+	downscale_rgb565(rgb, w, h, px, out_rgb565);
+	stbi_image_free(rgb);
+	return true;
+}
+
+bool artwork_load_file(const char *filepath, int px, uint8_t *out_rgb565,
+                       char *err, size_t errlen)
+{
+	/* The user's own avatar file, PNG or JPEG: the Web API rate-limits the
+	 * profile fetch so hard that a file on the card is the reliable path.
+	 * stb is built without stdio, so the file is slurped first. */
+	FILE *f = fopen(filepath, "rb");
+	if (!f) {
+		snprintf(err, errlen, "cannot open file");
+		return false;
+	}
+	fseek(f, 0, SEEK_END);
+	long sz = ftell(f);
+	fseek(f, 0, SEEK_SET);
+	if (sz <= 0 || sz > 4 * 1024 * 1024) {
+		fclose(f);
+		snprintf(err, errlen, "bad file size");
+		return false;
+	}
+	unsigned char *data = malloc((size_t)sz);
+	if (!data || fread(data, 1, (size_t)sz, f) != (size_t)sz) {
+		free(data);
+		fclose(f);
+		snprintf(err, errlen, "cannot read file");
+		return false;
+	}
+	fclose(f);
+
+	int w = 0, h = 0, ch = 0;
+	unsigned char *rgb = stbi_load_from_memory(data, (int)sz, &w, &h, &ch, 3);
+	free(data);
+	if (!rgb) {
+		snprintf(err, errlen, "image decode failed");
+		return false;
+	}
+	downscale_rgb565(rgb, w, h, px, out_rgb565);
 	stbi_image_free(rgb);
 	return true;
 }

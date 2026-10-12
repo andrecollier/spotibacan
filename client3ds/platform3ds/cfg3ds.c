@@ -5,6 +5,8 @@
 #include <string.h>
 
 #define CFG_NAME "spotify.cfg"
+#define CFG_MAX_KEYS 8
+#define CFG_VAL_MAX 512
 
 static char path[320];
 
@@ -37,7 +39,19 @@ const char *cfg_path(void)
 	return path;
 }
 
-static bool read_key(const char *key, char *out, size_t outlen)
+/* The directory the config lives in, for files that belong beside it
+ * (native.log, a user-supplied avatar). */
+void cfg_dir(char *out, size_t outlen)
+{
+	snprintf(out, outlen, "%s", cfg_path());
+	char *slash = strrchr(out, '/');
+	if (slash)
+		slash[1] = '\0';
+	else
+		out[0] = '\0';
+}
+
+bool cfg_get(const char *key, char *out, size_t outlen)
 {
 	FILE *f = fopen(cfg_path(), "r");
 	if (!f)
@@ -62,31 +76,56 @@ static bool read_key(const char *key, char *out, size_t outlen)
 	return found;
 }
 
-bool cfg_load_refresh_token(char *out, size_t outlen)
+/* Rewrites the whole file with one key set or replaced.
+ *
+ * This matters more than it looks: Spotify rotates the refresh token on every
+ * exchange, so the moment a refresh succeeds the stored one is dead. A write
+ * that is interrupted -- a closed lid, a yanked card, a full filesystem --
+ * would then leave no usable token at all and force the user to pair again.
+ * The temp-file-plus-rename is the step that cannot half-happen. */
+bool cfg_set(const char *key, const char *value)
 {
-	return read_key("refresh_token", out, outlen);
-}
+	if (!key || !value || !value[0])
+		return false;
 
-bool cfg_load_profile_art(char *out, size_t outlen)
-{
-	return read_key("profile_art", out, outlen);
-}
+	/* Collect the existing pairs, replacing the one being set. */
+	char keys[CFG_MAX_KEYS][32], vals[CFG_MAX_KEYS][CFG_VAL_MAX];
+	int n = 0;
+	FILE *f = fopen(cfg_path(), "r");
+	if (f) {
+		char line[1024];
+		while (fgets(line, sizeof(line), f) && n < CFG_MAX_KEYS) {
+			char *eq = strchr(line, '=');
+			if (!eq || line[0] == '#')
+				continue;
+			*eq = '\0';
+			char *v = eq + 1;
+			char *nl = strpbrk(v, "\r\n");
+			if (nl)
+				*nl = '\0';
+			if (strcmp(line, key) == 0)
+				continue;   /* rewritten below */
+			if (strlen(line) < sizeof(keys[0]) &&
+			    strlen(v) < sizeof(vals[0]) && v[0]) {
+				snprintf(keys[n], sizeof(keys[0]), "%s", line);
+				snprintf(vals[n], sizeof(vals[0]), "%s", v);
+				n++;
+			}
+		}
+		fclose(f);
+	}
 
-static bool write_cfg(const char *token, const char *scope, const char *art)
-{
 	char tmp[sizeof(path) + 8];
 	snprintf(tmp, sizeof(tmp), "%s.new", cfg_path());
 
-	FILE *f = fopen(tmp, "w");
+	f = fopen(tmp, "w");
 	if (!f)
 		return false;
 	fprintf(f, "# 3ds-spotify. This file holds a Spotify refresh token:\n"
 	           "# treat it like a password and delete it to unpair.\n");
-	fprintf(f, "refresh_token=%s\n", token);
-	if (scope && scope[0])
-		fprintf(f, "scope=%s\n", scope);
-	if (art && art[0])
-		fprintf(f, "profile_art=%s\n", art);
+	fprintf(f, "%s=%s\n", key, value);
+	for (int i = 0; i < n; i++)
+		fprintf(f, "%s=%s\n", keys[i], vals[i]);
 
 	bool ok = fflush(f) == 0 && ferror(f) == 0;
 	if (fclose(f) != 0)
@@ -107,35 +146,30 @@ static bool write_cfg(const char *token, const char *scope, const char *art)
 	return true;
 }
 
-/* Written to a temporary file and renamed into place.
- *
- * This matters more than it looks: Spotify rotates the refresh token on every
- * exchange, so the moment a refresh succeeds the stored one is dead. A write
- * that is interrupted -- a closed lid, a yanked card, a full filesystem --
- * would then leave no usable token at all and force the user to pair again.
- * The rename is the step that cannot half-happen. */
+bool cfg_load_refresh_token(char *out, size_t outlen)
+{
+	return cfg_get("refresh_token", out, outlen);
+}
+
 bool cfg_save_refresh_token(const char *token, const char *scope)
 {
 	if (!token || !token[0])
 		return false;
+	if (!cfg_set("refresh_token", token))
+		return false;
+	if (scope && scope[0])
+		cfg_set("scope", scope);
+	return true;
+}
 
-	/* The rewrite must carry the other keys over, or every token refresh
-	 * would silently drop the cached avatar. */
-	char art[96] = "";
-	read_key("profile_art", art, sizeof(art));
-	return write_cfg(token, scope, art);
+bool cfg_load_profile_art(char *out, size_t outlen)
+{
+	return cfg_get("profile_art", out, outlen);
 }
 
 bool cfg_save_profile_art(const char *url)
 {
-	if (!url || !url[0])
-		return false;
-
-	char token[512], scope[256] = "";
-	if (!read_key("refresh_token", token, sizeof(token)))
-		return false;
-	read_key("scope", scope, sizeof(scope));
-	return write_cfg(token, scope, url);
+	return url && url[0] && cfg_set("profile_art", url);
 }
 
 bool cfg_clear(void)

@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "ui.h"
+#include "lang.h"
 
 /* Bottom screen is 320x240. The layout follows the reference client's player
  * stripped to three transport controls: prev / play-pause / next on one
@@ -173,15 +174,15 @@ static void draw_header(const screen_player_args *a)
 	 * stretch answers, the same way the reference gives its header labels a
 	 * wide area rather than just the glyph. */
 	{
-		float w = ui_text_width(a->buf, "LETRA", TY_MICRO) + 4.0f;
-		ui_text_tracked(a->buf, "LETRA", 246.0f - w,
+		float w = ui_text_width(a->buf, tr(S_LYRICS), TY_MICRO) + 4.0f;
+		ui_text_tracked(a->buf, tr(S_LYRICS), 246.0f - w,
 		                ui_baseline(9.0f, TY_MICRO), TY_MICRO, 1.0f,
 		                press_clr(CLR_LABEL, lyr_pressed, a->accent));
 		tb_add(a->tb, 186.0f, 0.0f, 66.0f, HEADER_H, BTN_P_LYRICS);
 	}
 	{
-		float w = ui_text_width(a->buf, "LISTA", TY_MICRO);
-		ui_text_tracked(a->buf, "LISTA", 296.0f - w,
+		float w = ui_text_width(a->buf, tr(S_LIBRARY), TY_MICRO);
+		ui_text_tracked(a->buf, tr(S_LIBRARY), 296.0f - w,
 		                ui_baseline(9.0f, TY_MICRO), TY_MICRO, 1.0f,
 		                press_clr(CLR_LABEL, lib_pressed, a->accent));
 		tri_right(302.0f, HEADER_H / 2 - 5.0f, 6.0f, 10.0f,

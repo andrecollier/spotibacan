@@ -1,5 +1,6 @@
 #include "screen_lyrics.h"
 
+#include "lang.h"
 #include "ui.h"
 
 /* Synced docs put the current line at this slot; plain docs scroll
@@ -18,12 +19,12 @@ static void draw_centred_note(const screen_lyrics_args *a, const char *msg)
 void screen_lyrics_draw(const screen_lyrics_args *a)
 {
 	if (a->state == LYR_ST_LOADING) {
-		draw_centred_note(a, "Buscando la letra...");
+		draw_centred_note(a, tr(S_LYR_SEARCHING));
 	} else if (a->state == LYR_ST_NONE) {
-		draw_centred_note(a, "Sin letra para este tema");
+		draw_centred_note(a, tr(S_LYR_NONE));
 	} else if (a->state == LYR_ST_ERR) {
 		draw_centred_note(a, a->error && a->error[0]
-		                       ? a->error : "No se pudo buscar");
+		                       ? a->error : tr(S_LYR_FAIL));
 	} else {
 		const lyrics_doc *doc = a->doc;
 		float top;   /* document px at the content area's top */
@@ -82,8 +83,8 @@ void screen_lyrics_draw(const screen_lyrics_args *a)
 	                 22.0f, LYR_HEADER_H / 2 + 5.0f, back,
 	                 16.0f, LYR_HEADER_H / 2, back, 0.0f);
 	{
-		float w = ui_text_width(a->buf, "VOLVER", TY_MICRO);
-		ui_text_tracked(a->buf, "VOLVER", 28.0f,
+		float w = ui_text_width(a->buf, tr(S_BACK), TY_MICRO);
+		ui_text_tracked(a->buf, tr(S_BACK), 28.0f,
 		                ui_baseline(9.0f, TY_MICRO), TY_MICRO, 1.0f, back);
 		tb_add(a->tb, 0.0f, 0.0f, 28.0f + w + 16.0f, LYR_HEADER_H,
 		       LYR_BTN_BACK);
