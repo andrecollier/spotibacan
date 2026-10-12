@@ -84,6 +84,9 @@ typedef enum {
 	S_H_HEART,
 	S_DL_VIEW,
 	S_OFFLINE_A,
+	S_QUEUE,
+	S_QUEUE_EMPTY,
+	S_QUEUE_DLING,
 	S_COUNT
 } str_id;
 

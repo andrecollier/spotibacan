@@ -247,6 +247,32 @@ static void draw_header(const screen_player_args *a)
 		tb_add_hit(a->tb, 76.0f, HEADER_H / 2, 40.0f, BTN_P_DOWNLOAD);
 	}
 
+	/* The queue button is always there: tap opens the Downloads shelf,
+	 * hold shows the pending queue. A badge counts what is still waiting,
+	 * and the dot pulses while a download runs. */
+	{
+		const bool q_pressed = a->pressed_id == BTN_P_QUEUE;
+		const u32 clr = press_clr(
+		    (a->dl_queue > 0 || a->dl_active) ? a->accent : CLR_IDLE,
+		    q_pressed, a->accent);
+		const float cx = 104.0f, cy = HEADER_H / 2;
+		/* Tray with three stacked lines: the queue. */
+		C2D_DrawRectSolid(cx - 7.0f, cy - 6.5f, 0.0f, 14.0f, 1.6f, clr);
+		C2D_DrawRectSolid(cx - 7.0f, cy - 1.8f, 0.0f, 14.0f, 1.6f, clr);
+		C2D_DrawRectSolid(cx - 7.0f, cy + 2.9f, 0.0f, 14.0f, 1.6f, clr);
+		C2D_DrawRectSolid(cx - 7.0f, cy - 6.5f, 0.0f, 1.6f, 11.0f, clr);
+		C2D_DrawRectSolid(cx + 5.4f, cy - 6.5f, 0.0f, 1.6f, 11.0f, clr);
+		if (a->dl_active)
+			ui_disc(cx + 9.5f, cy + 5.0f, 2.4f, a->accent);
+		if (a->dl_queue > 0) {
+			char n[8];
+			snprintf(n, sizeof(n), "%d", a->dl_queue);
+			ui_text(a->buf, n, cx + 10.5f, ui_baseline(cy - 3.0f, TY_MICRO),
+			        TY_MICRO, 24.0f, a->accent);
+		}
+		tb_add_hit(a->tb, cx, cy, 40.0f, BTN_P_QUEUE);
+	}
+
 	/* Two wide hit zones on the right: lyrics and the library. The whole
 	 * stretch answers, the same way the reference gives its header labels a
 	 * wide area rather than just the glyph. */

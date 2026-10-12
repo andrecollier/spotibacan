@@ -30,6 +30,7 @@ enum {
 	BTN_P_REPEAT,
 	BTN_P_LIKE,
 	BTN_P_DOWNLOAD,
+	BTN_P_QUEUE,
 	BTN_P_RECENT0 = 0x10,   /* + index: replay a shelf item */
 };
 
@@ -50,6 +51,8 @@ typedef struct {
 	bool dl_show;         /* a remote track: the download button exists */
 	bool dl_armed;        /* it will save when the background download ends */
 	bool dl_saved;        /* already on the card: the icon is a check */
+	int  dl_queue;        /* tracks waiting in the download queue */
+	bool dl_active;       /* the queue is downloading something now */
 	bool can_prev, can_next; /* no neighbour in the current view: greyed */
 
 	long progress_ms;

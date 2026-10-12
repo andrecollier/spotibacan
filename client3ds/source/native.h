@@ -120,6 +120,21 @@ void         native_save_current(void);
 bool         native_save_armed(void);
 /* True once the playing track's .ogg exists on the card (cached per URI). */
 bool         native_current_saved(void);
+
+/* ------------------------------------------------- download queue */
+
+/* An armed download that gets cut short (its background slot is taken by a
+ * newer one) is queued here instead of dying: the player drains the queue
+ * one track at a time whenever no other download is using the link. */
+#define NATIVE_DLQ_MAX 12
+
+/* Queue length for the badge, and entry i's title for the popup
+ * (0 = the oldest). Returns false when i is out of range. */
+int  native_dl_queue_count(void);
+bool native_dl_queue_entry(int i, char *title, size_t titlelen);
+/* The download the queue is running right now: 0-100, or -1 when idle.
+ * title_out gets its name when active. */
+int  native_dl_active(char *title_out, size_t titlelen);
 /* Appends a line to the same native.log the backend writes; for UI-side
  * failures that would otherwise leave no trace (a stuck view, a dead tap). */
 void         native_log(const char *fmt, ...);

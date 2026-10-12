@@ -101,9 +101,26 @@ typedef struct dl_job {
 	volatile bool stop;
 	volatile bool save;      /* write the .ogg (+ cover) when complete */
 	volatile bool saved;     /* CAS guard: exactly one save per job */
-	volatile bool detached;  /* player moved on; the thread frees itself */
+	/* Ownership handoff between the player and the download thread:
+	 * 0 both alive, 1 player detached (thread frees), 2 thread finished
+	 * (player joins and frees). The CAS makes the handoff race-free. */
+	volatile int  handoff;
 	struct dl_job *next;
 } dl_job;
+
+/* The download queue: an armed download whose background slot is taken by a
+ * newer one lands here instead of dying. Drained one at a time by the
+ * player thread whenever no other download is using the link. */
+typedef struct {
+	char uri[64];
+	char artist[128];
+	char title[128];
+} dlq_entry;
+
+static dlq_entry dlq[NATIVE_DLQ_MAX];
+static int dlq_count;                    /* guarded by g.lock */
+static volatile int dlq_active_pct = -1; /* 0-100 while draining, else -1 */
+static char dlq_active_title[128];
 
 static void save_download(const track_stream *ts);
 
@@ -177,6 +194,58 @@ void native_save_current(void)
 	}
 }
 bool native_save_armed(void) { return g.want_save; }
+
+int native_dl_queue_count(void)
+{
+	LightLock_Lock(&g.lock);
+	int n = dlq_count;
+	LightLock_Unlock(&g.lock);
+	return n;
+}
+
+bool native_dl_queue_entry(int i, char *title, size_t titlelen)
+{
+	LightLock_Lock(&g.lock);
+	bool ok = i >= 0 && i < dlq_count;
+	if (ok)
+		snprintf(title, titlelen, "%s", dlq[i].title);
+	LightLock_Unlock(&g.lock);
+	return ok;
+}
+
+int native_dl_active(char *title_out, size_t titlelen)
+{
+	int pct = dlq_active_pct;
+	if (pct >= 0)
+		snprintf(title_out, titlelen, "%s", dlq_active_title);
+	return pct;
+}
+
+/* Appends a track to the download queue, unless it is already queued or
+ * already on the card. Caller holds no lock. Returns false when the queue
+ * is full: twelve pending downloads is plenty for a handheld. */
+static bool dlq_enqueue(const char *uri, const char *artist,
+                        const char *title)
+{
+	LightLock_Lock(&g.lock);
+	for (int i = 0; i < dlq_count; i++)
+		if (strcmp(dlq[i].uri, uri) == 0) {
+			LightLock_Unlock(&g.lock);
+			return true;   /* already waiting: same outcome */
+		}
+	if (dlq_count >= NATIVE_DLQ_MAX) {
+		LightLock_Unlock(&g.lock);
+		nlog("DLQ: cola llena, se descarta %s\n", title);
+		return false;
+	}
+	dlq_entry *e = &dlq[dlq_count++];
+	snprintf(e->uri, sizeof(e->uri), "%s", uri);
+	snprintf(e->artist, sizeof(e->artist), "%s", artist);
+	snprintf(e->title, sizeof(e->title), "%s", title);
+	LightLock_Unlock(&g.lock);
+	nlog("DLQ: en cola %s - %s\n", artist, title);
+	return true;
+}
 
 bool native_ready(void) { return g.ready; }
 bool native_offline(void) { return g.offline; }
@@ -432,6 +501,7 @@ void native_play(const char *track_uri)
 {
 	if (!g.ready || !track_uri)
 		return;
+	nlog("UI: play pedido %s\n", track_uri);
 	LightLock_Lock(&g.lock);
 	snprintf(g.want, sizeof(g.want), "%s", track_uri);
 	g.want_new = true;
@@ -444,9 +514,9 @@ void native_stop(void)
 	g.want_stop = true;
 }
 
-/* Fills the job's buffer, saves the file if it was armed, and -- when the
- * player already moved on to another track (detached) -- frees the job
- * itself, since nobody will ever join it. */
+/* Fills the job's buffer and saves the file if it was armed. The handoff
+ * decides who frees: a job the player already detached belongs to this
+ * thread; otherwise the player joins and reclaims it. */
 static void download_thread(void *arg)
 {
 	dl_job *job = arg;
@@ -454,17 +524,38 @@ static void download_thread(void *arg)
 	if (job->save && job->ts.dl_done && !job->ts.dl_failed &&
 	    !__sync_lock_test_and_set(&job->saved, 1))
 		save_download(&job->ts);
-	if (job->detached) {
-		LightLock_Lock(&g.lock);
-		dl_job **p = &g.jobs;
-		while (*p && *p != job)
-			p = &(*p)->next;
-		if (*p)
-			*p = job->next;
-		LightLock_Unlock(&g.lock);
-		track_stream_free(&job->ts);
-		free(job);
-	}
+	__sync_synchronize();
+	if (__sync_bool_compare_and_swap(&job->handoff, 0, 2))
+		return;   /* the player is still around: it joins and frees */
+	LightLock_Lock(&g.lock);
+	dl_job **p = &g.jobs;
+	while (*p && *p != job)
+		p = &(*p)->next;
+	if (*p)
+		*p = job->next;
+	LightLock_Unlock(&g.lock);
+	track_stream_free(&job->ts);
+	free(job);
+}
+
+/* Leaves a job with its download thread (the player is moving on). When the
+ * thread already finished, the job is reclaimed here instead. */
+static void job_detach(dl_job *job)
+{
+	__sync_synchronize();
+	if (__sync_bool_compare_and_swap(&job->handoff, 0, 1))
+		return;   /* the thread will free itself when it finishes */
+	threadJoin(job->th, U64_MAX);
+	threadFree(job->th);
+	LightLock_Lock(&g.lock);
+	dl_job **p = &g.jobs;
+	while (*p && *p != job)
+		p = &(*p)->next;
+	if (*p)
+		*p = job->next;
+	LightLock_Unlock(&g.lock);
+	track_stream_free(&job->ts);
+	free(job);
 }
 
 /* Decodes one streaming track into the ring until it ends, the download
@@ -897,14 +988,29 @@ static void player_thread(void *arg)
 				/* The download keeps filling in the background and saves
 				 * itself if it was armed -- the next track starts now,
 				 * not when this file lands. One background download at a
-				 * time: an older one is told to stop, its RAM is dear. */
+				 * time: an older one is told to stop, its RAM is dear.
+				 * A stopped download that was armed for saving does not
+				 * die: it waits its turn in the download queue. */
+				char q_uri[64] = "", q_artist[128] = "", q_title[128] = "";
 				LightLock_Lock(&g.lock);
 				for (dl_job *p = g.jobs; p; p = p->next)
-					if (p != job && p->detached && !p->ts.dl_done)
+					if (p != job && p->handoff == 1 &&
+					    !p->ts.dl_done && !p->ts.dl_failed) {
 						p->stop = true;
-				job->detached = true;
+						if (p->save && !p->saved && !q_uri[0]) {
+							snprintf(q_uri, sizeof(q_uri), "%s",
+							         p->ts.meta.uri);
+							snprintf(q_artist, sizeof(q_artist), "%s",
+							         p->ts.meta.artist);
+							snprintf(q_title, sizeof(q_title), "%s",
+							         p->ts.meta.name);
+						}
+					}
 				g.job = NULL;
 				LightLock_Unlock(&g.lock);
+				if (q_uri[0])
+					dlq_enqueue(q_uri, q_artist, q_title);
+				job_detach(job);
 			}
 			if (g.state == NATIVE_PLAYING)
 				g.state = NATIVE_IDLE;
@@ -935,6 +1041,134 @@ static void player_thread(void *arg)
 			}
 			svcSleepThread(20000000LL);   // 20 ms
 			continue;
+		}
+
+		/* The download queue drains whenever the link is idle: nothing
+		 * playing, or the playing track's file already complete. One at a
+		 * time, so the queue never doubles the big stream buffers. */
+		if (dlq_count > 0 && g.ready) {
+			bool busy = false;
+			LightLock_Lock(&g.lock);
+			for (dl_job *p = g.jobs; p; p = p->next)
+				if (!p->ts.dl_done && !p->ts.dl_failed)
+					busy = true;
+			LightLock_Unlock(&g.lock);
+			if (!busy) {
+				dlq_entry e;
+				LightLock_Lock(&g.lock);
+				e = dlq[0];
+				memmove(&dlq[0], &dlq[1],
+				        (size_t)(dlq_count - 1) * sizeof(dlq[0]));
+				dlq_count--;
+				LightLock_Unlock(&g.lock);
+
+				/* Saved another way while it waited? Nothing to do. */
+				char path[520];
+				download_path(e.artist, e.title, path, sizeof(path));
+				struct stat st;
+				if (stat(path, &st) == 0 && st.st_size > 0) {
+					nlog("DLQ: %s ya estaba en la tarjeta\n", e.title);
+					continue;
+				}
+
+				snprintf(dlq_active_title, sizeof(dlq_active_title),
+				         "%s - %s", e.artist, e.title);
+				dlq_active_pct = 0;
+
+				dl_job *job = calloc(1, sizeof(*job));
+				char err[192];
+				int rc = job ? track_stream_begin(g.sp_host,
+				                   g.l5.access_token, g.ap, e.uri,
+				                   NULL, &job->ts, err, sizeof(err)) : -1;
+				if (rc != 0) {
+					nlog("DLQ: no se pudo empezar %s (%s)\n", e.title,
+					     job ? err : "sin memoria");
+					free(job);
+					dlq_active_pct = -1;
+					continue;   /* one bad entry loses its turn only */
+				}
+				job->save = true;
+				LightLock_Lock(&g.lock);
+				job->next = g.jobs;
+				g.jobs = job;
+				LightLock_Unlock(&g.lock);
+				Thread dl = threadCreate(download_thread, job,
+				                         96 * 1024, 0x31, -2, false);
+				if (!dl) {
+					nlog("DLQ: sin hilo para %s\n", e.title);
+					LightLock_Lock(&g.lock);
+					g.jobs = job->next;
+					LightLock_Unlock(&g.lock);
+					track_stream_free(&job->ts);
+					free(job);
+					dlq_active_pct = -1;
+					continue;
+				}
+				job->th = dl;
+				nlog("DLQ: descargando %s\n", e.title);
+				unsigned long long ka = osGetTime();
+				while (!g.quit && !g.want_new &&
+				       !job->ts.dl_done && !job->ts.dl_failed) {
+					if (job->ts.len)
+						dlq_active_pct =
+						    (int)(job->ts.downloaded * 100 /
+						          job->ts.len);
+					/* The session still needs its pings answered while
+					 * the queue works, or the next entry's key fails. */
+					unsigned long long now = osGetTime();
+					if (g.ap && now - ka >= 1000) {
+						ka = now;
+						if (ap_wait(g.ap, 0) == 1) {
+							static uint8_t ka_buf[2048];
+							uint8_t cmd;
+							int kn = ap_recv(g.ap, &cmd, ka_buf,
+							                 sizeof(ka_buf));
+							if (kn < 0) {
+								ap_close(g.ap);
+								g.ap = NULL;
+							} else if (cmd == AP_PKT_PING) {
+								ap_handle_ping(g.ap, ka_buf,
+								               (size_t)kn);
+							}
+						}
+					}
+					svcSleepThread(200000000LL);   // 200 ms
+				}
+				dlq_active_pct = -1;
+				if (g.quit) {
+					job->stop = true;
+					threadJoin(dl, U64_MAX);
+					threadFree(dl);
+					LightLock_Lock(&g.lock);
+					dl_job **p = &g.jobs;
+					while (*p && *p != job)
+						p = &(*p)->next;
+					if (*p)
+						*p = job->next;
+					LightLock_Unlock(&g.lock);
+					track_stream_free(&job->ts);
+					free(job);
+				} else if (g.want_new) {
+					/* The user picked a track: that stream owns the link
+					 * now; this one keeps the background slot and saves
+					 * itself when it lands. */
+					job_detach(job);
+				} else {
+					/* Finished (or failed) with the player idle. */
+					threadJoin(dl, U64_MAX);
+					threadFree(dl);
+					LightLock_Lock(&g.lock);
+					dl_job **p = &g.jobs;
+					while (*p && *p != job)
+						p = &(*p)->next;
+					if (*p)
+						*p = job->next;
+					LightLock_Unlock(&g.lock);
+					track_stream_free(&job->ts);
+					free(job);
+				}
+				continue;   /* another entry, or a play request */
+			}
 		}
 
 		/* Idle: keep the access point session alive. It only speaks to say

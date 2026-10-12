@@ -81,6 +81,9 @@ static const char *const s_strings[LANG_COUNT][S_COUNT] = {
 		[S_H_HEART]           = "Corazon - Me gusta (tras re-vincular)",
 		[S_DL_VIEW]           = "Descargas",
 		[S_OFFLINE_A]         = "A  Escuchar descargas",
+		[S_QUEUE]             = "Cola de descargas",
+		[S_QUEUE_EMPTY]       = "La cola esta vacia",
+		[S_QUEUE_DLING]       = "Descargando",
 	},
 	[LANG_EN] = {
 		[S_NOTHING_PLAYING]   = "Nothing playing",
@@ -158,6 +161,9 @@ static const char *const s_strings[LANG_COUNT][S_COUNT] = {
 		[S_H_HEART]           = "Heart - Like (needs re-linking)",
 		[S_DL_VIEW]           = "Downloads",
 		[S_OFFLINE_A]         = "A  Play downloads",
+		[S_QUEUE]             = "Download queue",
+		[S_QUEUE_EMPTY]       = "The queue is empty",
+		[S_QUEUE_DLING]       = "Downloading",
 	},
 };
 

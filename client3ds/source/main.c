@@ -1304,6 +1304,74 @@ static void draw_help(const Skin *sk)
 	ui_depth(0.0f);
 }
 
+static bool queue_open = false;
+
+/* The download queue popup: what is downloading right now, with a progress
+ * bar, and what is still waiting its turn. Refreshes itself every frame --
+ * the popup is read-only, so there is nothing to scroll or select. */
+static void draw_queue(const Skin *sk)
+{
+	const u32 dim   = C2D_Color32(0x00, 0x00, 0x00, 0xA8);
+	const u32 bord  = C2D_Color32(0x38, 0x38, 0x38, 0xFF);
+	const u32 panel = C2D_Color32(0x1B, 0x1B, 0x1B, 0xFF);
+
+	C2D_DrawRectSolid(0.0f, 0.0f, 0.6f, BOT_W, SCR_H, dim);
+	const float px = 14.0f, py = 8.0f, pw = 292.0f, ph = 224.0f;
+	C2D_DrawRectSolid(px, py, 0.6f, pw, ph, bord);
+	C2D_DrawRectSolid(px + 1.0f, py + 1.0f, 0.6f, pw - 2.0f, ph - 2.0f,
+	                  panel);
+
+	ui_depth(0.7f);
+	float y = py + 8.0f;
+	ui_text(text_buf, tr(S_QUEUE), px + 12.0f,
+	        ui_baseline(y, TY_ROW_NAME), TY_ROW_NAME, pw - 24.0f, sk->warm);
+	y += 24.0f;
+
+	char active[128];
+	const int pct = native_dl_active(active, sizeof(active));
+	if (pct >= 0) {
+		ui_text_tracked(text_buf, tr(S_QUEUE_DLING), px + 12.0f,
+		                ui_baseline(y, TY_MICRO), TY_MICRO, 1.0f,
+		                sk->accent);
+		y += 13.0f;
+		ui_text(text_buf, active, px + 12.0f,
+		        ui_baseline(y, TY_ROW_SUB), TY_ROW_SUB, pw - 24.0f,
+		        sk->text);
+		y += 13.0f;
+		/* The bar: track underneath, accent fill on top. */
+		C2D_DrawRectSolid(px + 12.0f, y, 0.7f, pw - 24.0f, 4.0f,
+		                  C2D_Color32(0x4D, 0x4D, 0x4D, 0xFF));
+		C2D_DrawRectSolid(px + 12.0f, y, 0.7f,
+		                  (pw - 24.0f) * (float)pct / 100.0f, 4.0f,
+		                  sk->accent);
+		char pc[12];
+		snprintf(pc, sizeof(pc), "%d%%", pct);
+		ui_text(text_buf, pc, px + pw - 16.0f, ui_baseline(y + 7.0f,
+		        TY_MICRO), TY_MICRO, 40.0f, sk->dim);
+		y += 20.0f;
+	}
+
+	const int n = native_dl_queue_count();
+	if (pct < 0 && n == 0) {
+		ui_text(text_buf, tr(S_QUEUE_EMPTY), px + 12.0f,
+		        ui_baseline(y, TY_ROW_SUB), TY_ROW_SUB, pw - 24.0f,
+		        sk->dim);
+	} else {
+		for (int i = 0; i < n && y < py + ph - 16.0f; i++) {
+			char title[128];
+			if (!native_dl_queue_entry(i, title, sizeof(title)))
+				break;
+			char num[140];
+			snprintf(num, sizeof(num), "%d. %s", i + 1, title);
+			ui_text(text_buf, num, px + 12.0f,
+			        ui_baseline(y, TY_ROW_SUB), TY_ROW_SUB, pw - 24.0f,
+			        sk->dim);
+			y += 14.5f;
+		}
+	}
+	ui_depth(0.0f);
+}
+
 static void draw_bottom(const Skin *sk)
 {
 	if (lyr_open) {
@@ -1354,6 +1422,9 @@ static void draw_bottom(const Skin *sk)
 		            !native_offline();
 		a.dl_saved = native_current_saved();
 		a.dl_armed = !a.dl_saved && (native_save_armed() || downloads_on);
+		a.dl_queue = native_dl_queue_count();
+		char tmp_title[128];
+		a.dl_active = native_dl_active(tmp_title, sizeof(tmp_title)) >= 0;
 		a.can_prev = match && now_idx > 0;
 		a.can_next = match && now_idx + 1 < nat_count;
 		a.progress_ms = (long)(now_pos * 1000.0f);
@@ -1384,6 +1455,9 @@ static void draw_bottom(const Skin *sk)
 	} else if (help_open) {
 		tb_reset(&g_tb);
 		draw_help(sk);
+	} else if (queue_open) {
+		tb_reset(&g_tb);
+		draw_queue(sk);
 	}
 }
 
@@ -1856,6 +1930,14 @@ int main(int argc, char **argv)
 			down = 0;
 			g_touch.clicked = -1;
 			g_touch.long_pressed = -1;
+		} else if (queue_open) {
+			// Read-only and live: a key or a tap anywhere closes it.
+			if (down & (KEY_B | KEY_START | KEY_SELECT | KEY_A) ||
+			    g_touch.clicked >= 0)
+				queue_open = false;
+			down = 0;
+			g_touch.clicked = -1;
+			g_touch.long_pressed = -1;
 		} else if (down & KEY_SELECT) {
 			help_open = true;
 			down = 0;
@@ -1923,6 +2005,17 @@ int main(int argc, char **argv)
 			case BTN_P_DOWNLOAD:
 				native_save_current();
 				break;
+			case BTN_P_QUEUE:
+				// Short press: the Downloads shelf itself.
+				lib.open = true;
+				nat_view = NATIVE_DOWNLOADS;
+				nat_arg[0] = '\0';
+				snprintf(nat_title, sizeof(nat_title), "%s",
+				         tr(S_DL_VIEW));
+				lib.sel = 0;
+				lib.scroll = lib.velocity = 0.0f;
+				lib_reload = true;
+				break;
 			case BTN_P_LIBRARY:
 				lib.open = true;
 				lib_reload = true;
@@ -1947,6 +2040,11 @@ int main(int argc, char **argv)
 				play_uri(uri);
 			}
 		}
+
+		// Holding the queue button shows what is still downloading.
+		if (!lib.open && !lyr_open &&
+		    g_touch.long_pressed == BTN_P_QUEUE)
+			queue_open = true;
 
 		{
 			// The player runs on its own thread; this just mirrors it.
