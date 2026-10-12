@@ -1,0 +1,63 @@
+#pragma once
+
+#include <citro2d.h>
+#include <stdbool.h>
+
+#include "touch.h"
+
+/* Bottom screen, player view.
+ *
+ * Ported from the reference client's layout and stripped to what the native
+ * backend can honestly drive today: three transport controls on one baseline
+ * with no button boxes (previous / play-pause / next), a progress scrubber,
+ * and a fixed header with the track title. The reference's recently-played
+ * shelf, shuffle and repeat return when the backend grows a queue.
+ *
+ * The scrubber is a real seek: the backend streams the whole file into
+ * memory, and a drag anywhere inside the downloaded span lands. A jump past
+ * the download watermark is ignored by the decoder.
+ */
+
+enum {
+	BTN_P_PLAY = 0,
+	BTN_P_PREV,
+	BTN_P_NEXT,
+	BTN_P_LIBRARY,
+	BTN_P_MUTE,
+	BTN_P_LYRICS,
+	BTN_P_SCRUB,
+};
+
+typedef struct {
+	C2D_TextBuf buf;
+	touch_builder *tb;
+
+	const char *track;    /* header */
+	const char *artist;   /* centre block */
+	const char *album;
+
+	bool playing;         /* the disc shows the pause glyph */
+	bool loading;         /* centre block shows the animated badge instead */
+	bool muted;
+	bool can_prev, can_next; /* no neighbour in the current view: greyed */
+
+	long progress_ms;
+	long duration_ms;
+
+	/* Which control the finger is currently down on, or -1. Used only to
+	 * give a pressed appearance. */
+	int  pressed_id;
+
+	unsigned animation_ms; /* drives the loading badge */
+
+	u32 accent;      /* the app's green: pressed glyphs and active states */
+	u32 on_accent;
+	u32 panel;       /* header background */
+} screen_player_args;
+
+void screen_player_draw(const screen_player_args *a);
+
+/* Scrubber geometry, shared with the input handler for the day seek lands. */
+#define SCRUB_BAR_X 50.0f
+#define SCRUB_BAR_W 220.0f
+#define SCRUB_BAR_Y 208.0f

@@ -35,6 +35,11 @@ typedef struct {
 	char    name[128];
 	char    artist[128];
 	char    album[128];
+	/* Cover art as full i.scdn.co URLs: small (64px) for list rows, large
+	 * (300px) for the now-playing screen. Empty when the album carries no
+	 * images. */
+	char    art_small[80];
+	char    art_large[80];
 	int     duration_ms;
 	sp_file files[SP_MAX_FILES];
 	int     file_count;
@@ -116,5 +121,14 @@ int  sp_storage_resolve(const char *host, const char *token,
 /* Picks the best file this client can actually play, or NULL. */
 const sp_file *sp_pick_file(const sp_track *t);
 const char *sp_format_name(int format);
+
+/* The user's profile image URL, from the Web API's /v1/me (the one service
+ * that lives on api.spotify.com rather than spclient). Only i.scdn.co URLs
+ * are accepted: the hero art buffer is 80 chars and the CA bundle only
+ * covers Spotify's own CDN, so a lookaside avatar is reported as "none"
+ * rather than half-supported. Returns 0, or -1 when the account has no
+ * usable image. */
+int  sp_user_image(const char *token, char *url, size_t urllen,
+                   char *err, size_t errlen);
 
 #endif

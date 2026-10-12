@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #define RECV_CHUNK  4096
 /* Enough for any API reply. Audio passes its own, far larger limit. */
@@ -310,4 +311,149 @@ int http_get_url_range(const char *url, size_t bytes, size_t limit,
 	int rc = http_get_url(url, limit, out);
 	pending_range = 0;
 	return rc;
+}
+
+/* Finds a header's value, anchored to a line start and case-insensitive:
+ * edges title-case header names differently. */
+static const char *find_header(const char *headers, const char *name)
+{
+	size_t n = strlen(name);
+	for (const char *p = headers; *p; p++)
+		if ((p == headers || p[-1] == '\n') &&
+		    strncasecmp(p, name, n) == 0)
+			return p + n;
+	return NULL;
+}
+
+int http_get_url_stream(const char *url, size_t offset,
+                        bool (*cb)(void *ctx, const char *data, size_t n),
+                        void *ctx, size_t *total_out, int *status_out,
+                        char *err, size_t errlen)
+{
+	if (strncmp(url, "https://", 8) != 0) {
+		snprintf(err, errlen, "not an https url");
+		return -1;
+	}
+	const char *p = url + 8;
+	const char *slash = strchr(p, '/');
+	if (!slash) {
+		snprintf(err, errlen, "url has no path");
+		return -1;
+	}
+	char host[160];
+	size_t hlen = (size_t)(slash - p);
+	if (hlen >= sizeof(host)) {
+		snprintf(err, errlen, "host too long");
+		return -1;
+	}
+	memcpy(host, p, hlen);
+	host[hlen] = '\0';
+
+	tls_conn *c = tls_connect(host, 443, 20000, NULL, err, errlen);
+	if (!c)
+		return -1;
+
+	char range[48] = "";
+	if (offset)
+		snprintf(range, sizeof(range), "Range: bytes=%u-\r\n",
+		         (unsigned)offset);
+	char head[1024];
+	int n = snprintf(head, sizeof(head),
+	                 "GET %s HTTP/1.1\r\nHost: %s\r\n"
+	                 "User-Agent: 3ds-spotify/0.1\r\n%s"
+	                 "Connection: close\r\n\r\n",
+	                 slash, host, range);
+	if (n < 0 || (size_t)n >= sizeof(head) ||
+	    tls_write(c, head, n) != n) {
+		snprintf(err, errlen, "write failed");
+		tls_close(c);
+		return -1;
+	}
+
+	/* Headers first: they end at the blank line, and whatever the same
+	 * reads dragged in past it is already body. */
+	char hbuf[8192];
+	size_t have = 0;
+	char *sep = NULL;
+	while (!sep) {
+		if (have >= sizeof(hbuf) - 1) {
+			snprintf(err, errlen, "headers over %u bytes",
+			         (unsigned)sizeof(hbuf));
+			tls_close(c);
+			return -1;
+		}
+		int r = tls_read(c, hbuf + have, sizeof(hbuf) - 1 - have);
+		if (r <= 0) {
+			snprintf(err, errlen, "connection closed before the headers");
+			tls_close(c);
+			return -1;
+		}
+		have += (size_t)r;
+		hbuf[have] = '\0';
+		sep = strstr(hbuf, "\r\n\r\n");
+	}
+	*sep = '\0';
+
+	int status = 0;
+	if (sscanf(hbuf, "HTTP/1.%*d %d", &status) != 1) {
+		snprintf(err, errlen, "no status line");
+		tls_close(c);
+		return -1;
+	}
+	if (status_out)
+		*status_out = status;
+	if (status != 200 && status != 206) {
+		snprintf(err, errlen, "CDN answered %d", status);
+		tls_close(c);
+		return -1;
+	}
+	if (offset && status == 200) {
+		snprintf(err, errlen, "edge ignored the range");
+		tls_close(c);
+		return -1;
+	}
+
+	size_t total = 0;
+	const char *cr = find_header(hbuf, "content-range:");
+	if (cr) {
+		cr = strchr(cr, '/');
+		if (cr)
+			total = strtoul(cr + 1, NULL, 10);
+	}
+	if (!total) {
+		const char *cl = find_header(hbuf, "content-length:");
+		if (cl)
+			total = strtoul(cl, NULL, 10) + offset;
+	}
+	if (total_out)
+		*total_out = total;
+
+	/* Body: first the piece the header reads overshot, then straight reads. */
+	const char *body = sep + 4;
+	size_t blen = have - (size_t)(body - hbuf);
+	if (blen && !cb(ctx, body, blen)) {
+		snprintf(err, errlen, "cancelled");
+		tls_close(c);
+		return -1;
+	}
+	char piece[RECV_CHUNK];
+	for (;;) {
+		int r = tls_read(c, piece, sizeof(piece));
+		if (r == 0)
+			break;
+		if (r < 0) {
+			char reason[128];
+			tls_strerror(r, reason, sizeof(reason));
+			snprintf(err, errlen, "read: %s", reason);
+			tls_close(c);
+			return -1;
+		}
+		if (!cb(ctx, piece, (size_t)r)) {
+			snprintf(err, errlen, "cancelled");
+			tls_close(c);
+			return -1;
+		}
+	}
+	tls_close(c);
+	return 0;
 }

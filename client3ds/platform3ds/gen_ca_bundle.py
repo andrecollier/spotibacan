@@ -33,7 +33,9 @@ HOSTS = [
     "accounts.spotify.com",          # device-code pairing
     "apresolve.spotify.com",         # which access point to dial
     "spclient.wg.spotify.com",       # metadata, playlists, storage-resolve
+    "api.spotify.com",               # /v1/me: the profile picture
     "i.scdn.co",                     # cover art
+    "lrclib.net",                    # synced lyrics
     "audio-ak-spotify-com.akamaized.net",
     "audio-fa.scdn.co",
 ]
@@ -50,6 +52,7 @@ ALWAYS = [
     "GlobalSign Root R46",
     "GTS Root R1",
     "ISRG Root X1",
+    "ISRG Root X2",                  # Let's Encrypt's ECDSA chain (lrclib)
     "Certainly Root R1",
     "Starfield Root Certificate Authority - G2",
     "Amazon Root CA 1",

@@ -23,7 +23,8 @@ ROOT = Path(__file__).resolve().parent
 #          extra single sources relative to client3ds/)
 APPS = {
     # The native source brings TLS and the whole Spotify protocol with it.
-    "audio3ds":    (["source", "platform3ds"], [], "release", ["deps/stb_vorbis.c"]),
+    "audio3ds":    (["source", "source/ui", "platform3ds"], [], "release",
+                    ["deps/stb_vorbis.c", "deps/stb_image_impl.c"]),
     "probe_tls":   (["probe_tls", "platform3ds"], ["-DPROBE_BUILD"], "probe", []),
     "probe_pair":  (["probe_pair", "platform3ds"], ["-DPROBE_BUILD"], "probe", []),
     "probe_ap":    (["probe_ap", "platform3ds"], ["-DPROBE_BUILD"], "probe", []),
@@ -75,6 +76,8 @@ def main():
              "-O0" if args.debug else "-O2", "-g",
              "-ffunction-sections", "-fdata-sections", "-fshort-enums", *defines]
     includes = list(tc.includes)
+    # deps/ holds the vendored single-header libraries (stb_vorbis, stb_image).
+    includes.append("-I" + str(ROOT / "deps"))
     if mbed:
         tree = ROOT / "deps/mbedtls-3.6.7"
         if not (tree / "include/mbedtls/ssl.h").exists():
@@ -92,7 +95,8 @@ def main():
 
     objects = []
     for d, src in sources:
-        obj = out / f"{d}_{src.stem}.o"
+        # Subdirectories (source/ui) would put a slash in the object name.
+        obj = out / f"{str(d).replace('/', '_')}_{src.stem}.o"
         cmd = [str(tc.cc), *toolchain.ARCH, *flags, *includes,
                "-c", str(src), "-o", str(obj)]
         # Warnings in pinned upstream sources are not ours to fix.

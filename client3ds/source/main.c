@@ -8,10 +8,21 @@
 // know about each other.
 
 #include <3ds.h>
+#include <3ds/services/mcuhwc.h>
+#include <3ds/services/ndm.h>
 #include <citro2d.h>
 
 #include "cfg3ds.h"
+#include "lyrics3ds.h"
 #include "native.h"
+#include "ui/artwork.h"
+#include "ui/screen_list.h"
+#include "ui/screen_lyrics.h"
+#include "ui/screen_player.h"
+#include "ui/thumbs.h"
+#include "ui/touch.h"
+#include "ui/ui.h"
+#include "ui/volume_overlay.h"
 #include <arpa/inet.h>
 #include <ctype.h>
 #include <dirent.h>
@@ -45,13 +56,12 @@ static volatile bool art_pending = false, art_present = false;
 static volatile bool server_playing = true;
 static volatile float now_pos = 0.0f, now_dur = 0.0f;
 
-#define LIB_ROWS 4
+// The list scrolls by pixels over the cached rows: sel is the absolute d-pad
+// selection, scroll/velocity the touch physics.
 typedef struct {
 	bool open, loading;
-	int total, offset, sel, count;
-	int index[LIB_ROWS];
-	char name[LIB_ROWS][64];
-	char dir[LIB_ROWS][40];
+	int total, sel;
+	float scroll, velocity;
 	char query[64];
 } Library;
 static Library lib;
@@ -66,6 +76,73 @@ static char nat_status[64] = "";
 // What the cached rows correspond to, so turning a page does not refetch.
 static native_view nat_loaded_view = (native_view)-1;
 static char nat_loaded_arg[64] = "\x01";
+
+// Touch is rebuilt every frame: each screen registers its hit rects as it
+// draws, and the state machine consumes the previous frame's set.
+static touch_state g_touch;
+static touch_builder g_tb;
+
+// File scope because both the input loop and the drawers consult them.
+static bool muted = false;
+static bool paused = false;
+
+// Lid-closed playback. Closing the lid normally sleeps the console, and even
+// awake it flips the wifi from infrastructure to StreetPass; either one kills
+// the stream. While a track is playing or paused, sleep is refused and the
+// ndm:u daemon is locked into infrastructure mode (the same recipe
+// Universal-Updater uses for its downloads). Released the moment playback
+// ends, so a closed lid sleeps normally again when nothing is playing.
+static bool lid_mode = false;
+
+static void lid_mode_set(bool on)
+{
+	if (on == lid_mode)
+		return;
+	if (on) {
+		if (R_FAILED(ndmuInit()))
+			return;
+		Result res = NDMU_EnterExclusiveState(NDM_EXCLUSIVE_STATE_INFRASTRUCTURE);
+		if (R_SUCCEEDED(res))
+			res = NDMU_LockState();
+		if (R_FAILED(res)) {
+			ndmuExit();
+			return;
+		}
+		aptSetSleepAllowed(false);
+		lid_mode = true;
+	} else {
+		aptSetSleepAllowed(true);
+		NDMU_LeaveExclusiveState();
+		NDMU_LockState();
+		ndmuExit();
+		lid_mode = false;
+	}
+}
+
+// The row the playing track came from, and the view that row belongs to.
+// Prev/next are only meaningful while the list still shows that view.
+static int now_idx = -1;
+static native_view now_view = NATIVE_PLAYLISTS;
+static char now_arg[64] = "";
+
+// The hardware slider owns the volume; the overlay only follows it. Mute
+// remains a local mix toggle, orthogonal to the slider.
+static int volume = 100;        // display value, mirrored from the slider
+static u8 vol_slider = 0xFF;    // last raw slider level seen (0..63)
+static int vol_hold = 0;
+static u8 vol_overlay = 0;
+
+// Lyrics, filled by the art worker: the request carries what LRCLIB wants,
+// the doc only becomes readable when lyr_state says so.
+static bool lyr_open = false;
+static lyrics_doc lyr_doc;
+static volatile int lyr_state = LYR_ST_NONE;
+static char lyr_error[160] = "";
+static char lyr_track_uri[64] = "";
+static volatile bool lyr_want = false;
+static char lyr_w_track[128], lyr_w_artist[128], lyr_w_album[128];
+static long lyr_w_dur = 0;
+static float lyr_scroll = 0.0f;
 
 // Audio runs on its own thread: the system keyboard suspends the main loop,
 // and four wave buffers hold only a quarter second.
@@ -175,9 +252,9 @@ static void audio_thread(void *arg)
 	}
 }
 
-// Pulls one view from Spotify, then hands the UI the window it is showing.
-// The fetch is cached by view and argument: paging with L/R must not cost a
-// round trip, because on this console round trips are the expensive part.
+// Pulls one view from Spotify and caches the rows. The fetch is cached by
+// view and argument: scrolling must not cost a round trip, because on this
+// console round trips are the expensive part.
 static void library_fetch(void)
 {
 	const char *arg = (nat_view == NATIVE_SEARCH) ? lib.query : nat_arg;
@@ -203,23 +280,8 @@ static void library_fetch(void)
 
 	// The playlists view carries one synthetic row for Liked Songs, which is
 	// not in the rootlist but is where most people look first.
-	int extra = (nat_view == NATIVE_PLAYLISTS) ? 1 : 0;
-	lib.total = nat_count + extra;
-	lib.count = 0;
-	for (int i = lib.offset; i < lib.total && lib.count < LIB_ROWS; i++) {
-		if (extra && i == 0) {
-			snprintf(lib.name[lib.count], sizeof(lib.name[0]), "Me gusta");
-			lib.dir[lib.count][0] = '\0';
-			lib.index[lib.count] = -2;
-		} else {
-			const native_row *r = &nat_rows[i - extra];
-			snprintf(lib.name[lib.count], sizeof(lib.name[0]), "%s", r->label);
-			snprintf(lib.dir[lib.count], sizeof(lib.dir[0]), "%s", r->sub);
-			lib.index[lib.count] = i - extra;
-		}
-		lib.count++;
-	}
-	if (lib.sel >= lib.count) lib.sel = lib.count ? lib.count - 1 : 0;
+	lib.total = nat_count + (nat_view == NATIVE_PLAYLISTS ? 1 : 0);
+	if (lib.sel >= lib.total) lib.sel = lib.total ? lib.total - 1 : 0;
 	lib.loading = false;
 }
 
@@ -234,6 +296,71 @@ static void native_library_thread(void *arg)
 			library_fetch();
 		}
 		svcSleepThread(30000000LL);   // 30 ms
+	}
+}
+
+// The art worker: fetches and decodes covers off the render loop. The hero
+// goes first -- it is what the user is looking at; the row thumbnails queue
+// behind it. Pixels land in staging buffers and the render thread uploads
+// them, because textures belong to the GPU context's thread.
+static volatile char hero_want[80];
+static volatile bool hero_new = false;
+static char hero_loaded[80] = "";
+
+static void art_thread(void *arg)
+{
+	(void)arg;
+	u64 profile_try_at = 0;
+	while (running) {
+		/* The avatar's first fetch races the Web API rate limit (HTTP 429 on
+		 * this shared client id), so retry it here every 30 s until it
+		 * lands. It only takes the hero while nothing has played yet: once
+		 * track art owns the screen, the avatar no longer displaces it. */
+		if (native_profile_art()[0] == '\0') {
+			const u64 now = osGetTime();
+			if (!profile_try_at || now - profile_try_at >= 30000) {
+				profile_try_at = now;
+				native_profile_art_refresh();
+				const char *part = native_profile_art();
+				if (part[0] && !hero_loaded[0]) {
+					snprintf((char *)hero_want, 80, "%s", part);
+					__sync_synchronize();
+					hero_new = true;
+				}
+			}
+		}
+		if (hero_new) {
+			char url[80];
+			snprintf(url, sizeof(url), "%s", (const char *)hero_want);
+			hero_new = false;
+			char err[128] = "";
+			if (url[0] &&
+			    artwork_fetch_decode(url, ART_PIXELS, art_staging,
+			                         err, sizeof(err))) {
+				snprintf(hero_loaded, sizeof(hero_loaded), "%s", url);
+				__sync_synchronize();
+				art_pending = true;
+			}
+			continue;
+		}
+		if (lyr_want) {
+			lyr_want = false;
+			char err[160] = "";
+			lyrics_result rc =
+			    lyrics_fetch(lyr_w_track, lyr_w_artist, lyr_w_album,
+			                 lyr_w_dur, &lyr_doc, err, sizeof(err));
+			if (rc == LYR_ERR)
+				snprintf(lyr_error, sizeof(lyr_error), "%s", err);
+			__sync_synchronize();
+			lyr_state = rc == LYR_OK ? LYR_ST_OK :
+			            rc == LYR_NONE ? LYR_ST_NONE : LYR_ST_ERR;
+			continue;
+		}
+		if (thumbs_work_pending()) {
+			thumbs_work_one();
+			continue;
+		}
+		svcSleepThread(20000000LL);   // 20 ms
 	}
 }
 
@@ -332,7 +459,9 @@ static void draw_top(const Skin *sk, bool buffering, bool muted, float par)
 	text_fit(now_artist, TX + par * 1.4f, AY + 36, 0.54f, sk->dim, TW);
 	text_fit(now_album, TX + par * 1.0f, AY + 60, 0.46f, sk->meter, TW);
 
-	const char *state = buffering ? "CARGANDO" : (muted ? "SIN SONIDO" : "SONANDO");
+	const char *state = buffering ? "CARGANDO" :
+	                    paused    ? "PAUSA" :
+	                    muted     ? "SIN SONIDO" : "SONANDO";
 	C2D_DrawCircleSolid(TX + 5 + par * 0.8f, AY + 112, 0.1f, 4,
 	                    buffering ? sk->warm : sk->accent);
 	text_at(state, TX + 18 + par * 0.8f, AY + 103, 0.46f, sk->dim, 0);
@@ -349,161 +478,88 @@ static void draw_top(const Skin *sk, bool buffering, bool muted, float par)
 		text_at(a, bx, by + 8, 0.42f, sk->dim, 0);
 		text_at(b, bx + bw, by + 8, 0.42f, sk->dim, C2D_AlignRight);
 	}
-}
 
-typedef enum {
-	IC_NONE, IC_PREV, IC_PLAY, IC_PAUSE, IC_NEXT,
-	IC_SOUND, IC_MUTED, IC_LIST, IC_SEARCH, IC_CLOSE
-} Icon;
-
-typedef struct { float x, y, w, h; Icon icon; bool accent;
-                 const char *label; } Button;
-
-// Transport glyphs drawn from primitives: no textures to ship, and they scale
-// to whatever size a layout gives them.
-static void draw_icon(Icon ic, float cx, float cy, float s, u32 col)
-{
-	const float h = s / 2;
-	switch (ic) {
-	case IC_PLAY:
-		C2D_DrawTriangle(cx - h * 0.6f, cy - h, col, cx - h * 0.6f, cy + h, col,
-		                 cx + h * 0.8f, cy, col, 0.1f);
-		break;
-	case IC_PAUSE:
-		C2D_DrawRectSolid(cx - h * 0.6f, cy - h, 0.1f, s * 0.22f, s, col);
-		C2D_DrawRectSolid(cx + h * 0.16f, cy - h, 0.1f, s * 0.22f, s, col);
-		break;
-	case IC_PREV:
-		C2D_DrawRectSolid(cx - h, cy - h, 0.1f, s * 0.16f, s, col);
-		C2D_DrawTriangle(cx + h, cy - h, col, cx + h, cy + h, col,
-		                 cx - h * 0.5f, cy, col, 0.1f);
-		break;
-	case IC_NEXT:
-		C2D_DrawRectSolid(cx + h * 0.84f, cy - h, 0.1f, s * 0.16f, s, col);
-		C2D_DrawTriangle(cx - h, cy - h, col, cx - h, cy + h, col,
-		                 cx + h * 0.5f, cy, col, 0.1f);
-		break;
-	case IC_SOUND:
-	case IC_MUTED:
-		C2D_DrawRectSolid(cx - h, cy - h * 0.35f, 0.1f, s * 0.28f, s * 0.35f, col);
-		C2D_DrawTriangle(cx - h * 0.44f, cy - h * 0.35f, col,
-		                 cx - h * 0.44f, cy + h * 0.35f, col,
-		                 cx + h * 0.1f, cy, col, 0.1f);
-		C2D_DrawRectSolid(cx - h * 0.44f, cy - h * 0.9f, 0.1f, s * 0.1f, s * 0.9f, col);
-		if (ic == IC_MUTED) {
-			C2D_DrawLine(cx + h * 0.25f, cy - h * 0.5f, col,
-			             cx + h * 0.95f, cy + h * 0.5f, col, s * 0.11f, 0.2f);
-		} else {
-			C2D_DrawLine(cx + h * 0.35f, cy - h * 0.45f, col,
-			             cx + h * 0.35f, cy + h * 0.45f, col, s * 0.1f, 0.2f);
-			C2D_DrawLine(cx + h * 0.72f, cy - h * 0.75f, col,
-			             cx + h * 0.72f, cy + h * 0.75f, col, s * 0.1f, 0.2f);
-		}
-		break;
-	case IC_LIST:
-		for (int i = 0; i < 3; i++) {
-			float y = cy - h * 0.7f + i * h * 0.7f;
-			C2D_DrawRectSolid(cx - h, y, 0.1f, s * 0.18f, s * 0.18f, col);
-			C2D_DrawRectSolid(cx - h * 0.5f, y + s * 0.04f, 0.1f, s * 0.9f, s * 0.11f, col);
-		}
-		break;
-	case IC_SEARCH:
-		C2D_DrawCircleSolid(cx - h * 0.2f, cy - h * 0.2f, 0.1f, h * 0.62f, col);
-		C2D_DrawCircleSolid(cx - h * 0.2f, cy - h * 0.2f, 0.2f, h * 0.38f, 0);
-		C2D_DrawLine(cx + h * 0.22f, cy + h * 0.22f, col,
-		             cx + h * 0.85f, cy + h * 0.85f, col, s * 0.14f, 0.3f);
-		break;
-	case IC_CLOSE:
-		C2D_DrawLine(cx - h * 0.7f, cy - h * 0.7f, col, cx + h * 0.7f, cy + h * 0.7f,
-		             col, s * 0.14f, 0.1f);
-		C2D_DrawLine(cx + h * 0.7f, cy - h * 0.7f, col, cx - h * 0.7f, cy + h * 0.7f,
-		             col, s * 0.14f, 0.1f);
-		break;
-	default: break;
-	}
-}
-
-// The primary action is a full-width bar, the way the reference does it:
-// unmissable, a huge touch target, and it cannot overlap the list because it
-// owns the bottom of the screen. Everything else is a bare icon.
-static void draw_button(const Skin *sk, const Button *b, bool lit, float glyph)
-{
-	if (b->accent) {
-		C2D_DrawRectSolid(b->x, b->y, 0.0f, b->w, b->h,
-		                  lit ? sk->text : sk->accent);
-		draw_icon(b->icon, b->x + 30, b->y + b->h / 2, glyph, sk->on_accent);
-		text_at(b->label, b->x + 52, b->y + b->h / 2 - 11, 0.54f,
-		        sk->on_accent, 0);
-		return;
-	}
-	draw_icon(b->icon, b->x + b->w / 2, b->y + b->h / 2, glyph,
-	          lit ? sk->accent : sk->text);
+	// Last, above whatever the top screen shows: it only reports, and the
+	// bottom screen keeps its controls uncovered.
+	volume_overlay_args va = { text_buf, volume, vol_overlay };
+	volume_overlay_draw(&va);
 }
 
 #define BAND_H 40.0f          // title band across the top
-#define BAR_Y  198.0f         // the full-width action bar
-#define LIST_X 16.0f
-#define LIST_W 288.0f
-#define ROW_Y  (BAND_H + 10.0f)
-#define ROW_H  37.0f
+#define BAR_Y  198.0f         // the full-width action bar (setup screens)
 
-// Left half of the split view. Browsing never takes the transport away: the
-// controls keep their own column on the right.
-// A title band, four roomy rows, and nothing competing with them. Two lines
-// per row -- title over artist -- with the selection marked by a bar and a
-// colour rather than a filled block, which is what keeps a long list readable.
+// Defined with the playback helpers below; the list needs them for the
+// now-playing badge.
+static bool now_matches_view(void);
+
+static const C2D_Image *list_thumb(const char *url, void *ctx)
+{
+	(void)ctx;
+	return thumbs_get(url);
+}
+
+// The visible window over the cached rows, rebuilt every frame: the list
+// scrolls by pixels, so the window slides with it rather than in pages.
 static void draw_native_list(const Skin *sk)
 {
-	C2D_DrawRectSolid(0, 0, 0.0f, BOT_W, BAND_H, sk->panel);
-	text_fit(nat_title, LIST_X, 9, 0.58f, sk->text, 190);
-	if (lib.total > 0) {
-		char count[32];
-		snprintf(count, sizeof(count), "%d-%d / %d", lib.offset + 1,
-		         lib.offset + lib.count, lib.total);
-		text_at(count, BOT_W - 72, 14, 0.42f, sk->dim, C2D_AlignRight);
+	// While the fetch thread is between views, the cached rows still belong
+	// to the previous one. Drawing them under the new title reads as a
+	// broken list, so the window stays empty and the screen shows the
+	// loading state until the cache matches what is on screen.
+	const char *want_arg = (nat_view == NATIVE_SEARCH) ? lib.query : nat_arg;
+	bool loading = lib.loading || nat_view != nat_loaded_view ||
+	               strcmp(want_arg ? want_arg : "", nat_loaded_arg) != 0;
+
+	int extra = (nat_view == NATIVE_PLAYLISTS) ? 1 : 0;
+	int first = (!loading && lib.total) ? (int)(lib.scroll / SL_ROW_H) : 0;
+	float frac = loading ? 0.0f : lib.scroll - first * SL_ROW_H;
+
+	sl_row rows[8];
+	int n = 0;
+	if (!loading) {
+		for (int i = first; i < lib.total && n < 7; i++) {
+			sl_row *r = &rows[n++];
+			if (extra && i == 0) {
+				*r = (sl_row){"Me gusta", "", "", true, false};
+			} else {
+				const native_row *nr = &nat_rows[i - extra];
+				*r = (sl_row){nr->label, nr->sub, nr->art, nr->is_playlist,
+				              now_matches_view() && i - extra == now_idx &&
+				              native_playback_state() == NATIVE_PLAYING};
+			}
+		}
 	}
 
-	if (lib.loading && lib.count == 0) {
-		text_at("Cargando...", LIST_X, ROW_Y + 10, 0.52f, sk->dim, 0);
-		return;
-	}
-	if (lib.count == 0) {
-		text_at("Nada por aqui", LIST_X, ROW_Y + 10, 0.52f, sk->dim, 0);
-		return;
-	}
+	char count[32] = "";
+	if (!loading && lib.total > 0)
+		snprintf(count, sizeof(count), "%d / %d", lib.sel + 1, lib.total);
 
-	for (int i = 0; i < lib.count; i++) {
-		float y = ROW_Y + i * ROW_H;
-		bool sel = (i == lib.sel);
-		if (sel)
-			C2D_DrawRectSolid(LIST_X - 8, y - 1, 0.05f, 3, ROW_H - 8, sk->accent);
-		text_fit(lib.name[i], LIST_X, y, 0.52f,
-		         sel ? sk->accent : sk->text, LIST_W - 14);
-		if (lib.dir[i][0])
-			text_fit(lib.dir[i], LIST_X, y + 18, 0.44f, sk->dim, LIST_W - 14);
-	}
-
-	// A hairline scrollbar, only when there is more than fits.
-	if (lib.total > lib.count) {
-		float track_h = ROW_H * LIB_ROWS;
-		float frac = (float)lib.count / (float)lib.total;
-		float pos = (float)lib.offset / (float)lib.total;
-		C2D_DrawRectSolid(BOT_W - 7, ROW_Y, 0.0f, 2, track_h, sk->meter);
-		C2D_DrawRectSolid(BOT_W - 7, ROW_Y + track_h * pos, 0.1f, 2,
-		                  track_h * frac, sk->accent);
-	}
+	screen_list_args a = {0};
+	a.buf = text_buf;
+	a.tb = &g_tb;
+	a.title = nat_title;
+	a.can_back = nat_view != NATIVE_PLAYLISTS;
+	a.count = count[0] ? count : NULL;
+	a.empty = loading ? "Cargando" :
+	          nat_status[0] ? nat_status : "Nada por aqui";
+	a.loading = loading;
+	a.rows = rows;
+	a.n = n;
+	a.first = first;
+	a.frac = frac;
+	a.total = loading ? 0 : lib.total;
+	a.sel = lib.sel;
+	a.pressed_id = g_touch.down ? g_touch.press_id : -1;
+	a.animation_ms = (unsigned)osGetTime();
+	a.thumb = list_thumb;
+	a.accent = sk->accent;
+	a.text = sk->text;
+	a.dim = sk->dim;
+	a.panel = sk->panel;
+	a.meter = sk->meter;
+	screen_list_draw(&a);
 }
 
-
-static bool hit(const Button *b, touchPosition t)
-{
-	return t.px >= b->x && t.px < b->x + b->w && t.py >= b->y && t.py < b->y + b->h;
-}
-
-#define SEEK_X 16.0f
-#define SEEK_Y 88.0f
-#define SEEK_W (BOT_W - 32)
-#define SEEK_H 16.0f
 
 static void clock_text(char *out, size_t n, float secs)
 {
@@ -512,44 +568,130 @@ static void clock_text(char *out, size_t n, float secs)
 }
 
 
-static void draw_bottom(const Skin *sk, const Button *buttons, int count,
-                        int flash)
+static void draw_bottom(const Skin *sk)
 {
-	if (lib.open) {
+	if (lyr_open) {
+		screen_lyrics_args a = {0};
+		a.buf = text_buf;
+		a.tb = &g_tb;
+		a.track = now_title[0] ? now_title : "Nada sonando";
+		a.state = (screen_lyrics_state)lyr_state;
+		a.error = lyr_error;
+		a.doc = &lyr_doc;
+		a.current = lyr_state == LYR_ST_OK
+		            ? lyrics_index_at(&lyr_doc,
+		                              (uint32_t)(now_pos * 1000.0f))
+		            : -1;
+		a.scroll = lyr_scroll;
+		a.position_ms = (long)(now_pos * 1000.0f);
+		a.pressed_id = g_touch.down ? g_touch.press_id : -1;
+		a.animation_ms = (unsigned)osGetTime();
+		a.accent = sk->accent;
+		a.text = sk->text;
+		a.dim = sk->dim;
+		a.panel = sk->panel;
+		a.meter = sk->meter;
+		screen_lyrics_draw(&a);
+	} else if (lib.open) {
 		draw_native_list(sk);
 	} else {
-		// The top screen already shows what is playing; repeating it here
-		// would just be noise. This screen is for the controls.
-		C2D_DrawRectSolid(0, 0, 0.0f, BOT_W, BAND_H, sk->panel);
-		text_fit(now_title[0] ? now_title : "Nada sonando", LIST_X, 9, 0.58f,
-		         sk->text, BOT_W - 32);
-		text_fit(now_artist, LIST_X, 54, 0.48f, sk->dim, BOT_W - 32);
+		// The player owns the whole bottom screen. Its scrubber only
+		// reports: the backend streams a bounded fetch and there is
+		// nothing to seek inside yet.
+		native_state st = native_playback_state();
+		bool match = now_matches_view();
+
+		screen_player_args a = {0};
+		a.buf = text_buf;
+		a.tb = &g_tb;
+		a.track = now_title[0] ? now_title : "Nada sonando";
+		a.artist = now_artist;
+		a.album = now_album;
+		a.playing = st == NATIVE_PLAYING && !paused;
+		a.loading = st == NATIVE_LOADING;
+		a.muted = muted;
+		a.can_prev = match && now_idx > 0;
+		a.can_next = match && now_idx + 1 < nat_count;
+		a.progress_ms = (long)(now_pos * 1000.0f);
+		a.duration_ms = (long)(now_dur * 1000.0f);
+		a.pressed_id = g_touch.down ? g_touch.press_id : -1;
+		a.animation_ms = (unsigned)osGetTime();
+		a.accent = sk->accent;
+		a.on_accent = sk->on_accent;
+		a.panel = sk->panel;
+		screen_player_draw(&a);
 	}
-	for (int i = 0; i < count; i++)
-		if (buttons[i].w > 0.0f)
-			draw_button(sk, &buttons[i], i == flash, buttons[i].h * 0.52f);
 	text_at(BUILD_STAMP, BOT_W - 6, SCR_H - 14, 0.40f, sk->meter, C2D_AlignRight);
 }
 
-enum { B_PLAY, B_MUTE, B_LIST, B_SEARCH, B_COUNT };
-
-// Two arrangements over one array. Zero width hides a button in that mode.
-// Touch targets stay large even though almost nothing is drawn around them:
-// a finger needs the area, the eye does not need the border.
-static void layout_buttons(Button *b, bool split)
+// Starts a track from the cached rows and remembers where it sits, which is
+// what gives prev/next their bounds. Unpausing matters: a skip lands while
+// the channel may be paused, and NDSP would stay silent otherwise.
+static void play_index(int idx)
 {
-	// The action bar: full width, under everything else, always reachable.
-	b[B_PLAY]   = (Button){0, BAR_Y, BOT_W, SCR_H - BAR_Y, IC_PLAY, true,
-	                       "Reproducir"};
-	if (split) {
-		b[B_SEARCH] = (Button){BOT_W - 76, 2, 36, 36, IC_SEARCH, false, NULL};
-		b[B_LIST]   = (Button){BOT_W - 38, 2, 36, 36, IC_CLOSE,  false, NULL};
-		b[B_MUTE]   = (Button){0, 0, 0, 0, IC_SOUND, false, NULL};
+	native_play(nat_rows[idx].uri);
+	now_idx = idx;
+	now_view = nat_view;
+	snprintf(now_arg, sizeof(now_arg), "%s",
+	         nat_view == NATIVE_SEARCH ? lib.query : nat_arg);
+	buffering = true;
+	paused = false;
+	ndspChnSetPaused(0, false);
+	ring_clear();
+}
+
+// Whether the list still shows the view the playing track came from.
+static bool now_matches_view(void)
+{
+	const char *arg = nat_view == NATIVE_SEARCH ? lib.query : nat_arg;
+	return now_idx >= 0 && now_view == nat_view &&
+	       strcmp(now_arg, arg ? arg : "") == 0;
+}
+
+// What activating an absolute list row means: the synthetic Liked Songs row,
+// drilling into a playlist, or playing a track.
+static void activate_row(int abs)
+{
+	int extra = (nat_view == NATIVE_PLAYLISTS) ? 1 : 0;
+	int idx = abs - extra;
+	if (extra && abs == 0) {
+		nat_view = NATIVE_LIKED;
+		nat_arg[0] = '\0';
+		snprintf(nat_title, sizeof(nat_title), "Me gusta");
+	} else if (idx >= 0 && idx < nat_count && nat_rows[idx].is_playlist) {
+		snprintf(nat_arg, sizeof(nat_arg), "%s", nat_rows[idx].uri);
+		if (native_playlist_name(nat_arg, nat_title, sizeof(nat_title)) != 0)
+			snprintf(nat_title, sizeof(nat_title), "Lista");
+		nat_view = NATIVE_TRACKS;
+	} else if (idx >= 0 && idx < nat_count) {
+		play_index(idx);
+		return;
 	} else {
-		b[B_MUTE]   = (Button){ 96, 120, 56, 56, IC_SOUND, false, NULL};
-		b[B_LIST]   = (Button){168, 120, 56, 56, IC_LIST,  false, NULL};
-		b[B_SEARCH] = (Button){0, 0, 0, 0, IC_SEARCH, false, NULL};
+		return;
 	}
+	lib.sel = 0;
+	lib.scroll = lib.velocity = 0.0f;
+	lib_reload = true;
+}
+
+// Opens the lyrics view, queueing a fetch when the track changed since the
+// last document. The art worker does the round trip; the view shows its
+// state until the answer lands.
+static void request_lyrics(void)
+{
+	lyr_open = true;
+	const char *uri = native_now_uri();
+	if (!uri[0] || strcmp(uri, lyr_track_uri) == 0)
+		return;
+	snprintf(lyr_track_uri, sizeof(lyr_track_uri), "%s", uri);
+	snprintf(lyr_w_track, sizeof(lyr_w_track), "%s", native_now_title());
+	snprintf(lyr_w_artist, sizeof(lyr_w_artist), "%s", native_now_artist());
+	snprintf(lyr_w_album, sizeof(lyr_w_album), "%s", native_now_album());
+	lyr_w_dur = (long)(native_duration() * 1000.0f);
+	lyr_scroll = 0.0f;
+	lyr_state = LYR_ST_LOADING;
+	__sync_synchronize();
+	lyr_want = true;
 }
 
 static void fail_screen(const char *why)
@@ -683,6 +825,7 @@ int main(int argc, char **argv)
 		ndspChnSetFormat(0, NDSP_FORMAT_STEREO_PCM16);
 		mix[0] = mix[1] = 1.0f;
 		ndspChnSetMix(0, mix);
+		mcuHwcInit();   // the overlay follows the hardware volume slider
 		audio = linearAlloc(buf_bytes * WAVE_BUFFERS);
 		if (!audio) fail = "Audio memory failed.";
 	}
@@ -708,6 +851,8 @@ int main(int argc, char **argv)
 	C3D_RenderTarget *top = C2D_CreateScreenTarget(GFX_TOP, GFX_LEFT);
 	C3D_RenderTarget *bottom = C2D_CreateScreenTarget(GFX_BOTTOM, GFX_LEFT);
 	text_buf = C2D_TextBufNew(4096);
+	ui_init();
+	thumbs_init();
 	g_top = top;
 	g_bottom = bottom;
 
@@ -733,6 +878,7 @@ int main(int argc, char **argv)
 				if (hidKeysDown() & KEY_START) break;
 				draw_setup();
 			}
+			ui_exit();
 			C2D_Fini();
 			C3D_Fini();
 			gfxExit();
@@ -742,43 +888,107 @@ int main(int argc, char **argv)
 	C3D_TexInit(&art_tex, ART_PIXELS, ART_PIXELS, GPU_RGB565);
 	C3D_TexSetFilter(&art_tex, GPU_LINEAR, GPU_LINEAR);
 
-	// Two threads: one services library requests off the render loop, one
-	// moves the ring into NDSP.
+	// Three threads beside the render loop: one services library requests,
+	// one moves the ring into NDSP, one fetches and decodes cover art.
 	Thread lister = threadCreate(native_library_thread, NULL, 32 * 1024, 0x3F, -2, false);
 	Thread snd = threadCreate(audio_thread, NULL, 16 * 1024, 0x18, -2, false);
+	Thread art = threadCreate(art_thread, NULL, 48 * 1024, 0x32, -2, false);
 	buffering = false;
 	lib.open = true;
 	lib_reload = true;
 	snprintf(now_artist, sizeof(now_artist), "%s", native_account());
+	/* The idle hero is the user's own avatar; the art thread fetches it (and
+	 * retries it past the Web API rate limit) and hands it over as soon as it
+	 * lands, while nothing has played yet. */
 	int nat_state_seen = -1;
-
-	Button buttons[B_COUNT];
-	layout_buttons(buttons, false);
 
 	// One second: the link measured comfortable at 1024 kbps, and every extra
 	// second of cushion is a second of lag after a skip.
 	prebuffer_bytes = (u32)SAMPLE_RATE * 4;
-	bool muted = false;
-	int flash = -1, flash_ttl = 0;
 
 
 	while (aptMainLoop()) {
 		hidScanInput();
 		u32 down = hidKeysDown();
 		if (down & KEY_START) break;
-		touchPosition touch = {0, 0};
-		bool touch_used = false, input_used = false;
-		if (down & KEY_TOUCH) hidTouchRead(&touch);
+		bool open_search = false;
+
+		// The rects belong to the frame just drawn, so this runs before any
+		// of them are rebuilt below.
+		touch_update(&g_touch, g_tb.rects, g_tb.n);
+
+		// A scrub is a drag, not a tap: the position follows the finger while
+		// held (a preview only -- the decoder keeps playing), and the seek
+		// fires on release.
+		static bool scrubbing = false;
+		if (!lib.open && !lyr_open && now_dur > 1.0f) {
+			if (g_touch.pressed && g_touch.press_id == BTN_P_SCRUB)
+				scrubbing = true;
+		} else {
+			scrubbing = false;
+		}
+		if (scrubbing) {
+			if (g_touch.down) {
+				float frac =
+				    (g_touch.px - SCRUB_BAR_X) / SCRUB_BAR_W;
+				if (frac < 0.0f) frac = 0.0f;
+				if (frac > 1.0f) frac = 1.0f;
+				now_pos = frac * now_dur;
+			} else {
+				native_seek(now_pos);
+				scrubbing = false;
+			}
+		}
+
+		// Player-mode touches fire on release.
+		if (!lib.open && !lyr_open && g_touch.clicked >= 0) {
+			// The same bounds the draw used to grey prev/next out: a
+			// greyed control still has a rect, so the tap is checked here.
+			bool match = now_matches_view();
+			switch (g_touch.clicked) {
+			case BTN_P_PLAY:
+				if (native_playback_state() == NATIVE_PLAYING) {
+					paused = !paused;
+					ndspChnSetPaused(0, paused);
+				}
+				break;
+			case BTN_P_PREV:
+				if (match && now_idx > 0)
+					play_index(now_idx - 1);
+				break;
+			case BTN_P_NEXT:
+				if (match && now_idx + 1 < nat_count)
+					play_index(now_idx + 1);
+				break;
+			case BTN_P_LIBRARY:
+				lib.open = true;
+				lib_reload = true;
+				break;
+			case BTN_P_LYRICS:
+				request_lyrics();
+				break;
+			case BTN_P_MUTE:
+				muted = !muted;
+				mix[0] = mix[1] = muted ? 0.0f : 1.0f;   // slider owns the level
+				ndspChnSetMix(0, mix);
+				break;
+			}
+		}
 
 		{
 			// The player runs on its own thread; this just mirrors it.
 			native_state st = native_playback_state();
 			if (st != nat_state_seen) {
 				nat_state_seen = (int)st;
+				if (st == NATIVE_PLAYING)
+					lid_mode_set(true);
+				else if (st == NATIVE_IDLE || st == NATIVE_FAILED)
+					lid_mode_set(false);
 				switch (st) {
 				case NATIVE_LOADING:
 					snprintf(now_title, sizeof(now_title), "Cargando...");
 					now_artist[0] = '\0';
+					now_album[0] = '\0';
 					break;
 				case NATIVE_FAILED:
 					snprintf(now_title, sizeof(now_title), "No se pudo reproducir");
@@ -792,168 +1002,242 @@ int main(int argc, char **argv)
 			if (st == NATIVE_PLAYING) {
 				snprintf(now_title, sizeof(now_title), "%s", native_now_title());
 				snprintf(now_artist, sizeof(now_artist), "%s", native_now_artist());
-				now_pos = native_position();
+				snprintf(now_album, sizeof(now_album), "%s", native_now_album());
+				now_pos = scrubbing ? now_pos : native_position();
 				now_dur = native_duration();
 				server_playing = true;
+				// The cover follows the track; the art worker fetches it and
+				// the placeholder shows until it lands.
+				const char *art = native_now_art();
+				if (!hero_new && strcmp(art, hero_loaded) != 0) {
+					snprintf((char *)hero_want, 80, "%s", art);
+					__sync_synchronize();
+					hero_new = true;
+					art_present = false;
+				}
+			} else if (paused) {
+				// The track ended or failed under a paused channel; do not
+				// carry the pause into whatever plays next.
+				paused = false;
+				ndspChnSetPaused(0, false);
 			}
 		}
 
 		if (lib.open) {
-			if (down & KEY_DUP)   lib.sel = (lib.sel + lib.count - 1) % (lib.count ?: 1);
-			if (down & KEY_DDOWN) lib.sel = (lib.sel + 1) % (lib.count ?: 1);
-			if ((down & KEY_L) && lib.offset >= LIB_ROWS) {
-				lib.offset -= LIB_ROWS; lib_reload = true;
+			if (down & KEY_DUP && lib.sel > 0) lib.sel--;
+			if (down & KEY_DDOWN && lib.sel + 1 < lib.total) lib.sel++;
+			if (down & KEY_L) lib.sel = lib.sel >= 5 ? lib.sel - 5 : 0;
+			if ((down & KEY_R) && lib.total)
+				lib.sel = lib.sel + 5 < lib.total ? lib.sel + 5
+				                                  : lib.total - 1;
+
+			// Keep the d-pad selection inside the window, but only when it
+			// just moved: applied unconditionally this clamp drags the
+			// window back over any touch scrolling, anchoring the list to
+			// whatever row the buttons last highlighted.
+			static int prev_sel = -1;
+			if (lib.total && lib.sel != prev_sel) {
+				float top = lib.sel * SL_ROW_H, bottom = top + SL_ROW_H;
+				if (top < lib.scroll) lib.scroll = top;
+				else if (bottom > lib.scroll + SL_CONTENT_H)
+					lib.scroll = bottom - SL_CONTENT_H;
 			}
-			if ((down & KEY_R) && lib.offset + LIB_ROWS < lib.total) {
-				lib.offset += LIB_ROWS; lib_reload = true;
+			prev_sel = lib.sel;
+
+			// Drag 1:1 while held, then coast: retain a filtered portion of
+			// the final motion and decay it after release. A fresh touch
+			// always catches the list immediately.
+			if (g_touch.pressed)
+				lib.velocity = 0.0f;
+			if (g_touch.down && g_touch.dragging) {
+				float delta = -(float)g_touch.dy;
+				lib.scroll += delta;
+				lib.velocity = lib.velocity * 0.25f + delta * 0.75f;
+				if (lib.velocity > SL_FLING_MAX) lib.velocity = SL_FLING_MAX;
+				if (lib.velocity < -SL_FLING_MAX) lib.velocity = -SL_FLING_MAX;
+			} else if (!g_touch.down) {
+				lib.scroll += lib.velocity;
+				lib.velocity *= SL_FLING_FRICTION;
+				if (lib.velocity > -SL_FLING_STOP &&
+				    lib.velocity < SL_FLING_STOP)
+					lib.velocity = 0.0f;
 			}
-			int row = -1;
-			if ((down & KEY_TOUCH) && touch.px < LIST_X + LIST_W)
-				row = (int)((touch.py - ROW_Y) / ROW_H);
-			// Closing the list re-lays out the buttons, so this same coordinate
-			// would then land on one of them. Consume it here.
-			if (row >= 0 && row < lib.count) { lib.sel = row; touch_used = true; }
-			if ((down & KEY_B) && nat_view != NATIVE_PLAYLISTS) {
+			float maxs = screen_list_max_scroll(lib.total);
+			if (lib.scroll < 0.0f) { lib.scroll = 0.0f; lib.velocity = 0.0f; }
+			if (lib.scroll > maxs) { lib.scroll = maxs; lib.velocity = 0.0f; }
+
+			if (g_touch.clicked == SL_BTN_SEARCH)
+				open_search = true;
+			else if (g_touch.clicked == SL_BTN_CLOSE)
+				lib.open = false;
+			else if (g_touch.clicked == SL_BTN_BACK &&
+			         nat_view != NATIVE_PLAYLISTS) {
+				// Same trip the B button makes: up to the playlists.
 				nat_view = NATIVE_PLAYLISTS;
 				nat_arg[0] = '\0';
 				snprintf(nat_title, sizeof(nat_title), "Listas");
-				lib.offset = lib.sel = 0;
+				lib.sel = 0;
+				lib.scroll = lib.velocity = 0.0f;
 				lib_reload = true;
-			} else if (((down & KEY_A) || (row >= 0 && row < lib.count)) &&
-			           lib.count) {
-				int idx = lib.index[lib.sel];
-				if (idx == -2) {
-					nat_view = NATIVE_LIKED;
+			}
+			else if (g_touch.clicked >= SL_ROW0)
+				activate_row(g_touch.clicked - SL_ROW0);
+
+			if (down & KEY_A)
+				activate_row(lib.sel);
+			if (down & KEY_Y)
+				open_search = true;
+			if ((down & KEY_X) && lib.total) {
+				// X on a track seeds a radio from it.
+				int extra = (nat_view == NATIVE_PLAYLISTS) ? 1 : 0;
+				int idx = lib.sel - extra;
+				if (idx >= 0 && idx < nat_count &&
+				    !nat_rows[idx].is_playlist) {
+					snprintf(nat_arg, sizeof(nat_arg), "%s",
+					         nat_rows[idx].uri);
+					nat_view = NATIVE_RADIO;
+					snprintf(nat_title, sizeof(nat_title), "Radio");
+					lib.sel = 0;
+					lib.scroll = lib.velocity = 0.0f;
+					lib_reload = true;
+				}
+			}
+			if (down & KEY_B) {
+				if (nat_view != NATIVE_PLAYLISTS) {
+					nat_view = NATIVE_PLAYLISTS;
 					nat_arg[0] = '\0';
-					snprintf(nat_title, sizeof(nat_title), "Me gusta");
-					lib.offset = lib.sel = 0;
+					snprintf(nat_title, sizeof(nat_title), "Listas");
+					lib.sel = 0;
+					lib.scroll = lib.velocity = 0.0f;
 					lib_reload = true;
-				} else if (idx >= 0 && idx < nat_count &&
-				           nat_rows[idx].is_playlist) {
-					snprintf(nat_arg, sizeof(nat_arg), "%s", nat_rows[idx].uri);
-					if (native_playlist_name(nat_arg, nat_title,
-					                         sizeof(nat_title)) != 0)
-						snprintf(nat_title, sizeof(nat_title), "Lista");
-					nat_view = NATIVE_TRACKS;
-					lib.offset = lib.sel = 0;
-					lib_reload = true;
-				} else if (idx >= 0 && idx < nat_count) {
-					// A plays the track; Y on the list builds a radio from it
-					// instead, which is the other thing worth doing here.
-					native_play(nat_rows[idx].uri);
-					buffering = true;
-					ring_clear();
+				} else {
+					lib.open = false;
 				}
 			}
-			if (down & KEY_B) { lib.open = false; layout_buttons(buttons, false); }
 		}
 
-		int pressed = -1;
-		if (input_used) goto skip_input;
-		if (down & KEY_A && !lib.open) pressed = B_PLAY;
-		if (down & KEY_Y) pressed = lib.open ? B_SEARCH : B_MUTE;
-		if (lib.open && (down & KEY_R) && lib.count) {
-			// R on a track: radio seeded from it. L/R still page when the
-			// selection is a playlist.
-			int idx = lib.index[lib.sel];
-			if (idx >= 0 && idx < nat_count && !nat_rows[idx].is_playlist) {
-				snprintf(nat_arg, sizeof(nat_arg), "%s", nat_rows[idx].uri);
-				nat_view = NATIVE_RADIO;
-				snprintf(nat_title, sizeof(nat_title), "Radio");
-				lib.offset = lib.sel = 0;
-				lib_reload = true;
+		if (!lib.open && (down & KEY_A)) {
+			// A mirrors the on-screen disc: pause, not stop. The decoder
+			// sleeps when the ring is full, so resume costs nothing.
+			if (native_playback_state() == NATIVE_PLAYING) {
+				paused = !paused;
+				ndspChnSetPaused(0, paused);
 			}
 		}
-		if ((down & KEY_TOUCH) && !touch_used)
-			for (int i = 0; i < B_COUNT; i++)
-				if (buttons[i].w > 0.0f && hit(&buttons[i], touch)) pressed = i;
-
-		bool toggle_mute = false;
-		if (pressed >= 0 && buttons[pressed].w > 0.0f) {
-			flash = pressed;
-			flash_ttl = 10;
-			switch (pressed) {
-			case B_PLAY:
-				// No pause yet: the decoder streams into the ring and there
-				// is nothing to resume from. Stop is honest, pause would not
-				// be.
-				native_stop();
-				ring_clear();
-				server_playing = false;
-				break;
-			case B_MUTE: toggle_mute = true; break;
-			case B_LIST:
-				lib.open = !lib.open;
-				if (lib.open) { lib.offset = lib.sel = 0; lib_reload = true; }
-				layout_buttons(buttons, lib.open);
-				break;
-			case B_SEARCH: {
-				// The system keyboard suspends this loop; audio keeps playing
-				// because it lives on its own thread.
-				SwkbdState kb;
-				swkbdInit(&kb, SWKBD_TYPE_QWERTY, 2, sizeof(lib.query) - 1);
-				swkbdSetHintText(&kb, "Buscar en Spotify");
-				swkbdSetInitialText(&kb, lib.query);
-				char typed[sizeof(lib.query)] = "";
-				if (swkbdInputText(&kb, typed, sizeof(typed)) == SWKBD_BUTTON_RIGHT) {
-					strncpy(lib.query, typed, sizeof(lib.query) - 1);
-					nat_view = lib.query[0] ? NATIVE_SEARCH : NATIVE_PLAYLISTS;
-					snprintf(nat_title, sizeof(nat_title), "%s",
-					         lib.query[0] ? "Busqueda" : "Listas");
-					lib.offset = lib.sel = 0;
-					lib_reload = true;
-				}
-				break;
-			}
-			}
-		}
-		if (toggle_mute) {
+		if (!lib.open && (down & KEY_Y)) {
 			muted = !muted;
-			mix[0] = mix[1] = muted ? 0.0f : 1.0f;
+			mix[0] = mix[1] = muted ? 0.0f : 1.0f;   // slider owns the level
 			ndspChnSetMix(0, mix);
 		}
-skip_input:
-		if (flash_ttl > 0 && --flash_ttl == 0) flash = -1;
 
-		// GPU calls belong to this thread, so the fetcher only stages bytes.
+		// D-pad left/right are the physical prev/next, under the same bounds
+		// the on-screen glyphs grey out with.
+		if (!lib.open && !lyr_open && (down & (KEY_DLEFT | KEY_DRIGHT))) {
+			bool match = now_matches_view();
+			if ((down & KEY_DRIGHT) && match && now_idx + 1 < nat_count)
+				play_index(now_idx + 1);
+			if ((down & KEY_DLEFT) && match && now_idx > 0)
+				play_index(now_idx - 1);
+		}
+
+		// L/R are the physical prev/next: with the lid closed they are the
+		// only transport within reach. Volume lives on the hardware slider,
+		// so these keys are free for the job that actually needs them.
+		if (!lib.open && !lyr_open && (down & (KEY_L | KEY_R))) {
+			bool match = now_matches_view();
+			if ((down & KEY_R) && match && now_idx + 1 < nat_count)
+				play_index(now_idx + 1);
+			if ((down & KEY_L) && match && now_idx > 0)
+				play_index(now_idx - 1);
+		}
+
+		// The overlay mirrors the hardware slider; any move pops it up.
+		{
+			u8 lvl;
+			if (R_SUCCEEDED(MCUHWC_GetSoundSliderLevel(&lvl)) &&
+			    lvl != vol_slider) {
+				vol_slider = lvl;
+				volume = lvl * 100 / 63;
+				vol_overlay = 255;
+				vol_hold = 90;
+			}
+		}
+		if (vol_hold > 0)
+			vol_hold--;
+		else if (vol_overlay > 0)
+			vol_overlay = vol_overlay > 4 ? vol_overlay - 4 : 0;
+
+		// Lyrics mode: back, or dragging a plain document by hand.
+		if (lyr_open) {
+			if (g_touch.clicked == LYR_BTN_BACK || (down & KEY_B))
+				lyr_open = false;
+			if (lyr_state == LYR_ST_OK && !lyr_doc.synced &&
+			    g_touch.down && g_touch.dragging) {
+				lyr_scroll -= g_touch.dy;
+				float max = screen_lyrics_max_scroll(lyr_doc.count);
+				if (lyr_scroll < 0.0f) lyr_scroll = 0.0f;
+				if (lyr_scroll > max) lyr_scroll = max;
+			}
+		}
+
+		if (open_search) {
+			// The system keyboard suspends this loop; audio keeps playing
+			// because it lives on its own thread.
+			SwkbdState kb;
+			swkbdInit(&kb, SWKBD_TYPE_QWERTY, 2, sizeof(lib.query) - 1);
+			swkbdSetHintText(&kb, "Buscar en Spotify");
+			swkbdSetInitialText(&kb, lib.query);
+			char typed[sizeof(lib.query)] = "";
+			if (swkbdInputText(&kb, typed, sizeof(typed)) == SWKBD_BUTTON_RIGHT) {
+				strncpy(lib.query, typed, sizeof(lib.query) - 1);
+				nat_view = lib.query[0] ? NATIVE_SEARCH : NATIVE_PLAYLISTS;
+				snprintf(nat_title, sizeof(nat_title), "%s",
+				         lib.query[0] ? "Busqueda" : "Listas");
+				lib.sel = 0;
+				lib.scroll = lib.velocity = 0.0f;
+				lib_reload = true;
+			}
+		}
+
+		// GPU calls belong to this thread, so the fetchers only stage bytes.
 		if (art_pending) {
-			C3D_TexLoadImage(&art_tex, art_staging, GPU_TEXFACE_2D, 0);
+			static uint8_t art_tiled[ART_BYTES];
+			artwork_tile_rgb565(art_staging, art_tiled, ART_PIXELS);
+			C3D_TexLoadImage(&art_tex, art_tiled, GPU_TEXFACE_2D, 0);
 			C3D_TexFlush(&art_tex);
 			art_present = true;
 			art_pending = false;
 		}
+		thumbs_pump();
 
 		const Skin *sk = &SKIN;
-		{
-			native_state ns = native_playback_state();
-			buttons[B_PLAY].icon = (ns == NATIVE_PLAYING) ? IC_PAUSE : IC_PLAY;
-			buttons[B_PLAY].label =
-				ns == NATIVE_PLAYING ? "Detener" :
-				ns == NATIVE_LOADING ? "Cargando..." :
-				lib.open             ? "Reproducir" : "Elegir un tema";
-		}
-		buttons[B_MUTE].icon = muted ? IC_MUTED : IC_SOUND;
 
 		C2D_TextBufClear(text_buf);
+		tb_reset(&g_tb);
 		C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
 		C2D_TargetClear(top, sk->top_bg);
 		C2D_SceneBegin(top);
 		draw_top(sk, buffering, muted, 0.0f);
 		C2D_TargetClear(bottom, sk->bottom_bg);
 		C2D_SceneBegin(bottom);
-		draw_bottom(sk, buttons, B_COUNT, flash);
+		draw_bottom(sk);
 		C3D_FrameEnd(0);
 	}
 
 	running = false;
 	threadJoin(lister, 2000000000LL);
 	threadJoin(snd, 2000000000LL);
+	threadJoin(art, 2000000000LL);
+	lid_mode_set(false);
 	native_exit();
 	C3D_TexDelete(&art_tex);
+	thumbs_free_all();
+	ui_exit();
 	C2D_TextBufDelete(text_buf);
 	C2D_Fini();
 	C3D_Fini();
 	ndspExit();
+	mcuHwcExit();
 	socExit();
 	gfxExit();
 	return 0;

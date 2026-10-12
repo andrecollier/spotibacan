@@ -7,6 +7,7 @@
 #ifndef HTTP3DS_H
 #define HTTP3DS_H
 
+#include <stdbool.h>
 #include <stddef.h>
 
 typedef struct {
@@ -49,6 +50,22 @@ int http_get_url(const char *url, size_t limit, http_reply *out);
  * on megabytes. 0 means the whole file. */
 int http_get_url_range(const char *url, size_t bytes, size_t limit,
                        http_reply *out);
+
+/* Streaming variant for the audio path: instead of buffering the whole
+ * response, every piece of body goes to `cb` as it arrives, and the piece is
+ * only considered consumed when the callback returns true -- false aborts the
+ * request, which is how a track skip cancels a download mid-flight.
+ *
+ * `offset` resumes from that byte (a 206); 0 asks for the whole file (a 200).
+ * Either way the reply headers carry the file's total size, stored in
+ * `total_out` before the first callback, which is when the caller reserves
+ * its buffer. A resume answered with 200 restarts from byte zero and would
+ * corrupt the buffer, so it is refused here. The CDN answers with a length;
+ * a chunked body is not handled. */
+int http_get_url_stream(const char *url, size_t offset,
+                        bool (*cb)(void *ctx, const char *data, size_t n),
+                        void *ctx, size_t *total_out, int *status_out,
+                        char *err, size_t errlen);
 void http_reply_free(http_reply *r);
 
 /* Percent-encodes everything outside the unreserved set, for form bodies. */

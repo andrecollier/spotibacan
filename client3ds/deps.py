@@ -34,6 +34,12 @@ URL = f"https://github.com/Mbed-TLS/mbedtls/releases/download/{NAME}/{NAME}.tar.
 STB_VORBIS_URL = "https://raw.githubusercontent.com/nothings/stb/master/stb_vorbis.c"
 STB_VORBIS_SHA256 = "4c7cb2ff1f7011e9d67950446b7eb9ca044f2e464d76bfbb0b84dd2e23e65636"
 
+# The JPEG decoder, for album covers: same family, same pinning rationale.
+# stb_image.h ships declarations and implementation in one header; the
+# implementation TU is deps/stb_image_impl.c, checked in like this comment.
+STB_IMAGE_URL = "https://raw.githubusercontent.com/nothings/stb/master/stb_image.h"
+STB_IMAGE_SHA256 = "594c2fe35d49488b4382dbfaec8f98366defca819d916ac95becf3e75f4200b3"
+
 
 def fetch(deps: Path) -> Path:
     deps.mkdir(parents=True, exist_ok=True)
@@ -73,6 +79,21 @@ def fetch_stb_vorbis(deps: Path) -> Path:
     return dst
 
 
+def fetch_stb_image(deps: Path) -> Path:
+    deps.mkdir(parents=True, exist_ok=True)
+    dst = deps / "stb_image.h"
+    if not dst.exists():
+        print("Downloading stb_image...")
+        with urllib.request.urlopen(STB_IMAGE_URL, timeout=60) as r:
+            dst.write_bytes(r.read())
+    got = hashlib.sha256(dst.read_bytes()).hexdigest()
+    if got != STB_IMAGE_SHA256:
+        raise SystemExit(f"{dst} hashes {got}, expected {STB_IMAGE_SHA256}\n"
+                         "stb has no releases, so this pins a commit of master; "
+                         "if upstream moved, review the diff before updating.")
+    return dst
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -84,6 +105,7 @@ def main():
 
     tc = toolchain.find(args.toolchain)
     fetch_stb_vorbis(ROOT / "deps")
+    fetch_stb_image(ROOT / "deps")
     tree = fetch(ROOT / "deps")
     out = ROOT / "build" / ("mbedtls-probe" if args.probe else "mbedtls")
     out.mkdir(parents=True, exist_ok=True)

@@ -538,6 +538,10 @@ done:
 
 int ap_send(ap_session *s, uint8_t cmd, const void *payload, size_t len)
 {
+	/* A dropped session is reported as NULL by its owner; a packet call on
+	 * it must fail, not fault. */
+	if (!s)
+		return -1;
 	if (len > 0xFFFF)
 		return -1;
 	size_t total = 3 + len;
@@ -561,6 +565,8 @@ int ap_send(ap_session *s, uint8_t cmd, const void *payload, size_t len)
 
 int ap_wait(ap_session *s, int timeout_ms)
 {
+	if (!s)
+		return -1;
 	struct pollfd p = { .fd = s->fd, .events = POLLIN };
 	int n = poll(&p, 1, timeout_ms);
 	if (n == 0)
@@ -577,6 +583,8 @@ int ap_wait(ap_session *s, int timeout_ms)
 
 int ap_recv(ap_session *s, uint8_t *cmd, uint8_t *buf, size_t cap)
 {
+	if (!s)
+		return -1;
 	uint8_t header[3];
 	if (!read_exact(s->fd, header, sizeof(header), s->timeout_ms))
 		return -1;

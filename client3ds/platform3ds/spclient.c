@@ -26,6 +26,63 @@ static void copy_str(char *dst, size_t cap, const pbv *v)
 	dst[n] = '\0';
 }
 
+/* Collects the image ids of a container holding repeated Image entries under
+ * `field`, indexed by the Image.size enum: 0=DEFAULT (300px), 1=SMALL (64px),
+ * 2=LARGE (640px). Image is { file_id 1, size 2 }; the id becomes the URL in
+ * lowercase hex. The repeated entries are walked by hand for the same reason
+ * the audio files are. */
+static void read_image_ids(const pbv *container, uint32_t field, char ids[3][41])
+{
+	size_t at = 0;
+	while (at < container->len) {
+		pbv rest = { container->p + at, container->len - at };
+		pbv img, fid;
+		uint64_t size = 0;
+		if (!pb_get_bytes(rest.p, rest.len, field, &img))
+			break;
+		pb_get_varint(img.p, img.len, 2, &size);
+		if (pb_get_bytes(img.p, img.len, 1, &fid) && fid.len == 20 &&
+		    size <= 2 && !ids[size][0]) {
+			static const char HEX[] = "0123456789abcdef";
+			for (int i = 0; i < 20; i++) {
+				ids[size][i * 2] = HEX[fid.p[i] >> 4];
+				ids[size][i * 2 + 1] = HEX[fid.p[i] & 15];
+			}
+		}
+		at = (size_t)(img.p + img.len - container->p);
+	}
+}
+
+/* The album's cover images as i.scdn.co URLs.
+ *
+ * Track.album (3) -> Album.cover_group (17) -> ImageGroup.image (1, repeated)
+ * -> Image. Older metadata used Album.cover (9), a repeated Image directly on
+ * the album, so that is the fallback when no ImageGroup is present. Reading
+ * the wrong field number here fails silently: the protobuf scan just finds
+ * nothing and every cover URL stays empty. Falls back across sizes, so a
+ * missing SMALL does not cost the list its thumbnails. */
+static void read_cover_urls(const pbv *track, sp_track *out)
+{
+	pbv album, group;
+	if (!pb_get_bytes(track->p, track->len, 3, &album))
+		return;
+
+	char ids[3][41] = {{0}};
+	if (pb_get_bytes(album.p, album.len, 17, &group))
+		read_image_ids(&group, 1, ids);
+	if (!ids[0][0] && !ids[1][0] && !ids[2][0])
+		read_image_ids(&album, 9, ids);
+
+	const char *small = ids[1][0] ? ids[1] : ids[2][0] ? ids[2] : ids[0];
+	const char *large = ids[2][0] ? ids[2] : ids[0][0] ? ids[0] : ids[1];
+	if (small[0])
+		snprintf(out->art_small, sizeof(out->art_small),
+		         "https://i.scdn.co/image/%s", small);
+	if (large[0])
+		snprintf(out->art_large, sizeof(out->art_large),
+		         "https://i.scdn.co/image/%s", large);
+}
+
 const char *sp_format_name(int format)
 {
 	switch (format) {
@@ -151,6 +208,7 @@ int sp_track_metadata(const char *host, const char *token, const char *track_uri
 		if (pb_get_bytes(v.p, v.len, 2, &an))         /* Album.name */
 			copy_str(out->album, sizeof(out->album), &an);
 	}
+	read_cover_urls(&track, out);
 	if (pb_get_bytes(track.p, track.len, 4, &v)) {    /* first Artist */
 		pbv an;
 		/* Artist.gid is field 1 and Artist.name is field 2; reading the first
@@ -445,6 +503,7 @@ int sp_track_metadata_batch(const char *host, const char *token,
 					if (pb_get_bytes(v.p, v.len, 2, &an))
 						copy_str(out[filled].album, sizeof(out[filled].album), &an);
 				}
+				read_cover_urls(&track, &out[filled]);
 				if (pb_get_bytes(track.p, track.len, 4, &v)) {
 					pbv an;
 					if (pb_get_bytes(v.p, v.len, 2, &an))
@@ -620,4 +679,48 @@ int sp_storage_resolve(const char *host, const char *token,
 		return -1;
 	}
 	return out->count;
+}
+
+int sp_user_image(const char *token, char *url, size_t urllen,
+                  char *err, size_t errlen)
+{
+	http_reply r;
+	memset(&r, 0, sizeof(r));
+	if (http_get("api.spotify.com", "/v1/me", token, &r) != 0) {
+		snprintf(err, errlen, "perfil: %s", r.err);
+		http_reply_free(&r);
+		return -1;
+	}
+	if (r.status != 200) {
+		snprintf(err, errlen, "perfil: HTTP %d", r.status);
+		http_reply_free(&r);
+		return -1;
+	}
+
+	/* images is an array of {height, width, url}, largest first; the hero
+	 * art is 128px, so any of them downscales fine. */
+	size_t cursor = 0;
+	const char *obj;
+	size_t objlen;
+	url[0] = '\0';
+	while (json_array_next(r.body, "images", &cursor, &obj, &objlen)) {
+		char buf[512], cand[96];
+		if (objlen >= sizeof(buf))
+			continue;
+		memcpy(buf, obj, objlen);
+		buf[objlen] = '\0';
+		if (!json_str(buf, "url", cand, sizeof(cand)))
+			continue;
+		if (strncmp(cand, "https://i.scdn.co/image/", 24) != 0 ||
+		    strlen(cand) >= urllen)
+			continue;   /* see the header: only the Spotify CDN is in scope */
+		snprintf(url, urllen, "%s", cand);
+		break;
+	}
+	http_reply_free(&r);
+	if (!url[0]) {
+		snprintf(err, errlen, "la cuenta no tiene foto usable");
+		return -1;
+	}
+	return 0;
 }

@@ -4,10 +4,9 @@
  * and gets JSON back. This offers the same shape straight from Spotify, so the
  * UI -- skins, covers, the system keyboard, the touch list -- does not change.
  *
- * What it cannot do yet is play anything: the audio key is refused by Spotify
- * for this account (librespot#1649), and that is the one piece missing. So
- * this browses, and the player stays on the bridge.
- */
+ * Tracks stream: the whole file is reserved up front, a download thread fills
+ * it in the background, and the decoder walks behind the download watermark
+ * without ever overtaking it. */
 #ifndef NATIVE_H
 #define NATIVE_H
 
@@ -28,6 +27,7 @@ typedef struct {
 	char label[64];             /* what the row shows */
 	char sub[40];               /* artist, or the track count */
 	char uri[64];               /* spotify:track:... or spotify:playlist:... */
+	char art[80];               /* 64px cover URL, empty when there is none */
 	bool is_playlist;
 } native_row;
 
@@ -87,10 +87,25 @@ typedef enum {
 native_state native_playback_state(void);
 const char  *native_now_title(void);
 const char  *native_now_artist(void);
+const char  *native_now_album(void);
+/* 300px cover of the playing track, or "" -- the UI keeps its placeholder
+ * until this has something to say. */
+const char  *native_now_art(void);
+/* The user's own avatar URL, for the idle hero art. Empty when the account
+ * has no usable image. */
+const char  *native_profile_art(void);
+/* Retries the avatar fetch once; the startup call is rate-limited often
+ * enough (HTTP 429) that the art worker polls this on a backoff instead. */
+void         native_profile_art_refresh(void);
+/* The URI last asked for; empty before the first play. */
+const char  *native_now_uri(void);
 const char  *native_last_error(void);
 /* Seconds of audio handed to the ring, and the track's length. */
 float        native_position(void);
 float        native_duration(void);
+/* Ask the decoder to jump to `seconds`. Honored only inside the downloaded
+ * span; a jump past the watermark is ignored. */
+void         native_seek(float seconds);
 
 /* A playlist's title. Fetched when it is opened, not for every row of the
  * rootlist: that would be one request per row for names most of which the

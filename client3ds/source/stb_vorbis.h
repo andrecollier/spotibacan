@@ -26,8 +26,18 @@ stb_vorbis *stb_vorbis_open_memory(const unsigned char *data, int len,
                                    int *error, const stb_vorbis_alloc *alloc);
 void stb_vorbis_close(stb_vorbis *f);
 void stb_vorbis_seek_start(stb_vorbis *f);
+/* Sample-accurate seek; the streaming decoder checks the resulting file
+ * offset against the download watermark and rolls back when it lands past
+ * it. */
+int stb_vorbis_seek(stb_vorbis *f, unsigned int sample_number);
+/* Seeds the real length when the buffer's tail is still undownloaded zero
+ * fill; without it the seek's own last-page scan poisons total_samples. */
+void stb_vorbis_set_length(stb_vorbis *f, unsigned int sample_number);
 stb_vorbis_info stb_vorbis_get_info(stb_vorbis *f);
 unsigned int stb_vorbis_stream_length_in_samples(stb_vorbis *f);
+/* Offset into the buffer given at open: the streaming decoder compares it
+ * against the download watermark before every decode call. */
+unsigned int stb_vorbis_get_file_offset(stb_vorbis *f);
 int stb_vorbis_get_samples_short_interleaved(stb_vorbis *f, int channels,
                                              short *buffer, int num_shorts);
 
