@@ -77,6 +77,11 @@ bool native_ready(void);
 int  native_fetch(native_view view, const char *arg, native_row *rows, int max,
                   char *err, size_t errlen);
 
+/* Asks the in-flight fetch to stop at the next chunk boundary (about a
+ * second): for navigation away from a view whose rows are still arriving.
+ * The next fetch clears the flag on entry. */
+void native_fetch_cancel(void);
+
 /* ------------------------------------------------------------- playback */
 
 /* Asks for a track. Returns immediately: resolving, fetching the key and
@@ -122,7 +127,6 @@ bool         native_save_armed(void);
 bool         native_current_saved(void);
 
 /* ------------------------------------------------- download queue */
-
 /* An armed download that gets cut short (its background slot is taken by a
  * newer one) is queued here instead of dying: the player drains the queue
  * one track at a time whenever no other download is using the link. */

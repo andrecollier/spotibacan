@@ -402,46 +402,64 @@ static void vcache_store(native_view view, const char *arg, int count)
 // console round trips are the expensive part.
 static void library_fetch(void)
 {
-	const char *arg = (nat_view == NATIVE_SEARCH) ? lib.query : nat_arg;
-	bool same = nat_view == nat_loaded_view &&
-	            strcmp(arg ? arg : "", nat_loaded_arg) == 0;
+	/* Snapshot the request: the fetch takes seconds and the user may
+	 * navigate away in the middle, so what nat_view says at the end is not
+	 * what it said at the start. */
+	const native_view view = nat_view;
+	char arg[64];
+	snprintf(arg, sizeof(arg), "%s",
+	         view == NATIVE_SEARCH ? lib.query : nat_arg);
+	bool same = view == nat_loaded_view &&
+	            strcmp(arg, nat_loaded_arg) == 0;
 
 	if (!same) {
-		int cached = vcache_lookup(nat_view, arg);
+		int cached = vcache_lookup(view, arg);
 		if (cached >= 0) {
 			nat_count = cached;
 			nat_status[0] = '\0';
-			nat_loaded_view = nat_view;
-			snprintf(nat_loaded_arg, sizeof(nat_loaded_arg), "%s",
-			         arg ? arg : "");
+			nat_loaded_view = view;
+			snprintf(nat_loaded_arg, sizeof(nat_loaded_arg), "%s", arg);
 			lib_retry_at = 0;
 		} else {
-		lib.loading = true;
-		lib_retry_at = 0;
-		char err[160] = "";
-		int n = native_fetch(nat_view, arg, nat_rows, NATIVE_ROWS,
-		                     err, sizeof(err));
-		if (n < 0) {
-			nat_count = 0;
-			snprintf(nat_status, sizeof(nat_status), "%s", err);
-			/* Mark the failed view as loaded anyway: leaving the mismatch
-			 * against nat_loaded_view keeps the screen on "Cargando"
-			 * forever and the error is never shown. The status line says
-			 * what happened, and the retry gives a dropped session ten
-			 * seconds to come back before trying again. */
-			nat_loaded_view = nat_view;
-			snprintf(nat_loaded_arg, sizeof(nat_loaded_arg), "%s",
-			         arg ? arg : "");
-			lib_retry_at = osGetTime() + 10000;
-			native_log("LISTA: fallo el fetch de la vista: %s\n", err);
-		} else {
-			nat_count = n;
-			nat_status[0] = '\0';
-			nat_loaded_view = nat_view;
-			snprintf(nat_loaded_arg, sizeof(nat_loaded_arg), "%s",
-			         arg ? arg : "");
-			vcache_store(nat_view, arg, n);
-		}
+			lib.loading = true;
+			lib_retry_at = 0;
+			char err[160] = "";
+			int n = native_fetch(view, arg, nat_rows, NATIVE_ROWS,
+			                     err, sizeof(err));
+			/* The user moved on mid-fetch (a cancel also lands here):
+			 * results for a view nobody is showing must never be
+			 * committed, or the new view would draw these rows. The
+			 * pending reload fetches what is actually on screen. */
+			const char *cur =
+			    nat_view == NATIVE_SEARCH ? lib.query : nat_arg;
+			if (view != nat_view ||
+			    strcmp(arg, cur ? cur : "") != 0) {
+				native_log("LISTA: fetch de %d descartado (navegacion)\n",
+				           (int)view);
+				return;
+			}
+			if (n < 0) {
+				nat_count = 0;
+				snprintf(nat_status, sizeof(nat_status), "%s", err);
+				/* Mark the failed view as loaded anyway: leaving the
+				 * mismatch against nat_loaded_view keeps the screen on
+				 * "Cargando" forever and the error is never shown. The
+				 * status line says what happened, and the retry gives a
+				 * dropped session ten seconds to come back before trying
+				 * again. */
+				nat_loaded_view = view;
+				snprintf(nat_loaded_arg, sizeof(nat_loaded_arg), "%s",
+				         arg);
+				lib_retry_at = osGetTime() + 10000;
+				native_log("LISTA: fallo el fetch de la vista: %s\n", err);
+			} else {
+				nat_count = n;
+				nat_status[0] = '\0';
+				nat_loaded_view = view;
+				snprintf(nat_loaded_arg, sizeof(nat_loaded_arg), "%s",
+				         arg);
+				vcache_store(view, arg, n);
+			}
 		}
 	}
 
@@ -1699,6 +1717,7 @@ static void activate_row(int abs)
 		return;
 	}
 	lib.sel = 0;
+				native_fetch_cancel();   /* drop the old view's in-flight fetch */
 	lib.scroll = lib.velocity = 0.0f;
 	lib_reload = true;
 }
@@ -2047,6 +2066,7 @@ int main(int argc, char **argv)
 				snprintf(nat_title, sizeof(nat_title), "%s",
 				         tr(S_SEARCH_VIEW));
 				lib.sel = 0;
+				native_fetch_cancel();   /* drop the old view's in-flight fetch */
 				lib.scroll = lib.velocity = 0.0f;
 				lib_reload = true;
 				srch_open = false;
@@ -2155,6 +2175,7 @@ int main(int argc, char **argv)
 				snprintf(nat_title, sizeof(nat_title), "%s",
 				         tr(S_DL_VIEW));
 				lib.sel = 0;
+				native_fetch_cancel();   /* drop the old view's in-flight fetch */
 				lib.scroll = lib.velocity = 0.0f;
 				lib_reload = true;
 				break;
@@ -2296,6 +2317,7 @@ int main(int argc, char **argv)
 				nat_arg[0] = '\0';
 				snprintf(nat_title, sizeof(nat_title), "%s", tr(S_LISTS));
 				lib.sel = 0;
+				native_fetch_cancel();   /* drop the old view's in-flight fetch */
 				lib.scroll = lib.velocity = 0.0f;
 				lib_reload = true;
 			}
@@ -2318,6 +2340,7 @@ int main(int argc, char **argv)
 					nat_view = NATIVE_RADIO;
 					snprintf(nat_title, sizeof(nat_title), "%s", tr(S_RADIO));
 					lib.sel = 0;
+				native_fetch_cancel();   /* drop the old view's in-flight fetch */
 					lib.scroll = lib.velocity = 0.0f;
 					lib_reload = true;
 				}
@@ -2328,6 +2351,7 @@ int main(int argc, char **argv)
 					nat_arg[0] = '\0';
 					snprintf(nat_title, sizeof(nat_title), "%s", tr(S_LISTS));
 					lib.sel = 0;
+				native_fetch_cancel();   /* drop the old view's in-flight fetch */
 					lib.scroll = lib.velocity = 0.0f;
 					lib_reload = true;
 				} else {
@@ -2414,6 +2438,7 @@ int main(int argc, char **argv)
 				snprintf(nat_title, sizeof(nat_title), "%s",
 				         lib.query[0] ? tr(S_SEARCH_VIEW) : tr(S_LISTS));
 				lib.sel = 0;
+				native_fetch_cancel();   /* drop the old view's in-flight fetch */
 				lib.scroll = lib.velocity = 0.0f;
 				lib_reload = true;
 			}

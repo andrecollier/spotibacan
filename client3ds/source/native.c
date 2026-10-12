@@ -125,6 +125,13 @@ static int dlq_count;                    /* guarded by g.lock */
 static volatile int dlq_active_pct = -1; /* 0-100 while draining, else -1 */
 static char dlq_active_title[128];
 
+/* Navigation away from a view whose fetch is still walking chunks sets
+ * this; native_fetch clears it on entry and name_tracks honors it between
+ * chunks. */
+static volatile bool fetch_cancel;
+
+void native_fetch_cancel(void) { fetch_cancel = true; }
+
 static void save_download(const track_stream *ts);
 
 static struct {
@@ -1353,6 +1360,11 @@ static int name_tracks(char uris[][64], int n, native_row *rows, int max,
 	static sp_track meta[50];
 	int done = 0;
 	for (int base = 0; base < n; base += 50) {
+		if (fetch_cancel) {
+			snprintf(err, errlen, "cancelado");
+			nlog("  naming cancelado en el lote %d\n", base);
+			return -1;
+		}
 		int chunk = n - base > 50 ? 50 : n - base;
 		for (int i = 0; i < chunk; i++)
 			ptrs[i] = uris[base + i];
@@ -1455,6 +1467,7 @@ int native_fetch(native_view view, const char *arg, native_row *rows, int max,
 
 	static char uris[NATIVE_ROWS][64];
 	const char *token = g.l5.access_token;
+	fetch_cancel = false;   /* a cancel aimed at the previous fetch dies here */
 
 	nlog("FETCH %s arg=%s max=%d\n", view_name(view), arg ? arg : "-", max);
 
