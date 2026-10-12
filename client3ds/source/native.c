@@ -92,6 +92,21 @@ static const char *view_name(native_view v)
 #define STREAM_MARGIN      (128 * 1024)
 #define NATIVE_RATE   44100
 
+/* A download job owns its track_stream on the heap, so a skipped song can
+ * keep downloading (and saving itself) in the background while the player
+ * is already on the next track: the skip no longer waits for the file. */
+typedef struct dl_job {
+	track_stream  ts;
+	Thread        th;
+	volatile bool stop;
+	volatile bool save;      /* write the .ogg (+ cover) when complete */
+	volatile bool saved;     /* CAS guard: exactly one save per job */
+	volatile bool detached;  /* player moved on; the thread frees itself */
+	struct dl_job *next;
+} dl_job;
+
+static void save_download(const track_stream *ts);
+
 static struct {
 	bool          ready;
 	login5_token  l5;
@@ -109,8 +124,8 @@ static struct {
 	Thread        player;
 	LightLock      lock;
 	volatile bool  quit;
-	volatile bool  dl_stop;   /* tells the download thread the UI moved on */
-	/* Set by the UI thread, consumed by the player. file:<name>.ogg means a
+	struct dl_job *job;       /* download of the track now playing, or NULL */
+	struct dl_job *jobs;      /* every live job, detached ones included */	/* Set by the UI thread, consumed by the player. file:<name>.ogg means a
 	 * local download under the music folder, no network involved. */
 	char           want[192];
 	volatile bool  want_new;
@@ -147,7 +162,20 @@ static struct {
 
 void native_set_downloads(bool on) { g.downloads_on = on; }
 
-void native_save_current(void) { g.want_save = !g.want_save; }
+void native_save_current(void)
+{
+	g.want_save = !g.want_save;
+	if (g.job) {
+		g.job->save = g.want_save;
+		/* The download may already be complete (a 3-minute song lands in
+		 * seconds), in which case the download thread checked the flag
+		 * long ago and nobody else will save it: do it here. The CAS
+		 * keeps this from racing the thread's own save. */
+		if (g.want_save && g.job->ts.dl_done && !g.job->ts.dl_failed &&
+		    !__sync_lock_test_and_set(&g.job->saved, 1))
+			save_download(&g.job->ts);
+	}
+}
 bool native_save_armed(void) { return g.want_save; }
 
 bool native_ready(void) { return g.ready; }
@@ -328,22 +356,26 @@ bool native_current_saved(void)
 
 /* Writes the finished download as a plain .ogg under music/ beside the app.
  * Only called once dl_done: a partial file is worthless. The Spotify key
- * header is stripped, so what lands is the Ogg stream itself. */
+ * header is stripped, so what lands is the Ogg stream itself. The write is
+ * staged under a .tmp name and renamed, so a kill mid-write never leaves a
+ * truncated file that the "already saved?" check would trust. */
 static void save_download(const track_stream *ts)
 {
 	char path[520];
 	download_path(ts->meta.artist, ts->meta.name, path, sizeof(path));
 
-	FILE *f = fopen(path, "wb");
+	char tmp[528];
+	snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+	FILE *f = fopen(tmp, "wb");
 	if (!f) {
 		nlog("DL: no se pudo guardar %s\n", path);
 		return;
 	}
 	fwrite(ts->data + SPOTIFY_OGG_HEADER, 1, ts->len - SPOTIFY_OGG_HEADER, f);
 	fclose(f);
-	/* The saved check caches per URI; the file exists now. */
-	g.want_save = false;
-	saved_flag = true;
+	rename(tmp, path);
+	/* The saved check caches per URI; make it look again. */
+	saved_checked_uri[0] = '\0';
 	nlog("DL: guardada %s (%.1f MB)\n", path,
 	     (double)(ts->len - SPOTIFY_OGG_HEADER) / (1024.0 * 1024.0));
 
@@ -412,9 +444,27 @@ void native_stop(void)
 	g.want_stop = true;
 }
 
+/* Fills the job's buffer, saves the file if it was armed, and -- when the
+ * player already moved on to another track (detached) -- frees the job
+ * itself, since nobody will ever join it. */
 static void download_thread(void *arg)
 {
-	track_stream_download(arg, &g.dl_stop);
+	dl_job *job = arg;
+	track_stream_download(&job->ts, &job->stop);
+	if (job->save && job->ts.dl_done && !job->ts.dl_failed &&
+	    !__sync_lock_test_and_set(&job->saved, 1))
+		save_download(&job->ts);
+	if (job->detached) {
+		LightLock_Lock(&g.lock);
+		dl_job **p = &g.jobs;
+		while (*p && *p != job)
+			p = &(*p)->next;
+		if (*p)
+			*p = job->next;
+		LightLock_Unlock(&g.lock);
+		track_stream_free(&job->ts);
+		free(job);
+	}
 }
 
 /* Decodes one streaming track into the ring until it ends, the download
@@ -760,10 +810,19 @@ static void player_thread(void *arg)
 				continue;
 			}
 
-			track_stream ts;
+			/* The stream lives in a heap job, not on this frame's stack:
+			 * a skip detaches the still-running download instead of
+			 * joining it, and the download thread owns the job from
+			 * then on. */
+			dl_job *job = calloc(1, sizeof(*job));
+			if (!job) {
+				snprintf(g.error, sizeof(g.error), "sin memoria");
+				g.state = NATIVE_FAILED;
+				continue;
+			}
 			char err[192];
 			int rc = track_stream_begin(g.sp_host, g.l5.access_token, g.ap,
-			                            uri, NULL, &ts, err, sizeof(err));
+			                            uri, NULL, &job->ts, err, sizeof(err));
 			if (rc != 0 &&
 			    (strstr(err, "key request") || strstr(err, "audio key") ||
 			     strstr(err, "connection"))) {
@@ -778,43 +837,75 @@ static void player_thread(void *arg)
 				}
 				if (ap_reconnect())
 					rc = track_stream_begin(g.sp_host, g.l5.access_token,
-					                        g.ap, uri, NULL, &ts, err,
+					                        g.ap, uri, NULL, &job->ts, err,
 					                        sizeof(err));
 			}
 			if (rc != 0) {
 				snprintf(g.error, sizeof(g.error), "%s", err);
 				g.state = NATIVE_FAILED;
 				nlog("  fallo: %s\n", err);
+				free(job);
 				continue;
 			}
-			snprintf(g.title, sizeof(g.title), "%s", ts.meta.name);
-			snprintf(g.artist, sizeof(g.artist), "%s", ts.meta.artist);
-			snprintf(g.album, sizeof(g.album), "%s", ts.meta.album);
-			snprintf(g.art, sizeof(g.art), "%s", ts.meta.art_large);
+			snprintf(g.title, sizeof(g.title), "%s", job->ts.meta.name);
+			snprintf(g.artist, sizeof(g.artist), "%s", job->ts.meta.artist);
+			snprintf(g.album, sizeof(g.album), "%s", job->ts.meta.album);
+			snprintf(g.art, sizeof(g.art), "%s", job->ts.meta.art_large);
 
-			/* The download runs beside the decoder: `ts` lives on this
-			 * frame's stack and the thread is joined before it goes away. */
-			g.dl_stop = false;
+			/* The download runs beside the decoder. */
+			job->save = g.downloads_on;
 			g.want_save = false;   /* the button arms per track */
-			/* The fetch below runs a full TLS handshake (cert chain +
+			LightLock_Lock(&g.lock);
+			job->next = g.jobs;
+			g.jobs = job;
+			g.job = job;
+			LightLock_Unlock(&g.lock);
+			/* The fetch runs a full TLS handshake (cert chain +
 			 * RSA bignum) on this stack; 48 KB was not always enough. */
-			Thread dl = threadCreate(download_thread, &ts, 96 * 1024,
+			Thread dl = threadCreate(download_thread, job, 96 * 1024,
 			                         0x31, -2, false);
 			if (!dl) {
 				snprintf(g.error, sizeof(g.error),
 				         "no se pudo crear el hilo de descarga");
 				g.state = NATIVE_FAILED;
-				track_stream_free(&ts);
+				LightLock_Lock(&g.lock);
+				g.jobs = job->next;
+				g.job = NULL;
+				LightLock_Unlock(&g.lock);
+				track_stream_free(&job->ts);
+				free(job);
 				continue;
 			}
-			play_stream(&ts);
-			g.dl_stop = true;
-			threadJoin(dl, U64_MAX);
-			threadFree(dl);
-			if ((g.downloads_on || g.want_save) && ts.dl_done &&
-			    !ts.dl_failed)
-				save_download(&ts);
-			track_stream_free(&ts);
+			job->th = dl;
+			play_stream(&job->ts);
+			if (g.quit) {
+				/* Shutting down: nothing outlives the player. */
+				job->stop = true;
+				threadJoin(dl, U64_MAX);
+				threadFree(dl);
+				LightLock_Lock(&g.lock);
+				dl_job **p = &g.jobs;
+				while (*p && *p != job)
+					p = &(*p)->next;
+				if (*p)
+					*p = job->next;
+				g.job = NULL;
+				LightLock_Unlock(&g.lock);
+				track_stream_free(&job->ts);
+				free(job);
+			} else {
+				/* The download keeps filling in the background and saves
+				 * itself if it was armed -- the next track starts now,
+				 * not when this file lands. One background download at a
+				 * time: an older one is told to stop, its RAM is dear. */
+				LightLock_Lock(&g.lock);
+				for (dl_job *p = g.jobs; p; p = p->next)
+					if (p != job && p->detached && !p->ts.dl_done)
+						p->stop = true;
+				job->detached = true;
+				g.job = NULL;
+				LightLock_Unlock(&g.lock);
+			}
 			if (g.state == NATIVE_PLAYING)
 				g.state = NATIVE_IDLE;
 			continue;
