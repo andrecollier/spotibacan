@@ -242,17 +242,10 @@ static void draw_header(const screen_player_args *a)
 
 static void draw_centre(const screen_player_args *a)
 {
-	if (a->loading) {
-		/* A placeholder tile with the animated badge stands in for the
-		 * cover art the backend cannot fetch yet. */
-		const float tile = 50.0f;
-		const float x = 160.0f - tile / 2;
-		const float y = 58.0f;
-		C2D_DrawRectSolid(x, y, 0.0f, tile, tile, CLR_TILE);
-		ui_now_playing_badge(x, y, tile, true, a->animation_ms, a->accent);
-	}
-	/* Otherwise the middle belongs to the shelf: the top screen already
-	 * carries the track's name, artist and album. */
+	(void)a;
+	/* The middle belongs to the recents shelf: the top screen already
+	 * carries the track's name, artist, album and the loading state, so the
+	 * equalizer placeholder that used to stand here only fights the covers. */
 }
 
 static void draw_transport(const screen_player_args *a)
