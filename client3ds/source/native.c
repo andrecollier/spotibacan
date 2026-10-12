@@ -531,7 +531,10 @@ static void download_thread(void *arg)
 {
 	dl_job *job = arg;
 	track_stream_download(&job->ts, &job->stop);
-	if (job->save && job->ts.dl_done && !job->ts.dl_failed &&
+	/* Saving on the way out would hold HOME hostage behind an SD write
+	 * plus a cover fetch: quitting drops the save, the queue entry was
+	 * already consumed anyway. */
+	if (job->save && !g.quit && job->ts.dl_done && !job->ts.dl_failed &&
 	    !__sync_lock_test_and_set(&job->saved, 1))
 		save_download(&job->ts);
 	__sync_synchronize();

@@ -342,8 +342,8 @@ static u64 lib_retry_at = 0;   /* ms; when a failed view should refetch */
  * handshakes -- so going back to a list you just opened should not pay
  * them again. Entries live ten minutes; the Downloads shelf is never
  * cached, it is local and must reflect the card. LRU by age. */
-#define VIEW_CACHE_MAX 4
-#define VIEW_CACHE_TTL_MS (10 * 60 * 1000)
+#define VIEW_CACHE_MAX 6
+#define VIEW_CACHE_TTL_MS (20 * 60 * 1000)
 static struct {
 	native_view view;
 	char arg[64];
@@ -363,13 +363,19 @@ static int vcache_lookup(native_view view, const char *arg)
 		if (!vcache[i].at || vcache[i].view != view ||
 		    strcmp(vcache[i].arg, arg ? arg : "") != 0)
 			continue;
-		if (now - vcache[i].at > VIEW_CACHE_TTL_MS)
+		if (now - vcache[i].at > VIEW_CACHE_TTL_MS) {
+			native_log("VCACHE: expiro vista=%d arg=%s\n", (int)view,
+			           arg ? arg : "-");
 			return -1;
+		}
 		memcpy(nat_rows, vcache[i].rows,
 		       (size_t)vcache[i].count * sizeof(native_row));
 		lib.loading = false;   /* no spinner: the rows are already here */
+		native_log("VCACHE: hit vista=%d arg=%s (%d filas)\n", (int)view,
+		           arg ? arg : "-", vcache[i].count);
 		return vcache[i].count;
 	}
+	native_log("VCACHE: miss vista=%d arg=%s\n", (int)view, arg ? arg : "-");
 	return -1;
 }
 
@@ -395,6 +401,8 @@ static void vcache_store(native_view view, const char *arg, int count)
 	vcache[slot].at = osGetTime();
 	memcpy(vcache[slot].rows, nat_rows,
 	       (size_t)count * sizeof(native_row));
+	native_log("VCACHE: guardada vista=%d arg=%s (%d filas, slot %d)\n",
+	           (int)view, arg ? arg : "-", count, slot);
 }
 
 // Pulls one view from Spotify and caches the rows. The fetch is cached by
