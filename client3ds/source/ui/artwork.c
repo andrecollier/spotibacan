@@ -1,5 +1,6 @@
 #include "artwork.h"
 
+#include "cfg3ds.h"
 #include "http3ds.h"
 #include "stb_image.h"
 
@@ -52,6 +53,16 @@ bool artwork_fetch_decode(const char *url, int px, uint8_t *out_rgb565,
 	if (!url || !*url) {
 		snprintf(err, errlen, "no art url");
 		return false;
+	}
+
+	/* A cover saved beside a download lives on the SD: read it from there
+	 * instead of the network, which is the whole point of offline mode. */
+	if (strncmp(url, "file:", 5) == 0) {
+		char path[400];
+		cfg_dir(path, sizeof(path));
+		snprintf(path + strlen(path), sizeof(path) - strlen(path),
+		         "music/%s", url + 5);
+		return artwork_load_file(path, px, out_rgb565, err, errlen);
 	}
 
 	http_reply r;

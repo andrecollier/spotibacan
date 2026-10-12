@@ -2,6 +2,7 @@
 
 #include "ap3ds.h"
 #include "cfg3ds.h"
+#include "http3ds.h"
 #include "login5.h"
 #include "pair3ds.h"
 #include "spclient.h"
@@ -122,7 +123,7 @@ static struct {
 	char          title[128];
 	char          artist[128];
 	char          album[128];
-	char          art[80];
+	char          art[200];
 	char          profile_art[80];   /* the user's own avatar, for the idle hero */
 	char          error[192];
 	volatile unsigned frames_out;
@@ -345,6 +346,35 @@ static void save_download(const track_stream *ts)
 	saved_flag = true;
 	nlog("DL: guardada %s (%.1f MB)\n", path,
 	     (double)(ts->len - SPOTIFY_OGG_HEADER) / (1024.0 * 1024.0));
+
+	/* The cover goes beside the audio as <same name>.jpg, so the offline
+	 * shelf can show it without any network. A failure here only costs the
+	 * picture, never the download itself. */
+	if (ts->meta.art_large[0]) {
+		char jpg[520];
+		snprintf(jpg, sizeof(jpg), "%s", path);
+		char *dot = strrchr(jpg, '.');
+		if (dot)
+			strcpy(dot, ".jpg");
+		struct stat st;
+		if (stat(jpg, &st) != 0 || st.st_size == 0) {
+			http_reply r;
+			memset(&r, 0, sizeof(r));
+			if (http_get_url(ts->meta.art_large, 1024 * 1024, &r) == 0 &&
+			    (r.status == 200 || r.status == 206) && r.len > 0) {
+				FILE *jf = fopen(jpg, "wb");
+				if (jf) {
+					fwrite(r.body, 1, r.len, jf);
+					fclose(jf);
+					nlog("DL: caratula guardada %s\n", jpg);
+				}
+			} else {
+				nlog("DL: no se pudo bajar la caratula (%s)\n",
+				     r.err[0] ? r.err : "http");
+			}
+			http_reply_free(&r);
+		}
+	}
 }
 
 float native_position(void)
@@ -438,7 +468,30 @@ static void play_stream(track_stream *ts)
 	static s16 pcm[4096 * 2];
 	long pending = -1;            /* far seek waiting on the download */
 	unsigned pending_prev = 0;    /* where the stream was when it started */
+	unsigned long long ka = 0;    /* last AP keepalive check */
 	while (!g.quit && !g.want_stop && !g.want_new) {
+		/* Nobody else answers the access point while a song plays, and a
+		 * session that misses pings for minutes is dead by the next track:
+		 * that was the stuck "cargando" after a download, only visible when
+		 * the user moved on. A cheap poll every second keeps it alive and
+		 * marks it dead early, so the next fetch reconnects instead of
+		 * timing out. */
+		unsigned long long now = osGetTime();
+		if (g.ap && now - ka >= 1000) {
+			ka = now;
+			if (ap_wait(g.ap, 0) == 1) {
+				static uint8_t ka_buf[2048];
+				uint8_t cmd;
+				int kn = ap_recv(g.ap, &cmd, ka_buf, sizeof(ka_buf));
+				if (kn < 0) {
+					nlog("AP: sesion perdida durante la reproduccion\n");
+					ap_close(g.ap);
+					g.ap = NULL;
+				} else if (cmd == AP_PKT_PING) {
+					ap_handle_ping(g.ap, ka_buf, (size_t)kn);
+				}
+			}
+		}
 		long want = g.want_seek_frame;
 		if (want >= 0) {
 			g.want_seek_frame = -1;
@@ -566,6 +619,25 @@ static void play_local(const char *name)
 	g.state = NATIVE_PLAYING;
 	nlog("PLAY local %s\n", name);
 
+	/* The cover saved beside the audio doubles as the offline artwork: a
+	 * file: URL that artwork.c resolves on the SD instead of the CDN. */
+	{
+		char jpg[400];
+		snprintf(jpg, sizeof(jpg), "%s", name);
+		char *dot = strrchr(jpg, '.');
+		if (dot)
+			strcpy(dot, ".jpg");
+		char full[520];
+		cfg_dir(full, sizeof(full));
+		snprintf(full + strlen(full), sizeof(full) - strlen(full),
+		         "music/%s", jpg);
+		struct stat st;
+		if (stat(full, &st) == 0 && st.st_size > 0)
+			snprintf(g.art, sizeof(g.art), "file:%s", jpg);
+		else
+			g.art[0] = '\0';
+	}
+
 	static s16 pcm[4096 * 2];
 	while (!g.quit && !g.want_stop && !g.want_new) {
 		long want = g.want_seek_frame;
@@ -692,6 +764,23 @@ static void player_thread(void *arg)
 			char err[192];
 			int rc = track_stream_begin(g.sp_host, g.l5.access_token, g.ap,
 			                            uri, NULL, &ts, err, sizeof(err));
+			if (rc != 0 &&
+			    (strstr(err, "key request") || strstr(err, "audio key") ||
+			     strstr(err, "connection"))) {
+				/* Session-flavoured failure: the keepalive can still miss a
+				 * quietly dead link, so drop it, rebuild once, and give the
+				 * track one more chance before reporting anything. */
+				nlog("  fallo de sesion (%s), reconectando y reintentando\n",
+				     err);
+				if (g.ap) {
+					ap_close(g.ap);
+					g.ap = NULL;
+				}
+				if (ap_reconnect())
+					rc = track_stream_begin(g.sp_host, g.l5.access_token,
+					                        g.ap, uri, NULL, &ts, err,
+					                        sizeof(err));
+			}
 			if (rc != 0) {
 				snprintf(g.error, sizeof(g.error), "%s", err);
 				g.state = NATIVE_FAILED;
@@ -998,6 +1087,13 @@ static int fetch_downloads(native_row *rows, int max)
 		if (stat(path, &st) == 0)
 			snprintf(r->sub, sizeof(r->sub), "%.1f MB",
 			         (double)st.st_size / (1024.0 * 1024.0));
+		/* A saved <name>.jpg beside the .ogg is the row's thumbnail; the
+		 * file: scheme tells artwork.c to read it off the SD. */
+		char jpg[200];
+		snprintf(jpg, sizeof(jpg), "%.*s.jpg", (int)len - 4, e->d_name);
+		snprintf(path, sizeof(path), "%s/%s", dir, jpg);
+		if (stat(path, &st) == 0 && st.st_size > 0)
+			snprintf(r->art, sizeof(r->art), "file:%s", jpg);
 	}
 	closedir(d);
 	nlog("FETCH downloads -> %d\n", n);

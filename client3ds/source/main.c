@@ -536,9 +536,9 @@ static void like_toggle(const char *uri)
 // goes first -- it is what the user is looking at; the row thumbnails queue
 // behind it. Pixels land in staging buffers and the render thread uploads
 // them, because textures belong to the GPU context's thread.
-static volatile char hero_want[80];
+static volatile char hero_want[200];
 static volatile bool hero_new = false;
-static char hero_loaded[80] = "";
+static char hero_loaded[200] = "";
 
 static void art_thread(void *arg)
 {
@@ -628,14 +628,14 @@ static void art_thread(void *arg)
 				}
 				if (part[0]) {
 					profile_wait_s = 30;
-					snprintf((char *)hero_want, 80, "%s", part);
+					snprintf((char *)hero_want, sizeof(hero_want), "%s", part);
 					__sync_synchronize();
 					hero_new = true;
 				}
 			}
 		}
 		if (hero_new) {
-			char url[80];
+			char url[200];
 			snprintf(url, sizeof(url), "%s", (const char *)hero_want);
 			hero_new = false;
 			char err[128] = "";
@@ -1983,7 +1983,7 @@ int main(int argc, char **argv)
 				// the placeholder shows until it lands.
 				const char *art = native_now_art();
 				if (!hero_new && strcmp(art, hero_loaded) != 0) {
-					snprintf((char *)hero_want, 80, "%s", art);
+					snprintf((char *)hero_want, sizeof(hero_want), "%s", art);
 					__sync_synchronize();
 					hero_new = true;
 					art_present = false;

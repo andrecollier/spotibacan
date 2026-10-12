@@ -13,7 +13,7 @@
 enum { S_EMPTY, S_WANT, S_LOADING, S_PENDING, S_READY, S_FAILED };
 
 typedef struct {
-	char url[80];
+	char url[200];
 	volatile u8 state;
 	u32 last_used;      /* frame tick, for LRU eviction */
 	u8  pixels[THUMB_PX * THUMB_PX * 2];

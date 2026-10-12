@@ -28,7 +28,7 @@ typedef struct {
 	char label[64];             /* what the row shows */
 	char sub[40];               /* artist, or the track count */
 	char uri[192];              /* spotify:track:... or file:<name>.ogg */
-	char art[80];               /* 64px cover URL, empty when there is none */
+	char art[200];               /* 64px cover URL, empty when there is none */
 	bool is_playlist;
 } native_row;
 
