@@ -829,14 +829,12 @@ int native_fetch(native_view view, const char *arg, native_row *rows, int max,
 		int n = sp_radio(g.sp_host, token, arg, max, radio, max, err, errlen);
 		if (n < 0)
 			return -1;
-		/* radio-apollo already carries the titles, so no metadata trip. */
-		for (int i = 0; i < n; i++) {
-			snprintf(rows[i].label, sizeof(rows[i].label), "%s", radio[i].name);
-			snprintf(rows[i].sub, sizeof(rows[i].sub), "%s", radio[i].artist);
-			snprintf(rows[i].uri, sizeof(rows[i].uri), "%s", radio[i].uri);
-			rows[i].is_playlist = false;
-		}
-		return n;
+		/* radio-apollo carries the titles but no cover URLs, and the list
+		 * rows draw their thumbnails from art: pay the one batch trip like
+		 * every other track view, or the rows stay blank. */
+		for (int i = 0; i < n; i++)
+			snprintf(uris[i], sizeof(uris[i]), "%s", radio[i].uri);
+		return name_tracks(uris, n, rows, max, err, errlen);
 	}
 	}
 	snprintf(err, errlen, "unknown view");
