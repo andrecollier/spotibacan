@@ -87,6 +87,7 @@ typedef enum {
 	S_QUEUE,
 	S_QUEUE_EMPTY,
 	S_QUEUE_DLING,
+	S_UPNEXT,
 	S_COUNT
 } str_id;
 

@@ -162,6 +162,8 @@ static char now_arg[64] = "";
  * working while the user browses other lists. */
 static char play_uris[NATIVE_ROWS][192];
 static char play_art[NATIVE_ROWS][200];
+static char play_labels[NATIVE_ROWS][64];
+static char play_subs[NATIVE_ROWS][40];
 static int play_count = 0;
 static int play_idx = -1;
 
@@ -869,6 +871,36 @@ static void draw_top(const Skin *sk, bool buffering, bool muted, float par)
 		text_at(b, bx + bw, by + 8, 0.42f, sk->dim, C2D_AlignRight);
 	}
 
+	/* Up next: the strip under the art, free below the hinge line. Only
+	 * shown when the next track is actually predictable -- shuffle picks at
+	 * skip time and repeat-one replays this one. */
+	if (!shuffle_on && repeat_mode != 2 && play_idx >= 0) {
+		int n1 = play_idx + 1;
+		if (n1 >= play_count)
+			n1 = (repeat_mode == 1 && play_count > 0) ? 0 : -1;
+		if (n1 >= 0) {
+			float uy = 208.0f;
+			ui_text_tracked(text_buf, tr(S_UPNEXT),
+			                AX + par * 1.2f, ui_baseline(uy, TY_MICRO),
+			                TY_MICRO, 1.0f, sk->meter);
+			char line[120];
+			snprintf(line, sizeof(line), "%s - %s", play_labels[n1],
+			         play_subs[n1]);
+			text_fit(line, AX + 86.0f + par * 1.2f, uy - 6.0f, 0.44f,
+			         sk->dim, TOP_W - AX - 86.0f - 12.0f);
+			int n2 = n1 + 1;
+			if (n2 >= play_count)
+				n2 = repeat_mode == 1 ? 0 : -1;
+			if (n2 >= 0 && n2 != n1) {
+				snprintf(line, sizeof(line), "%s - %s",
+				         play_labels[n2], play_subs[n2]);
+				text_fit(line, AX + 86.0f + par * 1.0f, uy + 8.0f,
+				         0.40f, sk->meter,
+				         TOP_W - AX - 86.0f - 12.0f);
+			}
+		}
+	}
+
 	// Last, above whatever the top screen shows: it only reports, and the
 	// bottom screen keeps its controls uncovered.
 	volume_overlay_args va = { text_buf, volume, vol_overlay };
@@ -1496,6 +1528,9 @@ static void play_index(int idx)
 	for (int i = 0; i < nat_count; i++) {
 		snprintf(play_uris[i], sizeof(play_uris[i]), "%s", nat_rows[i].uri);
 		snprintf(play_art[i], sizeof(play_art[i]), "%s", nat_rows[i].art);
+		snprintf(play_labels[i], sizeof(play_labels[i]), "%s",
+		         nat_rows[i].label);
+		snprintf(play_subs[i], sizeof(play_subs[i]), "%s", nat_rows[i].sub);
 	}
 	play_count = nat_count;
 	play_idx = idx;

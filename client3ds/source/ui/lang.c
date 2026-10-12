@@ -84,6 +84,7 @@ static const char *const s_strings[LANG_COUNT][S_COUNT] = {
 		[S_QUEUE]             = "Cola de descargas",
 		[S_QUEUE_EMPTY]       = "La cola esta vacia",
 		[S_QUEUE_DLING]       = "Descargando",
+		[S_UPNEXT]            = "A continuacion",
 	},
 	[LANG_EN] = {
 		[S_NOTHING_PLAYING]   = "Nothing playing",
@@ -164,6 +165,7 @@ static const char *const s_strings[LANG_COUNT][S_COUNT] = {
 		[S_QUEUE]             = "Download queue",
 		[S_QUEUE_EMPTY]       = "The queue is empty",
 		[S_QUEUE_DLING]       = "Downloading",
+		[S_UPNEXT]            = "Up next",
 	},
 };
 
