@@ -30,9 +30,11 @@ URL = f"https://github.com/Mbed-TLS/mbedtls/releases/download/{NAME}/{NAME}.tar.
 # The Vorbis decoder: one public-domain file, pinned the same way. Spotify
 # streams Ogg Vorbis, and the ARM11 has to decode it in software -- there is no
 # second processor to hand it to, which is the whole reason this port is easier
-# than the PSP one.
+# than the PSP one. The vendored file is patched on top of that commit: the
+# push-mode/streaming support (decode-what-has-downloaded) is ours, so the
+# pin below tracks the patched file, not pristine upstream.
 STB_VORBIS_URL = "https://raw.githubusercontent.com/nothings/stb/master/stb_vorbis.c"
-STB_VORBIS_SHA256 = "4c7cb2ff1f7011e9d67950446b7eb9ca044f2e464d76bfbb0b84dd2e23e65636"
+STB_VORBIS_SHA256 = "01e8e4228baf7a1a3d025b260296b36d57fa6111ccbe5d05ba05a169d4e412ba"
 
 # The JPEG decoder, for album covers: same family, same pinning rationale.
 # stb_image.h ships declarations and implementation in one header; the

@@ -550,7 +550,9 @@ static void player_thread(void *arg)
 			/* The download runs beside the decoder: `ts` lives on this
 			 * frame's stack and the thread is joined before it goes away. */
 			g.dl_stop = false;
-			Thread dl = threadCreate(download_thread, &ts, 48 * 1024,
+			/* The fetch below runs a full TLS handshake (cert chain +
+			 * RSA bignum) on this stack; 48 KB was not always enough. */
+			Thread dl = threadCreate(download_thread, &ts, 96 * 1024,
 			                         0x31, -2, false);
 			if (!dl) {
 				snprintf(g.error, sizeof(g.error),
@@ -696,7 +698,9 @@ int native_init(const native_sink *sink, void (*progress)(const char *step),
 	g.want_seek_frame = -1;
 	g.state = NATIVE_IDLE;
 	g.ready = true;
-	g.player = threadCreate(player_thread, NULL, 64 * 1024, 0x30, -2, false);
+	/* track_stream_begin() handshakes TLS on this thread; 64 KB overflowed
+	 * on unlucky cert chains (two crash dumps died mid-handshake). */
+	g.player = threadCreate(player_thread, NULL, 128 * 1024, 0x30, -2, false);
 	if (!g.player) {
 		snprintf(err, errlen, "no se pudo crear el hilo del reproductor");
 		g.ready = false;

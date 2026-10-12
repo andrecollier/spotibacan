@@ -87,6 +87,12 @@
 #define MBEDTLS_SSL_IN_CONTENT_LEN  16384
 #define MBEDTLS_SSL_OUT_CONTENT_LEN  4096
 
+/* Sliding window for modular exponentiation. The default (6) keeps 64
+ * MPI pointers plus big temporaries live on the stack during the RSA
+ * verify of the handshake; on these thread stacks that was the overflow
+ * that killed the fetch. 2 trades a little CPU for a much flatter stack. */
+#define MBEDTLS_MPI_WINDOW_SIZE     2
+
 /* --------------------------------------------------------- diagnostics only */
 /* Both are compiled out of the shipping build; the TLS probe needs them. */
 #ifdef PROBE_BUILD

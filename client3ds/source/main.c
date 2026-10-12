@@ -1663,9 +1663,12 @@ int main(int argc, char **argv)
 
 	// Three threads beside the render loop: one services library requests,
 	// one moves the ring into NDSP, one fetches and decodes cover art.
-	Thread lister = threadCreate(native_library_thread, NULL, 32 * 1024, 0x3F, -2, false);
+	// The lister and art threads run TLS handshakes on these stacks, which
+	// need real headroom (chunked metadata names a 500-song list as a
+	// dozen sequential handshakes); the audio thread only copies bytes.
+	Thread lister = threadCreate(native_library_thread, NULL, 96 * 1024, 0x3F, -2, false);
 	Thread snd = threadCreate(audio_thread, NULL, 16 * 1024, 0x18, -2, false);
-	Thread art = threadCreate(art_thread, NULL, 48 * 1024, 0x32, -2, false);
+	Thread art = threadCreate(art_thread, NULL, 96 * 1024, 0x32, -2, false);
 	buffering = false;
 	lib.open = true;
 	lib_reload = true;
