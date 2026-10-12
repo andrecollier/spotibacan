@@ -145,6 +145,29 @@ def main():
     if app == "audio3ds":
         print(f"Copy dist/3ds/ to the SD root, then edit "
               f"SD:/3ds/{app}/server.txt with your bridge's host:port")
+        build_cia(ROOT, elf)
+
+
+def build_cia(root: Path, elf: Path):
+    """Assemble the FBI-installable CIA when the home-menu tools are around.
+    Skipped silently otherwise: the .3dsx remains the primary artifact."""
+    hm = Path("/Users/emiliorobles/melee-3ds/native-3ds/.toolchain/home-menu")
+    makerom = hm / "makerom-bin/makerom"
+    bannertool = hm / "bannertool-bin/mac-x86_64/bannertool"
+    rsf = root / "assets/spotibacan.rsf"
+    if not (makerom.exists() and bannertool.exists() and rsf.exists()):
+        return
+    subprocess.run([str(bannertool), "makebanner", "-i",
+                    str(root / "assets/banner.png"), "-a",
+                    str(root / "assets/silent.wav"), "-o",
+                    str(root / "build/banner.bnr")], check=True)
+    cia = root / "dist/SpotiBacan.cia"
+    subprocess.run([str(makerom), "-f", "cia", "-o", str(cia), "-elf",
+                    str(elf), "-rsf", str(rsf), "-target", "t", "-exefslogo",
+                    "-icon", str(root / "assets/icon.smdh"), "-banner",
+                    str(root / "build/banner.bnr"),
+                    "-major", "0", "-minor", "1", "-micro", "0"], check=True)
+    print(f"Built {cia}  ({cia.stat().st_size:,} bytes)  - install with FBI")
 
 
 if __name__ == "__main__":

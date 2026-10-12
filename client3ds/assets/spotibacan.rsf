@@ -1,0 +1,155 @@
+# SpotiBacan CIA spec for makerom.
+# Base: an RSF proven on real hardware with NDSP audio. The two things that
+# kill naive audio CIAs are here: the DSP/LCD IO register mapping (without
+# it ndsp data-aborts at launch) and dsp::DSP as the audio service.
+BasicInfo:
+  Title                   : SpotiBacan
+  CompanyCode             : "00"
+  ProductCode             : CTR-P-SBAC
+  Logo                    : Homebrew
+
+TitleInfo:
+  Category                : Application
+  UniqueId                : 0xFBAC1
+
+Option:
+  UseOnSD                 : true
+  FreeProductCode         : true
+  MediaFootPadding        : false
+  EnableCrypt             : false
+  EnableCompress          : true
+
+AccessControlInfo:
+  CoreVersion             : 2
+  DescVersion             : 2
+  ReleaseKernelMajor      : "02"
+  ReleaseKernelMinor      : "44"
+
+  MemoryType              : Application
+  SystemMode              : 64MB
+  IdealProcessor          : 0
+  AffinityMask            : 1
+  Priority                : 16
+  MaxCpu                  : 0x9E
+  HandleTableSize         : 0x200
+  DisableDebug            : false
+  EnableForceDebug        : false
+  CanWriteSharedPage      : true
+  CanUsePrivilegedPriority : false
+  CanUseNonAlphabetAndNumber : true
+  PermitMainFunctionArgument : true
+  CanShareDeviceMemory    : true
+  RunnableOnSleep         : false
+  SpecialMemoryArrange    : true
+
+  # New 3DS bonus, harmless on Old: faster clock + L2, legacy memory layout.
+  SystemModeExt           : Legacy
+  CpuSpeed                : 804MHz
+  EnableL2Cache           : true
+  CanAccessCore2          : true
+
+  # DSP + LCD hardware registers (ndsp writes DSP semaphore regs here) and
+  # the VRAM window citro3d renders into.
+  IORegisterMapping:
+   - 1ff50000-1ff57fff
+   - 1ff70000-1ff77fff
+  MemoryMapping:
+   - 1f000000-1f5fffff:r
+
+  FileSystemAccess:
+   - DirectSdmc
+   - DirectSdmcWrite
+
+  ServiceAccessControl:
+   - APT:U      # lifecycle, sleep/lid control
+   - ac:u       # WiFi status
+   - cfg:u      # system settings
+   - dsp::DSP   # audio firmware loader
+   - fs:USER    # SD card (config, log)
+   - gsp::Gpu   # graphics
+   - hid:USER   # buttons and touch
+   - mcu::HWC   # the hardware volume slider
+   - ndm:u      # keep WiFi up with the lid closed
+   - ptm:u      # battery/AC state
+   - soc:U      # sockets
+
+  SystemCallAccess:
+    ControlMemory: 1
+    QueryMemory: 2
+    ExitProcess: 3
+    GetProcessAffinityMask: 4
+    SetProcessAffinityMask: 5
+    GetProcessIdealProcessor: 6
+    SetProcessIdealProcessor: 7
+    CreateThread: 8
+    ExitThread: 9
+    SleepThread: 10
+    GetThreadPriority: 11
+    SetThreadPriority: 12
+    GetThreadAffinityMask: 13
+    SetThreadAffinityMask: 14
+    GetThreadIdealProcessor: 15
+    SetThreadIdealProcessor: 16
+    GetCurrentProcessorNumber: 17
+    Run: 18
+    CreateMutex: 19
+    ReleaseMutex: 20
+    CreateSemaphore: 21
+    ReleaseSemaphore: 22
+    CreateEvent: 23
+    SignalEvent: 24
+    ClearEvent: 25
+    CreateTimer: 26
+    SetTimer: 27
+    CancelTimer: 28
+    ClearTimer: 29
+    CreateMemoryBlock: 30
+    MapMemoryBlock: 31
+    UnmapMemoryBlock: 32
+    CreateAddressArbiter: 33
+    ArbitrateAddress: 34
+    CloseHandle: 35
+    WaitSynchronization1: 36
+    WaitSynchronizationN: 37
+    SignalAndWait: 38
+    DuplicateHandle: 39
+    GetSystemTick: 40
+    GetHandleInfo: 41
+    GetSystemInfo: 42
+    GetProcessInfo: 43
+    GetThreadInfo: 44
+    ConnectToPort: 45
+    SendSyncRequest1: 46
+    SendSyncRequest2: 47
+    SendSyncRequest3: 48
+    SendSyncRequest4: 49
+    SendSyncRequest: 50
+    OpenProcess: 51
+    OpenThread: 52
+    GetProcessId: 53
+    GetProcessIdOfThread: 54
+    GetThreadId: 55
+    GetResourceLimit: 56
+    GetResourceLimitLimitValues: 57
+    GetResourceLimitCurrentValues: 58
+    GetThreadContext: 59
+    Break: 60
+    OutputDebugString: 61
+
+SystemControlInfo:
+  SaveDataSize: 0KB
+  RemasterVersion: 0
+  StackSize: 0x40000
+
+  # System modules whose services this app talks to. (fs:USER is provided by
+  # the always-running fs module, so it is not listed here.)
+  Dependency:
+    ac: 0x0004013000002402L
+    cfg: 0x0004013000001702L
+    dsp: 0x0004013000001a02L
+    gsp: 0x0004013000001C02L
+    hid: 0x0004013000001D02L
+    mcu: 0x0004013000001F02L
+    ndm: 0x0004013000002b02L
+    ptm: 0x0004013000002202L
+    socket: 0x0004013000002e02L
