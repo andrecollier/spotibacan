@@ -733,28 +733,48 @@ static int name_tracks(char uris[][64], int n, native_row *rows, int max,
 	if (n <= 0)
 		return 0;
 
-	static const char *ptrs[NATIVE_ROWS];
-	static sp_track meta[NATIVE_ROWS];
-	for (int i = 0; i < n; i++)
-		ptrs[i] = uris[i];
-
-	int named = sp_track_metadata_batch(g.sp_host, g.l5.access_token, ptrs, n,
-	                                    meta, err, errlen);
-	nlog("  -> %d named%s%s\n", named, named < 0 ? ": " : "",
-	     named < 0 ? err : "");
-	if (named < 0)
+	/* The metadata service happily answers ~50 tracks per call; a 500-song
+	 * liked list in one shot risks a rejected or truncated reply, so chunk
+	 * and accumulate. A failed chunk is skipped, not fatal: the rows stay
+	 * blank-labelled rather than losing the whole list. */
+	static const char *ptrs[50];
+	static sp_track meta[50];
+	int done = 0;
+	for (int base = 0; base < n; base += 50) {
+		int chunk = n - base > 50 ? 50 : n - base;
+		for (int i = 0; i < chunk; i++)
+			ptrs[i] = uris[base + i];
+		int named = sp_track_metadata_batch(g.sp_host, g.l5.access_token,
+		                                    ptrs, chunk, meta, err, errlen);
+		nlog("  chunk %d..%d -> %d named%s%s\n", base, base + chunk - 1,
+		     named, named < 0 ? ": " : "", named < 0 ? err : "");
+		if (named < 0)
+			continue;
+		for (int i = 0; i < named; i++) {
+			native_row *r = &rows[base + i];
+			snprintf(r->label, sizeof(r->label), "%s",
+			         meta[i].name[0] ? meta[i].name : "(sin nombre)");
+			snprintf(r->sub, sizeof(r->sub), "%s", meta[i].artist);
+			snprintf(r->uri, sizeof(r->uri), "%s",
+			         meta[i].uri[0] ? meta[i].uri : uris[base + i]);
+			snprintf(r->art, sizeof(r->art), "%s", meta[i].art_small);
+			r->is_playlist = false;
+		}
+		if (named > done - base)
+			done = base + named;
+	}
+	if (done <= 0)
 		return -1;
-
-	for (int i = 0; i < named; i++) {
-		snprintf(rows[i].label, sizeof(rows[i].label), "%s",
-		         meta[i].name[0] ? meta[i].name : "(sin nombre)");
-		snprintf(rows[i].sub, sizeof(rows[i].sub), "%s", meta[i].artist);
-		snprintf(rows[i].uri, sizeof(rows[i].uri), "%s",
-		         meta[i].uri[0] ? meta[i].uri : uris[i]);
-		snprintf(rows[i].art, sizeof(rows[i].art), "%s", meta[i].art_small);
+	/* Rows past a partially-failed chunk still need their uri so they can
+	 * play; the label falls back to a placeholder. */
+	for (int i = 0; i < n; i++) {
+		if (rows[i].uri[0])
+			continue;
+		snprintf(rows[i].uri, sizeof(rows[i].uri), "%s", uris[i]);
+		snprintf(rows[i].label, sizeof(rows[i].label), "(sin nombre)");
 		rows[i].is_playlist = false;
 	}
-	return named;
+	return n;
 }
 
 int native_fetch(native_view view, const char *arg, native_row *rows, int max,

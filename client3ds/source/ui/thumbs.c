@@ -49,22 +49,34 @@ const C2D_Image *thumbs_get(const char *url)
 	if (!url || !*url)
 		return NULL;
 
-	int empty = -1, lru = -1;
+	int empty = -1, failed = -1, lru = -1;
 	for (int i = 0; i < THUMB_SLOTS; i++) {
 		slot *s = &slots[i];
 		if (s->state != S_EMPTY && strcmp(s->url, url) == 0) {
 			s->last_used = tick;
+			/* A failed fetch gets another chance when it scrolls back
+			 * into view instead of sitting as a blank square. */
+			if (s->state == S_FAILED) {
+				__sync_synchronize();
+				s->state = S_WANT;
+			}
 			return s->state == S_READY ? &s->img : NULL;
 		}
-		if (s->state == S_EMPTY || s->state == S_FAILED)
+		if (s->state == S_EMPTY)
 			empty = i;
+		else if (s->state == S_FAILED &&
+		         (failed < 0 || s->last_used < slots[failed].last_used))
+			failed = i;
 		else if (s->state == S_READY &&
 		         (lru < 0 || s->last_used < slots[lru].last_used))
 			lru = i;
 	}
 
-	/* A new url takes an empty slot first, then the coldest ready one. */
-	int use = empty >= 0 ? empty : lru;
+	/* A new url takes an empty slot first, then a dead one, and only then
+	 * evicts the coldest ready slot: on a fast fling the same covers ping
+	 * back into view, and refetching what was already decoded is what made
+	 * the list flicker. */
+	int use = empty >= 0 ? empty : (failed >= 0 ? failed : lru);
 	if (use < 0)
 		return NULL;
 	slot *s = &slots[use];

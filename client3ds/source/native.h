@@ -13,7 +13,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-#define NATIVE_ROWS 64          /* one page the UI pages through */
+#define NATIVE_ROWS 512         /* a whole list: liked songs easily pass 300 */
 
 typedef enum {
 	NATIVE_PLAYLISTS,           /* the account's playlist folder */

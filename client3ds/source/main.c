@@ -660,10 +660,13 @@ static void art_thread(void *arg)
 			            rc == LYR_NONE ? LYR_ST_NONE : LYR_ST_ERR;
 			continue;
 		}
-		if (thumbs_work_pending()) {
+		/* Drain a few thumbnails per cycle: one fetch per pass could not
+		 * keep up with a fast fling, which read as flicker. */
+		int drain;
+		for (drain = 0; drain < 4 && thumbs_work_pending(); drain++)
 			thumbs_work_one();
+		if (drain)
 			continue;
-		}
 		svcSleepThread(20000000LL);   // 20 ms
 	}
 }
@@ -1927,10 +1930,10 @@ int main(int argc, char **argv)
 		if (lib.open) {
 			if (down & KEY_DUP && lib.sel > 0) lib.sel--;
 			if (down & KEY_DDOWN && lib.sel + 1 < lib.total) lib.sel++;
-			if (down & KEY_L) lib.sel = lib.sel >= 5 ? lib.sel - 5 : 0;
+			if (down & KEY_L) lib.sel = lib.sel >= 25 ? lib.sel - 25 : 0;
 			if ((down & KEY_R) && lib.total)
-				lib.sel = lib.sel + 5 < lib.total ? lib.sel + 5
-				                                  : lib.total - 1;
+				lib.sel = lib.sel + 25 < lib.total ? lib.sel + 25
+				                                   : lib.total - 1;
 
 			// Keep the d-pad selection inside the window, but only when it
 			// just moved: applied unconditionally this clamp drags the

@@ -15,7 +15,7 @@
  * 48px slot texture never actually allocated, and the "loaded" thumbnail
  * drew as an empty square. */
 #define THUMB_PX    64
-#define THUMB_SLOTS 16
+#define THUMB_SLOTS 48	/* fast flings used to evict warm slots at 16 */
 
 /* Allocates the slot textures. Call once on the render thread, after C2D. */
 void thumbs_init(void);
