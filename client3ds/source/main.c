@@ -82,6 +82,12 @@ static char nat_loaded_arg[64] = "\x01";
 static touch_state g_touch;
 static touch_builder g_tb;
 
+// START asks before killing the music: an accidental press (a palm, a
+// pocket) used to close the app mid-track with no way back.
+static bool exit_confirm = false;
+#define EXIT_BTN_QUIT   0x7001
+#define EXIT_BTN_CANCEL 0x7002
+
 // File scope because both the input loop and the drawers consult them.
 static bool muted = false;
 static bool paused = false;
@@ -252,6 +258,8 @@ static void audio_thread(void *arg)
 	}
 }
 
+static u64 lib_retry_at = 0;   /* ms; when a failed view should refetch */
+
 // Pulls one view from Spotify and caches the rows. The fetch is cached by
 // view and argument: scrolling must not cost a round trip, because on this
 // console round trips are the expensive part.
@@ -263,12 +271,23 @@ static void library_fetch(void)
 
 	if (!same) {
 		lib.loading = true;
+		lib_retry_at = 0;
 		char err[160] = "";
 		int n = native_fetch(nat_view, arg, nat_rows, NATIVE_ROWS,
 		                     err, sizeof(err));
 		if (n < 0) {
 			nat_count = 0;
 			snprintf(nat_status, sizeof(nat_status), "%s", err);
+			/* Mark the failed view as loaded anyway: leaving the mismatch
+			 * against nat_loaded_view keeps the screen on "Cargando"
+			 * forever and the error is never shown. The status line says
+			 * what happened, and the retry gives a dropped session ten
+			 * seconds to come back before trying again. */
+			nat_loaded_view = nat_view;
+			snprintf(nat_loaded_arg, sizeof(nat_loaded_arg), "%s",
+			         arg ? arg : "");
+			lib_retry_at = osGetTime() + 10000;
+			native_log("LISTA: fallo el fetch de la vista: %s\n", err);
 		} else {
 			nat_count = n;
 			nat_status[0] = '\0';
@@ -294,6 +313,13 @@ static void native_library_thread(void *arg)
 		if (lib_reload) {
 			lib_reload = false;
 			library_fetch();
+		} else if (lib_retry_at && osGetTime() >= lib_retry_at) {
+			lib_retry_at = 0;
+			/* The failed view marked itself loaded so its error could show,
+			 * so a plain reload would be a no-op; invalidate the cache tag
+			 * to force the refetch. */
+			nat_loaded_view = (native_view)-1;
+			lib_reload = true;
 		}
 		svcSleepThread(30000000LL);   // 30 ms
 	}
@@ -579,6 +605,47 @@ static void clock_text(char *out, size_t n, float secs)
 	snprintf(out, n, "%d:%02d", t / 60, t % 60);
 }
 
+// The exit confirmation: a small modal over the bottom view. Rows draw up to
+// z=0.1 and the list header at 0.5, so the panel lives at 0.6 and its type
+// at 0.7. It also takes over the touch map wholesale, so the view below
+// cannot answer taps meant for the dialog.
+static void draw_exit_dialog(const Skin *sk)
+{
+	const u32 dim   = C2D_Color32(0x00, 0x00, 0x00, 0xA8);
+	const u32 bord  = C2D_Color32(0x38, 0x38, 0x38, 0xFF);
+	const u32 panel = C2D_Color32(0x1B, 0x1B, 0x1B, 0xFF);
+	const u32 grey  = C2D_Color32(0x35, 0x35, 0x35, 0xFF);
+
+	C2D_DrawRectSolid(0.0f, 0.0f, 0.6f, BOT_W, SCR_H, dim);
+	const float px = 30.0f, py = 76.0f, pw = 260.0f, ph = 88.0f;
+	C2D_DrawRectSolid(px, py, 0.6f, pw, ph, bord);
+	C2D_DrawRectSolid(px + 1.0f, py + 1.0f, 0.6f, pw - 2.0f, ph - 2.0f,
+	                  panel);
+
+	ui_depth(0.7f);
+	ui_text(text_buf, "Cerrar Spotify?", px + 16.0f,
+	        ui_baseline(py + 12.0f, TY_ROW_NAME), TY_ROW_NAME, pw - 32.0f,
+	        sk->text);
+
+	const float bw = 108.0f, bh = 28.0f, by = py + ph - 12.0f - bh;
+	const char *cancel = "Cancelar", *quit = "Salir";
+	const float cw = ui_text_width(text_buf, cancel, TY_ROW_NAME);
+	const float qw = ui_text_width(text_buf, quit, TY_ROW_NAME);
+	const float qx = px + pw - 16.0f - bw;
+
+	C2D_DrawRectSolid(px + 16.0f, by, 0.6f, bw, bh, grey);
+	ui_text(text_buf, cancel, px + 16.0f + (bw - cw) / 2.0f,
+	        ui_baseline(by + 8.0f, TY_ROW_NAME), TY_ROW_NAME, cw, sk->text);
+	C2D_DrawRectSolid(qx, by, 0.6f, bw, bh, sk->accent);
+	ui_text(text_buf, quit, qx + (bw - qw) / 2.0f,
+	        ui_baseline(by + 8.0f, TY_ROW_NAME), TY_ROW_NAME, qw,
+	        sk->on_accent);
+	ui_depth(0.0f);
+
+	tb_add(&g_tb, px + 16.0f, by, bw, bh, EXIT_BTN_CANCEL);
+	tb_add(&g_tb, qx, by, bw, bh, EXIT_BTN_QUIT);
+}
+
 
 static void draw_bottom(const Skin *sk)
 {
@@ -634,6 +701,13 @@ static void draw_bottom(const Skin *sk)
 		screen_player_draw(&a);
 	}
 	text_at(BUILD_STAMP, BOT_W - 6, SCR_H - 14, 0.40f, sk->meter, C2D_AlignRight);
+
+	if (exit_confirm) {
+		// Modal: it replaces the touch map so the view below cannot answer
+		// taps meant for the dialog.
+		tb_reset(&g_tb);
+		draw_exit_dialog(sk);
+	}
 }
 
 // Starts a track from the cached rows and remembers where it sits, which is
@@ -922,12 +996,27 @@ int main(int argc, char **argv)
 	while (aptMainLoop()) {
 		hidScanInput();
 		u32 down = hidKeysDown();
-		if (down & KEY_START) break;
 		bool open_search = false;
 
 		// The rects belong to the frame just drawn, so this runs before any
 		// of them are rebuilt below.
 		touch_update(&g_touch, g_tb.rects, g_tb.n);
+
+		// START raises a confirmation instead of killing the music outright,
+		// and the modal owns every key and touch until it is answered.
+		if (exit_confirm) {
+			if (g_touch.clicked == EXIT_BTN_QUIT ||
+			    (down & (KEY_A | KEY_START)))
+				break;
+			if (g_touch.clicked == EXIT_BTN_CANCEL || (down & KEY_B))
+				exit_confirm = false;
+			down = 0;
+			g_touch.clicked = -1;
+			g_touch.long_pressed = -1;
+		} else if (down & KEY_START) {
+			exit_confirm = true;
+			down = 0;
+		}
 
 		// A scrub is a drag, not a tap: the position follows the finger while
 		// held (a preview only -- the decoder keeps playing), and the seek

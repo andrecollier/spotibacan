@@ -21,13 +21,8 @@
  * the probes use, and the same reason. */
 static FILE *logf;
 
-static void nlog(const char *fmt, ...)
+static void write_log_line(const char *line)
 {
-	char line[320];
-	va_list ap;
-	va_start(ap, fmt);
-	vsnprintf(line, sizeof(line), fmt, ap);
-	va_end(ap);
 	fputs(line, stderr);
 	if (!logf) {
 		/* Beside the .3dsx, like the token and the device id: everything the
@@ -47,6 +42,28 @@ static void nlog(const char *fmt, ...)
 		fputs(line, logf);
 		fflush(logf);
 	}
+}
+
+static void nlog(const char *fmt, ...)
+{
+	char line[320];
+	va_list ap;
+	va_start(ap, fmt);
+	vsnprintf(line, sizeof(line), fmt, ap);
+	va_end(ap);
+	write_log_line(line);
+}
+
+/* The UI layer logs through here: the file lives in native.c and stays the
+ * single place to read after a bug report. */
+void native_log(const char *fmt, ...)
+{
+	char line[320];
+	va_list ap;
+	va_start(ap, fmt);
+	vsnprintf(line, sizeof(line), fmt, ap);
+	va_end(ap);
+	write_log_line(line);
 }
 
 static const char *view_name(native_view v)

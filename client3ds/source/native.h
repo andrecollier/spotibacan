@@ -100,6 +100,9 @@ void         native_profile_art_refresh(void);
 /* The URI last asked for; empty before the first play. */
 const char  *native_now_uri(void);
 const char  *native_last_error(void);
+/* Appends a line to the same native.log the backend writes; for UI-side
+ * failures that would otherwise leave no trace (a stuck view, a dead tap). */
+void         native_log(const char *fmt, ...);
 /* Seconds of audio handed to the ring, and the track's length. */
 float        native_position(void);
 float        native_duration(void);
