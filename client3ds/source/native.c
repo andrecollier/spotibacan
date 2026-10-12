@@ -98,6 +98,9 @@ static const char *view_name(native_view v)
 typedef struct dl_job {
 	track_stream  ts;
 	Thread        th;
+	char          uri[64];   /* the requested track: meta.uri is not
+	                          * filled by single-track metadata, so the
+	                          * queue could not re-ask for it otherwise */
 	volatile bool stop;
 	volatile bool save;      /* write the .ogg (+ cover) when complete */
 	volatile bool saved;     /* CAS guard: exactly one save per job */
@@ -911,6 +914,7 @@ static void player_thread(void *arg)
 				g.state = NATIVE_FAILED;
 				continue;
 			}
+			snprintf(job->uri, sizeof(job->uri), "%s", uri);
 			char err[192];
 			int rc = track_stream_begin(g.sp_host, g.l5.access_token, g.ap,
 			                            uri, NULL, &job->ts, err, sizeof(err));
@@ -999,7 +1003,7 @@ static void player_thread(void *arg)
 						p->stop = true;
 						if (p->save && !p->saved && !q_uri[0]) {
 							snprintf(q_uri, sizeof(q_uri), "%s",
-							         p->ts.meta.uri);
+							         p->uri);
 							snprintf(q_artist, sizeof(q_artist), "%s",
 							         p->ts.meta.artist);
 							snprintf(q_title, sizeof(q_title), "%s",
@@ -1076,6 +1080,8 @@ static void player_thread(void *arg)
 				dlq_active_pct = 0;
 
 				dl_job *job = calloc(1, sizeof(*job));
+				if (job)
+					snprintf(job->uri, sizeof(job->uri), "%s", e.uri);
 				char err[192];
 				int rc = job ? track_stream_begin(g.sp_host,
 				                   g.l5.access_token, g.ap, e.uri,
