@@ -69,6 +69,22 @@ int http_get_url_stream(const char *url, size_t offset,
                         char *err, size_t errlen);
 void http_reply_free(http_reply *r);
 
+/* Keep-alive session: one TLS connection, many sequential requests to the
+ * same host. Naming a 500-song list costs a full handshake per 50-track
+ * chunk otherwise (~3 s each on this console); over a session only the
+ * first chunk pays it. A request that finds the server dropped an idle
+ * connection reconnects and retries once, transparently. */
+typedef struct http_session http_session;
+http_session *http_session_open(const char *host);
+int  http_session_request(http_session *s, const char *path,
+                          const char *method, const char *bearer,
+                          const char *ctype, const char *accept,
+                          const void *body, size_t len, size_t limit,
+                          http_reply *out);
+void http_session_close(http_session *s);
+/* 1 when the last request reused the open link, 0 when it reconnected. */
+int  http_session_last_reused(const http_session *s);
+
 /* Percent-encodes everything outside the unreserved set, for form bodies. */
 size_t url_encode(const char *in, char *out, size_t outlen);
 

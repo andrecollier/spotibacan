@@ -11,6 +11,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+typedef struct http_session http_session;
+
 #define SP_MAX_FILES 8
 
 /* Audio formats, from metadata.proto's AudioFile.Format. Only the Vorbis ones
@@ -60,6 +62,12 @@ int  sp_track_metadata(const char *host, const char *token, const char *track_ur
 int  sp_track_metadata_batch(const char *host, const char *token,
                              const char *const *uris, int n,
                              sp_track *out, char *err, size_t errlen);
+
+/* Same batch over a keep-alive session: chunk after chunk of a long list
+ * pays one handshake total instead of one each. */
+int  sp_track_metadata_batch_s(http_session *sess, const char *token,
+                               const char *const *uris, int n,
+                               sp_track *out, char *err, size_t errlen);
 
 /* Searching the catalogue. Needs no library, which is what makes a fresh
  * account usable: the answer is a list of track URIs, which

@@ -468,3 +468,309 @@ int http_get_url_stream(const char *url, size_t offset,
 	tls_close(c);
 	return 0;
 }
+
+/* ---------------- keep-alive sessions ---------------- */
+
+struct http_session {
+	tls_conn *c;
+	char      host[160];
+	char      carry[RECV_CHUNK];
+	size_t    carry_len;
+	int       reused_last;   /* the last request rode an open connection */
+};
+
+http_session *http_session_open(const char *host)
+{
+	http_session *s = calloc(1, sizeof(*s));
+	if (!s)
+		return NULL;
+	snprintf(s->host, sizeof(s->host), "%s", host);
+	return s;   /* the connection is opened lazily by the first request */
+}
+
+void http_session_close(http_session *s)
+{
+	if (!s)
+		return;
+	if (s->c)
+		tls_close(s->c);
+	free(s);
+}
+
+/* One RECV_CHUNK of carry: parsing never reads past what the wire gave. */
+static size_t sess_fill(http_session *s)
+{
+	if (s->carry_len)
+		return s->carry_len;
+	int n = tls_read(s->c, s->carry, sizeof(s->carry));
+	if (n <= 0)
+		return 0;
+	s->carry_len = (size_t)n;
+	return s->carry_len;
+}
+
+/* Reads one CRLF-terminated line, returned without it. -1 on EOF/error. */
+static int sess_line(http_session *s, char *out, size_t cap)
+{
+	size_t n = 0;
+	for (;;) {
+		if (!sess_fill(s))
+			return -1;
+		for (size_t i = 0; i < s->carry_len; i++) {
+			char ch = s->carry[i];
+			if (ch == '\n') {
+				memmove(s->carry, s->carry + i + 1,
+				        s->carry_len - i - 1);
+				s->carry_len -= i + 1;
+				if (n && out[n - 1] == '\r')
+					n--;
+				out[n] = '\0';
+				return 0;
+			}
+			if (n + 1 < cap)
+				out[n++] = ch;
+		}
+		s->carry_len = 0;
+	}
+}
+
+/* Reads exactly n bytes, carry first, then the wire. -1 on EOF/error. */
+static int sess_exact(http_session *s, char *dst, size_t n)
+{
+	while (n) {
+		if (!sess_fill(s))
+			return -1;
+		size_t take = s->carry_len < n ? s->carry_len : n;
+		memcpy(dst, s->carry, take);
+		memmove(s->carry, s->carry + take, s->carry_len - take);
+		s->carry_len -= take;
+		dst += take;
+		n -= take;
+	}
+	return 0;
+}
+
+/* Grows *buf to room for extra bytes; 0 ok, -1 over limit / out of memory. */
+static int sess_grow(char **buf, size_t *cap, size_t have, size_t extra,
+                     size_t limit, char *err, size_t errlen)
+{
+	if (have + extra + 1 <= *cap)
+		return 0;
+	size_t want = *cap ? *cap : 8192;
+	while (want < have + extra + 1)
+		want *= 2;
+	if (want > limit) {
+		snprintf(err, errlen, "response over %u bytes", (unsigned)limit);
+		return -1;
+	}
+	char *bigger = realloc(*buf, want);
+	if (!bigger) {
+		snprintf(err, errlen, "out of memory");
+		return -1;
+	}
+	*buf = bigger;
+	*cap = want;
+	return 0;
+}
+
+/* One request over the session's connection. stale is set when the failure
+ * happened before any reply byte: the server dropped an idle connection and
+ * the caller may retry on a fresh one. Any mid-body failure poisons the
+ * stream's framing, so the connection is closed either way. */
+static int sess_attempt(http_session *s, const char *path, const char *method,
+                        const char *bearer, const char *ctype,
+                        const char *accept, const void *body, size_t len,
+                        size_t limit, http_reply *out, bool *stale)
+{
+	*stale = false;
+	s->reused_last = s->c != NULL;
+	if (!s->c) {
+		s->carry_len = 0;
+		s->c = tls_connect(s->host, 443, 20000, NULL, out->err,
+		                   sizeof(out->err));
+		if (!s->c)
+			return -1;
+	}
+
+	size_t headcap = 1024 + (bearer ? strlen(bearer) : 0) + strlen(path);
+	char *head = malloc(headcap);
+	if (!head) {
+		snprintf(out->err, sizeof(out->err), "out of memory");
+		return -1;
+	}
+	int n = snprintf(head, headcap,
+	                 "%s %s HTTP/1.1\r\nHost: %s\r\n"
+	                 "User-Agent: 3ds-spotify/0.1\r\n"
+	                 "%s%s%s"
+	                 "%s%s%s"
+	                 "%s%s%s"
+	                 "Content-Length: %u\r\n\r\n",
+	                 method, path, s->host,
+	                 bearer ? "Authorization: Bearer " : "", bearer ? bearer : "",
+	                 bearer ? "\r\n" : "",
+	                 ctype ? "Content-Type: " : "", ctype ? ctype : "",
+	                 ctype ? "\r\n" : "",
+	                 accept ? "Accept: " : "", accept ? accept : "",
+	                 accept ? "\r\n" : "",
+	                 (unsigned)len);
+	if (n < 0 || (size_t)n >= headcap) {
+		snprintf(out->err, sizeof(out->err), "request headers too long");
+		free(head);
+		return -1;
+	}
+	bool sent = tls_write(s->c, head, n) == n &&
+	            (len == 0 || tls_write(s->c, body, len) == (int)len);
+	free(head);
+	if (!sent) {
+		snprintf(out->err, sizeof(out->err), "write failed");
+		*stale = true;
+		goto drop;
+	}
+
+	char line[512];
+	if (sess_line(s, line, sizeof(line)) != 0) {
+		snprintf(out->err, sizeof(out->err), "connection dropped idle");
+		*stale = true;
+		goto drop;
+	}
+	if (sscanf(line, "HTTP/1.%*d %d", &out->status) != 1) {
+		snprintf(out->err, sizeof(out->err), "no status line");
+		goto drop;
+	}
+
+	size_t clen = 0;
+	bool have_len = false, chunked = false, conn_close = false;
+	for (;;) {
+		if (sess_line(s, line, sizeof(line)) != 0) {
+			snprintf(out->err, sizeof(out->err), "headers never ended");
+			goto drop;
+		}
+		if (!line[0])
+			break;
+		if (strncasecmp(line, "Content-Length:", 15) == 0) {
+			clen = strtoul(line + 15, NULL, 10);
+			have_len = true;
+		} else if (strncasecmp(line, "Transfer-Encoding:", 18) == 0 &&
+		           strstr(line + 18, "chunked")) {
+			chunked = true;
+		} else if (strncasecmp(line, "Connection:", 11) == 0 &&
+		           strstr(line + 11, "close")) {
+			conn_close = true;
+		} else if (strncasecmp(line, "Retry-After:", 12) == 0) {
+			out->retry_after = atoi(line + 12);
+		}
+	}
+
+	char *buf = NULL;
+	size_t cap = 0, have = 0;
+	if (chunked) {
+		for (;;) {
+			if (sess_line(s, line, sizeof(line)) != 0) {
+				snprintf(out->err, sizeof(out->err), "chunk size missing");
+				goto fail;
+			}
+			unsigned long sz = strtoul(line, NULL, 16);
+			if (!sz) {
+				/* Trailers, if any, end at a blank line. */
+				do {
+					if (sess_line(s, line, sizeof(line)) != 0)
+						break;
+				} while (line[0]);
+				break;
+			}
+			if (sess_grow(&buf, &cap, have, sz, limit, out->err,
+			              sizeof(out->err)) != 0)
+				goto fail;
+			if (sess_exact(s, buf + have, sz) != 0) {
+				snprintf(out->err, sizeof(out->err), "chunk cut short");
+				goto fail;
+			}
+			have += sz;
+			char crlf[2];
+			if (sess_exact(s, crlf, 2) != 0) {
+				snprintf(out->err, sizeof(out->err), "chunk cut short");
+				goto fail;
+			}
+		}
+	} else if (have_len) {
+		if (sess_grow(&buf, &cap, 0, clen, limit, out->err,
+		              sizeof(out->err)) != 0)
+			goto fail;
+		if (sess_exact(s, buf, clen) != 0) {
+			snprintf(out->err, sizeof(out->err), "body cut short");
+			goto fail;
+		}
+		have = clen;
+	} else {
+		/* No framing: the body runs to EOF, which also ends the session. */
+		conn_close = true;
+		for (;;) {
+			if (sess_grow(&buf, &cap, have, RECV_CHUNK, limit, out->err,
+			              sizeof(out->err)) != 0)
+				goto fail;
+			size_t got = 0;
+			if (sess_fill(s)) {
+				got = s->carry_len;
+				memcpy(buf + have, s->carry, got);
+				s->carry_len = 0;
+			}
+			if (!got)
+				break;
+			have += got;
+		}
+	}
+	if (!buf) {
+		buf = malloc(1);
+		if (!buf) {
+			snprintf(out->err, sizeof(out->err), "out of memory");
+			goto fail;
+		}
+	}
+	buf[have] = '\0';
+	out->body = buf;
+	out->len = have;
+	if (conn_close) {
+		tls_close(s->c);
+		s->c = NULL;
+		s->carry_len = 0;
+	}
+	return 0;
+
+fail:
+	free(buf);
+drop:
+	tls_close(s->c);
+	s->c = NULL;
+	s->carry_len = 0;
+	return -1;
+}
+
+int http_session_request(http_session *s, const char *path, const char *method,
+                         const char *bearer, const char *ctype,
+                         const char *accept, const void *body, size_t len,
+                         size_t limit, http_reply *out)
+{
+	memset(out, 0, sizeof(*out));
+	if (limit == 0)
+		limit = BODY_MAX;
+	bool stale = false;
+	if (sess_attempt(s, path, method, bearer, ctype, accept, body, len,
+	                 limit, out, &stale) == 0)
+		return 0;
+	if (!stale)
+		return -1;
+	/* The server closed an idle keep-alive link: one retry on a fresh
+	 * connection, then the error stands. */
+	char first[160];
+	snprintf(first, sizeof(first), "%s", out->err);
+	memset(out, 0, sizeof(*out));
+	if (sess_attempt(s, path, method, bearer, ctype, accept, body, len,
+	                 limit, out, &stale) == 0)
+		return 0;
+	return -1;
+}
+
+int http_session_last_reused(const http_session *s)
+{
+	return s ? s->reused_last : 0;
+}

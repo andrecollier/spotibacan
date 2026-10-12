@@ -1363,11 +1363,16 @@ static int name_tracks(char uris[][64], int n, native_row *rows, int max,
 	 * blank-labelled rather than losing the whole list. */
 	static const char *ptrs[50];
 	static sp_track meta[50];
+	/* The chunks of one list go over a single keep-alive connection: each
+	 * costs ~3 s with its own handshake and well under one over an open
+	 * link. NULL session = the old one-shot path, still correct. */
+	http_session *sess = http_session_open(g.sp_host);
 	int done = 0;
 	for (int base = 0; base < n; base += 50) {
 		if (fetch_cancel) {
 			snprintf(err, errlen, "cancelado");
 			nlog("  naming cancelado en el lote %d\n", base);
+			http_session_close(sess);
 			return -1;
 		}
 		int chunk = n - base > 50 ? 50 : n - base;
@@ -1375,12 +1380,16 @@ static int name_tracks(char uris[][64], int n, native_row *rows, int max,
 			ptrs[i] = uris[base + i];
 		TickCounter t;
 		osTickCounterStart(&t);
-		int named = sp_track_metadata_batch(g.sp_host, g.l5.access_token,
-		                                    ptrs, chunk, meta, err, errlen);
+		int named = sess
+		    ? sp_track_metadata_batch_s(sess, g.l5.access_token, ptrs,
+		                                chunk, meta, err, errlen)
+		    : sp_track_metadata_batch(g.sp_host, g.l5.access_token, ptrs,
+		                              chunk, meta, err, errlen);
 		osTickCounterUpdate(&t);
-		nlog("  chunk %d..%d -> %d named%s%s (%.0f ms)\n", base,
+		nlog("  chunk %d..%d -> %d named%s%s (%.0f ms%s)\n", base,
 		     base + chunk - 1, named, named < 0 ? ": " : "",
-		     named < 0 ? err : "", osTickCounterRead(&t));
+		     named < 0 ? err : "", osTickCounterRead(&t),
+		     sess && http_session_last_reused(sess) ? ", ka" : "");
 		if (named < 0)
 			continue;
 		for (int i = 0; i < named; i++) {
@@ -1396,6 +1405,7 @@ static int name_tracks(char uris[][64], int n, native_row *rows, int max,
 		if (named > done - base)
 			done = base + named;
 	}
+	http_session_close(sess);
 	if (done <= 0)
 		return -1;
 	/* Rows past a partially-failed chunk still need their uri so they can

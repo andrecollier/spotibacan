@@ -448,9 +448,10 @@ static bool slice_to_buf(const char *p, size_t len, char *buf, size_t cap)
 	return true;
 }
 
-int sp_track_metadata_batch(const char *host, const char *token,
-                            const char *const *uris, int n,
-                            sp_track *out, char *err, size_t errlen)
+static int metadata_batch_request(const char *host, http_session *sess,
+                                  const char *token,
+                                  const char *const *uris, int n,
+                                  sp_track *out, char *err, size_t errlen)
 {
 	if (n <= 0)
 		return 0;
@@ -483,9 +484,13 @@ int sp_track_metadata_batch(const char *host, const char *token,
 	}
 
 	http_reply r;
-	int rc = http_request(host, "/extended-metadata/v0/extended-metadata", "POST",
-	                      token, "application/x-protobuf", "application/x-protobuf",
-	                      req.p, req.len, 0, &r);
+	int rc = sess
+	    ? http_session_request(sess, "/extended-metadata/v0/extended-metadata",
+	                           "POST", token, "application/x-protobuf",
+	                           "application/x-protobuf", req.p, req.len, 0, &r)
+	    : http_request(host, "/extended-metadata/v0/extended-metadata", "POST",
+	                   token, "application/x-protobuf", "application/x-protobuf",
+	                   req.p, req.len, 0, &r);
 	free(req_store);
 	if (rc != 0) {
 		snprintf(err, errlen, "metadata batch: %s", r.err);
@@ -562,6 +567,20 @@ int sp_track_metadata_batch(const char *host, const char *token,
 	if (filled == 0)
 		snprintf(err, errlen, "no tracks in a %u byte response", (unsigned)r.len);
 	return filled;
+}
+
+int sp_track_metadata_batch(const char *host, const char *token,
+                            const char *const *uris, int n,
+                            sp_track *out, char *err, size_t errlen)
+{
+	return metadata_batch_request(host, NULL, token, uris, n, out, err, errlen);
+}
+
+int sp_track_metadata_batch_s(http_session *sess, const char *token,
+                              const char *const *uris, int n,
+                              sp_track *out, char *err, size_t errlen)
+{
+	return metadata_batch_request(NULL, sess, token, uris, n, out, err, errlen);
 }
 
 int sp_search_tracks(const char *host, const char *token, const char *query,
