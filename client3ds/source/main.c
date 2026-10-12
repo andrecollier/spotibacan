@@ -1572,10 +1572,13 @@ static void draw_setup(void)
 		text_at(tr(S_B_CANCEL), BOT_W / 2, BAR_Y + 10, 0.54f, sk->on_accent,
 		        C2D_AlignCenter);
 	} else if (setup_error[0]) {
+		/* The offline hint is the useful action here, so it gets the
+		 * middle of the screen in accent, not a line clipped under the
+		 * bar. */
+		text_at(tr(S_OFFLINE_A), BOT_W / 2, 108, 0.56f, sk->accent,
+		        C2D_AlignCenter);
 		C2D_DrawRectSolid(0, BAR_Y, 0.0f, BOT_W, SCR_H - BAR_Y, sk->accent);
 		text_at(tr(S_START_QUIT), BOT_W / 2, BAR_Y + 10, 0.54f, sk->on_accent,
-		        C2D_AlignCenter);
-		text_at(tr(S_OFFLINE_A), BOT_W / 2, BAR_Y + 34, 0.50f, sk->on_accent,
 		        C2D_AlignCenter);
 	} else {
 		text_fit(setup_step, 16, 100, 0.50f, sk->dim, BOT_W - 32);
