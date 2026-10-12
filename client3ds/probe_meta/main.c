@@ -217,8 +217,8 @@ int main(int argc, char **argv)
 	say("\n8. Rootlist\n");
 	static char uris[16][64];
 	int count = 0;
-	int got = sp_rootlist(sp_host, l5.access_token, info.username, uris, NULL, 16,
-	                      &count, err, sizeof(err));
+	int got = sp_rootlist(sp_host, l5.access_token, info.username, uris, NULL,
+	                      NULL, 16, &count, err, sizeof(err));
 	if (got < 0) {
 		say("   failed: %s\n", err);
 	} else {

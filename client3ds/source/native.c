@@ -800,15 +800,17 @@ int native_fetch(native_view view, const char *arg, native_row *rows, int max,
 	switch (view) {
 	case NATIVE_PLAYLISTS: {
 		static char names[NATIVE_ROWS][64];
+		static char arts[NATIVE_ROWS][80];
 		int count = 0;
-		int n = sp_rootlist(g.sp_host, token, g.username, uris, names, max,
-		                    &count, err, errlen);
+		int n = sp_rootlist(g.sp_host, token, g.username, uris, names, arts,
+		                    max, &count, err, errlen);
 		if (n < 0)
 			return -1;
 		for (int i = 0; i < n; i++) {
 			snprintf(rows[i].uri, sizeof(rows[i].uri), "%s", uris[i]);
 			snprintf(rows[i].label, sizeof(rows[i].label), "%s",
 			         names[i][0] ? names[i] : "Lista sin nombre");
+			snprintf(rows[i].art, sizeof(rows[i].art), "%s", arts[i]);
 			rows[i].sub[0] = '\0';
 			rows[i].is_playlist = true;
 		}

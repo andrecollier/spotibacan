@@ -81,10 +81,11 @@ int  sp_radio(const char *host, const char *token, const char *seed_uri,
  * Asking for the decorated rootlist costs the same one request and brings the
  * names along in meta_items; without it the rows have nothing to show but an
  * index, and resolving each playlist for its title would be one request per
- * row. `names` may be NULL. */
+ * row. `names` may be NULL. `arts`, when given, gets each row's cover URL
+ * (64px-thumb shape) or an empty string; pass NULL to skip. */
 int  sp_rootlist(const char *host, const char *token, const char *username,
-                 char uris[][64], char names[][64], int max, int *count,
-                 char *err, size_t errlen);
+                 char uris[][64], char names[][64], char arts[][80], int max,
+                 int *count, char *err, size_t errlen);
 
 /* The tracks in one playlist. `name` gets the playlist's title, `uris` up to
  * `max` track URIs, and `count` the length the server reports, which can

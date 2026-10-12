@@ -241,8 +241,8 @@ int sp_track_metadata(const char *host, const char *token, const char *track_uri
 }
 
 int sp_rootlist(const char *host, const char *token, const char *username,
-                char uris[][64], char names[][64], int max, int *count,
-                char *err, size_t errlen)
+                char uris[][64], char names[][64], char arts[][80], int max,
+                int *count, char *err, size_t errlen)
 {
 	char path[320];
 	snprintf(path, sizeof(path),
@@ -270,10 +270,16 @@ int sp_rootlist(const char *host, const char *token, const char *username,
 
 	/* meta_items runs parallel to items, one per entry, and carries the
 	 * ListAttributes the decoration asked for -- which is how the rows get
-	 * real names without one request each. */
+	 * real names without one request each. The same attributes carry the
+	 * cover: `picture` (3) is the 20-byte image id for user-set covers,
+	 * while generated ones (mosaic/pickasso) arrive as a format attribute
+	 * with key "image_url". */
 	if (names) {
-		for (int i = 0; i < n; i++)
+		for (int i = 0; i < n; i++) {
 			names[i][0] = '\0';
+			if (arts)
+				arts[i][0] = '\0';
+		}
 		pbv contents;
 		if (pb_get_bytes(body, r.len, 5, &contents)) {
 			size_t at = 0;
@@ -283,12 +289,33 @@ int sp_rootlist(const char *host, const char *token, const char *username,
 				pbv meta;
 				if (!pb_get_bytes(rest.p, rest.len, 4, &meta))
 					break;
-				pbv attrs, nm;
-				if (pb_get_bytes(meta.p, meta.len, 2, &attrs) &&
-				    pb_get_bytes(attrs.p, attrs.len, 1, &nm)) {
-					size_t len = nm.len < 63 ? nm.len : 63;
-					memcpy(names[i], nm.p, len);
-					names[i][len] = '\0';
+				pbv attrs, nm, pic;
+				if (pb_get_bytes(meta.p, meta.len, 2, &attrs)) {
+					if (pb_get_bytes(attrs.p, attrs.len, 1, &nm)) {
+						size_t len = nm.len < 63 ? nm.len : 63;
+						memcpy(names[i], nm.p, len);
+						names[i][len] = '\0';
+					}
+					if (arts &&
+					    pb_get_bytes(attrs.p, attrs.len, 3, &pic)) {
+						if (pic.len == 20) {
+							/* i.scdn.co/image/<hex id> is the CDN shape
+							 * every 64px thumb URL already uses. */
+							static const char hexd[] = "0123456789abcdef";
+							snprintf(arts[i], 80,
+							         "https://i.scdn.co/image/");
+							char *o = arts[i] + strlen(arts[i]);
+							for (int k = 0; k < 20; k++) {
+								*o++ = hexd[pic.p[k] >> 4];
+								*o++ = hexd[pic.p[k] & 15];
+							}
+							*o = '\0';
+						} else if (pic.len > 8 && pic.len < 79 &&
+						           memcmp(pic.p, "https://", 8) == 0) {
+							memcpy(arts[i], pic.p, pic.len);
+							arts[i][pic.len] = '\0';
+						}
+					}
 				}
 				i++;
 				at = (size_t)(meta.p + meta.len - contents.p);
