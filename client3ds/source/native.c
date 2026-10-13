@@ -211,6 +211,18 @@ static struct {
 
 void native_set_downloads(bool on) { g.downloads_on = on; }
 
+/* Network workers go to the system core when the app has been granted
+ * time there (main sets that up): decrypting TLS and the audio file is
+ * what the console's CPU spends most on, and on the app core it queued
+ * behind drawing and decoding. Falls back to the app core. */
+Thread native_spawn_worker(ThreadFunc fn, void *arg, size_t stack, int prio)
+{
+	Thread t = threadCreate(fn, arg, stack, prio, 1, false);
+	if (!t)
+		t = threadCreate(fn, arg, stack, prio, -2, false);
+	return t;
+}
+
 static const char *l5_token(void) { return g.l5_tok[g.l5_cur]; }
 
 static void l5_publish(void)
@@ -870,7 +882,7 @@ static void dlq_pump(void)
 	snprintf(dlq_active_title, sizeof(dlq_active_title), "%s - %s",
 	         e.artist, e.title);
 	LightLock_Unlock(&g.lock);
-	Thread dl = threadCreate(download_thread, job, 96 * 1024, 0x31, -2, false);
+	Thread dl = native_spawn_worker(download_thread, job, 96 * 1024, 0x31);
 	if (!dl) {
 		nlog("DLQ: no thread for %s\n", e.title);
 		LightLock_Lock(&g.lock);
@@ -1325,8 +1337,8 @@ static void player_thread(void *arg)
 			LightLock_Unlock(&g.lock);
 			/* The fetch runs a full TLS handshake (cert chain +
 			 * RSA bignum) on this stack; 48 KB was not always enough. */
-			Thread dl = threadCreate(download_thread, job, 96 * 1024,
-			                         0x31, -2, false);
+			Thread dl = native_spawn_worker(download_thread, job, 96 * 1024,
+			                                0x31);
 			if (!dl) {
 				snprintf(g.error, sizeof(g.error),
 				         "could not start the download thread");

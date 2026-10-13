@@ -386,8 +386,11 @@ static int vcache_lookup(native_view view, const char *arg)
 			           arg ? arg : "-");
 			return -1;
 		}
+		nat_count = 0;   /* hidden while rewritten; the caller publishes */
+		__sync_synchronize();
 		memcpy(nat_rows, vcache[i].rows,
 		       (size_t)vcache[i].count * sizeof(native_row));
+		__sync_synchronize();
 		lib.loading = false;   /* no spinner: the rows are already here */
 		native_log("VCACHE: hit vista=%d arg=%s (%d filas)\n", (int)view,
 		           arg ? arg : "-", vcache[i].count);
@@ -485,9 +488,14 @@ static void library_fetch(void)
 				lib_retry_at = osGetTime() + 10000;
 				native_log("LISTA: fallo el fetch de la vista: %s\n", err);
 			} else {
-				nat_count = n;
+				/* The UI draws from another core now: hide the rows while
+				 * they are rewritten, publish the count after. */
+				nat_count = 0;
+				__sync_synchronize();
 				memcpy(nat_rows, stage,
 				       (size_t)n * sizeof(native_row));
+				__sync_synchronize();
+				nat_count = n;
 				nat_status[0] = '\0';
 				nat_loaded_view = view;
 				snprintf(nat_loaded_arg, sizeof(nat_loaded_arg), "%s",
@@ -2046,6 +2054,10 @@ int main(int argc, char **argv)
 {
 	(void)argc;
 	gfxInitDefault();
+	/* Let the network workers borrow the system core. Half of it: the
+	 * console's own network services run there too, and starving them
+	 * would slow the very downloads this is meant to speed up. */
+	APT_SetAppCpuTimeLimit(50);
 	skin_init();
 	// The token belongs beside the .3dsx, like every other app here; without
 	// this it would land at the card root and not match the probes.
@@ -2172,9 +2184,11 @@ int main(int argc, char **argv)
 	// The lister and art threads run TLS handshakes on these stacks, which
 	// need real headroom (chunked metadata names a 500-song list as a
 	// dozen sequential handshakes); the audio thread only copies bytes.
-	Thread lister = threadCreate(native_library_thread, NULL, 96 * 1024, 0x3F, -2, false);
+	/* Lists and covers are network work: off the app core with the
+	 * downloads, so drawing and decoding keep it to themselves. */
+	Thread lister = native_spawn_worker(native_library_thread, NULL, 96 * 1024, 0x3F);
 	Thread snd = threadCreate(audio_thread, NULL, 16 * 1024, 0x18, -2, false);
-	Thread art = threadCreate(art_thread, NULL, 96 * 1024, 0x32, -2, false);
+	Thread art = native_spawn_worker(art_thread, NULL, 96 * 1024, 0x32);
 	buffering = false;
 	lib.open = true;
 	lib_reload = true;

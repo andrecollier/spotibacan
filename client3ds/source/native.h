@@ -10,6 +10,9 @@
 #ifndef NATIVE_H
 #define NATIVE_H
 
+#include <3ds/types.h>
+#include <3ds/thread.h>
+
 #include <stdbool.h>
 #include <stddef.h>
 
@@ -129,6 +132,8 @@ void         native_save_current(void);
 bool         native_save_armed(void);
 /* The playing track's file is still downloading: extras should wait. */
 bool         native_stream_busy(void);
+/* threadCreate on the system core when available, else the app core. */
+Thread       native_spawn_worker(ThreadFunc fn, void *arg, size_t stack, int prio);
 /* True once the playing track's .ogg exists on the card (cached per URI). */
 bool         native_current_saved(void);
 
