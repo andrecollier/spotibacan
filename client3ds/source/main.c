@@ -1885,6 +1885,9 @@ static void play_index(int idx)
 	play_count = n;
 	play_idx = at;
 	now_idx = idx;
+	/* Skipped rows shift snapshot indexes off the on-screen ones: later
+	 * steps must not highlight by index. */
+	play_edited = n != nat_count;
 	snprintf(play_ctx_title, sizeof(play_ctx_title), "%s", nat_title);
 	now_view = nat_view;
 	snprintf(now_arg, sizeof(now_arg), "%s",
@@ -2022,8 +2025,9 @@ static void activate_row(int abs)
 		snprintf(nat_title, sizeof(nat_title), "%s", tr(S_DL_VIEW));
 	} else if (idx >= 0 && idx < nat_count && nat_rows[idx].is_playlist) {
 		snprintf(nat_arg, sizeof(nat_arg), "%s", nat_rows[idx].uri);
-		if (strncmp(nat_arg, "spotify:album:", 14) == 0)
-			/* An artist's release row already knows its name. */
+		if (strncmp(nat_arg, "spotify:album:", 14) == 0 ||
+		    strncmp(nat_arg, "spotify:artist:", 15) == 0)
+			/* Release and artist rows already know their name. */
 			snprintf(nat_title, sizeof(nat_title), "%s", nat_rows[idx].label);
 		else if (native_playlist_name(nat_arg, nat_title, sizeof(nat_title)) != 0)
 			snprintf(nat_title, sizeof(nat_title), "%s", tr(S_PLAYLIST_FALLBACK));

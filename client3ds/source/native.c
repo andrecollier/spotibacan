@@ -1808,6 +1808,51 @@ static int rootlist_cache_load(native_row *rows, int max)
 	return n;
 }
 
+/* The search context only returns tracks, so the artists people expect on
+ * top are read off the results: the best hit's artist, then any other that
+ * comes up twice in the first twenty, three at most. They open the artist
+ * view. No extra round trip: the batch metadata already named them. */
+static int search_add_artists(native_row *rows, int n, int max)
+{
+	enum { SCAN = 20, MAX_ARTISTS = 3 };
+	int pick[MAX_ARTISTS], k = 0;
+	const int scan = n < SCAN ? n : SCAN;
+	for (int i = 0; i < scan && k < MAX_ARTISTS; i++) {
+		const char *a = rows[i].artist_uri;
+		if (!a[0])
+			continue;
+		bool seen = false;
+		for (int j = 0; j < k; j++)
+			if (strcmp(rows[pick[j]].artist_uri, a) == 0)
+				seen = true;
+		if (seen)
+			continue;
+		int count = 0;
+		for (int j = 0; j < scan; j++)
+			if (strcmp(rows[j].artist_uri, a) == 0)
+				count++;
+		if (i == 0 || count >= 2)
+			pick[k++] = i;
+	}
+	if (k == 0)
+		return n;
+	native_row art[MAX_ARTISTS];
+	for (int j = 0; j < k; j++) {
+		const native_row *src = &rows[pick[j]];
+		memset(&art[j], 0, sizeof(art[j]));
+		snprintf(art[j].uri, sizeof(art[j].uri), "%s", src->artist_uri);
+		snprintf(art[j].label, sizeof(art[j].label), "%s", src->sub);
+		snprintf(art[j].sub, sizeof(art[j].sub), "Artist");
+		snprintf(art[j].art, sizeof(art[j].art), "%s", src->art);
+		art[j].is_playlist = true;   /* opens instead of playing */
+	}
+	if (n + k > max)
+		n = max - k;
+	memmove(&rows[k], &rows[0], (size_t)n * sizeof(rows[0]));
+	memcpy(&rows[0], art, (size_t)k * sizeof(rows[0]));
+	return n + k;
+}
+
 int native_fetch(native_view view, const char *arg, native_row *rows, int max,
                  char *err, size_t errlen)
 {
@@ -1887,7 +1932,10 @@ int native_fetch(native_view view, const char *arg, native_row *rows, int max,
 		int n = sp_search_tracks(g.sp_host, token, arg, uris, max, err, errlen);
 		if (n < 0)
 			return -1;
-		return name_tracks(uris, n, rows, max, err, errlen);
+		n = name_tracks(uris, n, rows, max, err, errlen);
+		if (n <= 0)
+			return n;
+		return search_add_artists(rows, n, max);
 	}
 	case NATIVE_TRACKS: {
 		/* An album or an artist opened from the player: the context
