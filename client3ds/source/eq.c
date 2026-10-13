@@ -25,17 +25,19 @@ typedef struct {
 	band_spec   bands[EQ_BANDS];   /* db == 0 means unused */
 } preset_spec;
 
-/* Kept modest: the speakers are tiny and a big low shelf only buys
- * distortion. Boost is the loudness setting for the speakers on a bus. */
+/* Each preset pays for part of its lift with a cut in overall level, so
+ * the limiter only catches the odd peak; Boost runs hot into it. Boost is
+ * for the speakers: it trims the lows they cannot play (wasted headroom
+ * that only made them rattle) and lifts presence and air instead. */
 static const preset_spec PRESETS[EQ_COUNT] = {
 	[EQ_OFF]    = { "off",    0.0f, {{0}} },
-	[EQ_BASS]   = { "bass",   0.0f, {{ BQ_LOWSHELF, 180.0f, 6.0f, 0.7f }} },
-	[EQ_TREBLE] = { "treble", 0.0f, {{ BQ_HIGHSHELF, 6000.0f, 5.0f, 0.7f }} },
-	[EQ_VOCAL]  = { "vocal",  0.0f, {{ BQ_LOWSHELF, 120.0f, -3.0f, 0.7f },
-	                                 { BQ_PEAK, 2500.0f, 4.0f, 1.0f }} },
-	[EQ_BOOST]  = { "boost",  6.0f, {{ BQ_LOWSHELF, 150.0f, 5.0f, 0.7f },
-	                                 { BQ_PEAK, 3000.0f, 2.0f, 0.9f },
-	                                 { BQ_HIGHSHELF, 8000.0f, 3.0f, 0.7f }} },
+	[EQ_BASS]   = { "bass",  -2.5f, {{ BQ_LOWSHELF, 200.0f, 5.0f, 0.7f }} },
+	[EQ_TREBLE] = { "treble",-2.0f, {{ BQ_HIGHSHELF, 5000.0f, 4.0f, 0.7f }} },
+	[EQ_VOCAL]  = { "vocal", -1.0f, {{ BQ_LOWSHELF, 150.0f, -3.0f, 0.7f },
+	                                 { BQ_PEAK, 2500.0f, 3.0f, 1.0f }} },
+	[EQ_BOOST]  = { "boost",  5.0f, {{ BQ_LOWSHELF, 120.0f, -4.0f, 0.7f },
+	                                 { BQ_PEAK, 1500.0f, 3.0f, 0.8f },
+	                                 { BQ_HIGHSHELF, 6000.0f, 3.0f, 0.7f }} },
 };
 
 static volatile int s_want = EQ_OFF;
@@ -43,7 +45,7 @@ static int          s_have = -1;
 static biquad       s_bq[EQ_BANDS];
 static int          s_nbands;
 static float        s_gain = 1.0f;
-static float        s_knee = 0.85f;
+static float        s_lim = 1.0f;   /* limiter gain, smoothed */
 
 void eq_set(eq_preset p)
 {
@@ -114,27 +116,17 @@ static void rebuild(int p)
 		if (ps->bands[i].db != 0.0f)
 			design(&s_bq[s_nbands++], &ps->bands[i]);
 	s_gain = powf(10.0f, ps->gain_db / 20.0f);
-	/* Only the boost preset leans on the limiter; the others merely guard
-	 * against the clip their lift could cause. */
-	s_knee = ps->gain_db > 0.0f ? 0.6f : 0.85f;
+	s_lim = 1.0f;
 	s_have = p;
 }
 
-/* Gentle above ~0.6 of full scale, never past it: the boost preset leans
- * on this instead of clipping hard. A rational tanh stand-in, cheap on the
- * ARM11's VFP. */
-static inline float soft_limit(float x, float t)
-{
-	float a = fabsf(x);
-	if (a <= t)
-		return x;
-	float u = (a - t) / (1.0f - t);          /* 0.. */
-	float c = u * (27.0f + u * u) / (27.0f + 9.0f * u * u);   /* ~tanh */
-	if (c > 1.0f)
-		c = 1.0f;
-	float y = t + (1.0f - t) * c;
-	return x < 0 ? -y : y;
-}
+/* The limiter rides a gain, never the waveform: when the louder channel
+ * passes the ceiling the gain drops within about a millisecond and comes
+ * back over ~150 ms. The old per-sample soft clipper bent every loud peak
+ * of today's hot masters, which is the distortion Boost was heard with. */
+#define LIM_CEIL   0.89f      /* -1 dBFS */
+#define LIM_ATTACK 0.0275f    /* 1 - exp(-1 / (0.8 ms * 44.1 kHz)) */
+#define LIM_REL    0.000151f  /* 1 - exp(-1 / (150 ms * 44.1 kHz)) */
 
 void eq_process(int16_t *pcm, unsigned frames)
 {
@@ -145,7 +137,9 @@ void eq_process(int16_t *pcm, unsigned frames)
 		return;
 
 	const float in_scale = s_gain / 32768.0f;
+	float g = s_lim;
 	for (unsigned i = 0; i < frames; i++) {
+		float v[2];
 		for (int ch = 0; ch < 2; ch++) {
 			float x = (float)pcm[i * 2 + ch] * in_scale;
 			for (int b = 0; b < s_nbands; b++) {
@@ -158,9 +152,15 @@ void eq_process(int16_t *pcm, unsigned frames)
 				f->y1[ch] = y;
 				x = y;
 			}
-			x = soft_limit(x, s_knee);
-			int v = (int)(x * 32767.0f);
-			pcm[i * 2 + ch] = (int16_t)(v > 32767 ? 32767 : (v < -32768 ? -32768 : v));
+			v[ch] = x;
+		}
+		const float peak = fmaxf(fabsf(v[0]), fabsf(v[1]));
+		const float target = peak > LIM_CEIL ? LIM_CEIL / peak : 1.0f;
+		g += (target < g ? LIM_ATTACK : LIM_REL) * (target - g);
+		for (int ch = 0; ch < 2; ch++) {
+			int o = (int)(v[ch] * g * 32767.0f);
+			pcm[i * 2 + ch] = (int16_t)(o > 32767 ? 32767 : (o < -32768 ? -32768 : o));
 		}
 	}
+	s_lim = g;
 }
