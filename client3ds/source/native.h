@@ -123,6 +123,8 @@ void         native_set_downloads(bool on);
  * once its background download completes; armed state for the icon. */
 void         native_save_current(void);
 bool         native_save_armed(void);
+/* The playing track's file is still downloading: extras should wait. */
+bool         native_stream_busy(void);
 /* True once the playing track's .ogg exists on the card (cached per URI). */
 bool         native_current_saved(void);
 

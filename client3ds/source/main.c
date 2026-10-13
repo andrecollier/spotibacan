@@ -674,18 +674,25 @@ static void art_thread(void *arg)
 		/* Queued likes ride out when the rate-limited Web API has a window;
 		 * same Retry-After discipline as the avatar fetch below. A 403 means
 		 * the token predates the library-modify scope: stop and say so. */
-		if (like_pending_n && !like_scope_missing) {
+		/* Likes and list thumbnails are extras: while the playing song is
+		 * still downloading they wait, so they cannot starve it. */
+		const bool stream_busy = native_stream_busy();
+		if (like_pending_n && !like_scope_missing && !stream_busy) {
 			const u64 now = osGetTime();
 			if (!like_try_at ||
 			    now - like_try_at >= (u64)(like_wait_s > 0 ? like_wait_s : 5) * 1000) {
 				like_try_at = now;
-				like_wait_s = 20;
+				/* Back off on every failure, to ten minutes: the shared
+				 * client id sits behind HTTP 429 for hours at a time. */
+				like_wait_s = like_wait_s < 20 ? 20
+				              : (like_wait_s * 2 > 600 ? 600 : like_wait_s * 2);
 				const like_op op = like_pending[0];
 				char lerr[128] = "";
 				int ra = 0;
 				const int rc = native_like(op.uri, op.like, lerr,
 				                           sizeof(lerr), &ra);
 				if (rc == 0) {
+					like_wait_s = 0;   /* back to quick turns */
 					memmove(&like_pending[0], &like_pending[1],
 					        (size_t)(like_pending_n - 1) * sizeof(like_pending[0]));
 					like_pending_n--;
@@ -772,7 +779,8 @@ static void art_thread(void *arg)
 		/* Drain a few thumbnails per cycle: one fetch per pass could not
 		 * keep up with a fast fling, which read as flicker. */
 		int drain;
-		for (drain = 0; drain < 4 && thumbs_work_pending(); drain++)
+		for (drain = 0; drain < 4 && !stream_busy && thumbs_work_pending();
+		     drain++)
 			thumbs_work_one();
 		if (drain)
 			continue;

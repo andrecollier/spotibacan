@@ -267,6 +267,16 @@ void native_save_current(void)
 }
 bool native_save_armed(void) { return g.want_save; }
 
+bool native_stream_busy(void)
+{
+	if (!g.ready)
+		return false;
+	LightLock_Lock(&g.lock);
+	bool busy = g.job && !g.job->ts.dl_done && !g.job->ts.dl_failed;
+	LightLock_Unlock(&g.lock);
+	return busy;
+}
+
 int native_dl_queue_count(void)
 {
 	LightLock_Lock(&g.lock);
