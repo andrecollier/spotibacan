@@ -160,7 +160,7 @@ bool         native_current_saved(void);
 
 /* Queues every track row of a list for download; returns how many were
  * added (rows already queued or past NATIVE_DLQ_MAX are skipped). */
-int  native_dl_enqueue_list(const native_row *rows, int n);
+int  native_dl_enqueue_list(const native_row *rows, int n, const char *title);
 /* Drops everything still waiting (the running download finishes). */
 void native_dl_clear(void);
 /* Removes a saved song (file:<name>.ogg) and its cover from the card. */

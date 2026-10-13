@@ -140,6 +140,7 @@ static volatile bool fetch_cancel;
 void native_fetch_cancel(void) { fetch_cancel = true; }
 
 static void save_download(const track_stream *ts);
+static void dlist_write(const char *title, const native_row *rows, int n);
 
 static struct {
 	bool          ready;
@@ -398,10 +399,11 @@ static bool dlq_enqueue(const char *uri, const char *artist,
 	return ok;
 }
 
-int native_dl_enqueue_list(const native_row *rows, int n)
+int native_dl_enqueue_list(const native_row *rows, int n, const char *title)
 {
 	if (!g.ready || g.offline)
 		return 0;
+	dlist_write(title, rows, n);   /* so Downloads can show it as a folder */
 	int added = 0, before = native_dl_queue_count();
 	for (int i = 0; i < n; i++) {
 		const native_row *r = &rows[i];
@@ -582,6 +584,24 @@ int native_like(const char *uri, bool like, char *err, size_t errlen,
 
 /* Builds the music/ path a track saves to, so the writer and the "already
  * saved?" check can never disagree on the name. */
+/* The file name a song is saved under: "<artist> - <title>.ogg", minus
+ * the characters FAT refuses. */
+static void download_name(const char *artist, const char *title,
+                          char *name, size_t namelen)
+{
+	int n = 0;
+	for (const char *p = artist; *p && n < 60; p++)
+		if (*p != '/' && *p != '\\' && *p != ':' && *p != '"' &&
+		    *p != '?' && *p != '*' && *p != '<' && *p != '>' && *p != '|')
+			name[n++] = *p;
+	n += snprintf(name + n, namelen - n, " - ");
+	for (const char *p = title; *p && n < 130; p++)
+		if (*p != '/' && *p != '\\' && *p != ':' && *p != '"' &&
+		    *p != '?' && *p != '*' && *p != '<' && *p != '>' && *p != '|')
+			name[n++] = *p;
+	snprintf(name + n, namelen - n, ".ogg");
+}
+
 static void download_path(const char *artist, const char *title,
                           char *out, size_t outlen)
 {
@@ -589,20 +609,8 @@ static void download_path(const char *artist, const char *title,
 	cfg_dir(dir, sizeof(dir));
 	strncat(dir, "music", sizeof(dir) - strlen(dir) - 1);
 	mkdir(dir, 0777);
-
 	char name[160];
-	int n = 0;
-	for (const char *p = artist; *p && n < 60; p++)
-		if (*p != '/' && *p != '\\' && *p != ':' && *p != '"' &&
-		    *p != '?' && *p != '*' && *p != '<' && *p != '>' && *p != '|')
-			name[n++] = *p;
-	n += snprintf(name + n, sizeof(name) - n, " - ");
-	for (const char *p = title; *p && n < 130; p++)
-		if (*p != '/' && *p != '\\' && *p != ':' && *p != '"' &&
-		    *p != '?' && *p != '*' && *p != '<' && *p != '>' && *p != '|')
-			name[n++] = *p;
-	snprintf(name + n, sizeof(name) - n, ".ogg");
-
+	download_name(artist, title, name, sizeof(name));
 	snprintf(out, outlen, "%s/%s", dir, name);
 }
 
@@ -1730,39 +1738,153 @@ bool native_delete_download(const char *file_uri)
 	return ok;
 }
 
-static int fetch_downloads(native_row *rows, int max)
+/* One saved song as a row: label from the file name, size as subtitle,
+ * the <name>.jpg beside it (if any) as its thumbnail. */
+static void download_row(const char *dir, const char *file, native_row *r)
+{
+	const size_t len = strlen(file);
+	memset(r, 0, sizeof(*r));
+	snprintf(r->uri, sizeof(r->uri), "file:%s", file);
+	snprintf(r->label, sizeof(r->label), "%.*s", (int)len - 4, file);
+	struct stat st;
+	char path[400];
+	snprintf(path, sizeof(path), "%s/%s", dir, file);
+	if (stat(path, &st) == 0)
+		snprintf(r->sub, sizeof(r->sub), "%.1f MB",
+		         (double)st.st_size / (1024.0 * 1024.0));
+	char jpg[200];
+	snprintf(jpg, sizeof(jpg), "%.*s.jpg", (int)len - 4, file);
+	snprintf(path, sizeof(path), "%s/%s", dir, jpg);
+	if (stat(path, &st) == 0 && st.st_size > 0)
+		snprintf(r->art, sizeof(r->art), "file:%s", jpg);
+}
+
+static bool file_exists(const char *dir, const char *file)
+{
+	char path[400];
+	snprintf(path, sizeof(path), "%s/%s", dir, file);
+	struct stat st;
+	return stat(path, &st) == 0 && st.st_size > 0;
+}
+
+/* Saved playlists: music/lists/<name>.txt, one song file name per line,
+ * written when a list is queued. The songs themselves stay in music/, once
+ * each, however many lists they belong to. */
+static void dlist_dir(char *out, size_t n)
+{
+	cfg_dir(out, n);
+	strncat(out, "music/lists", n - strlen(out) - 1);
+}
+
+static void dlist_write(const char *title, const native_row *rows, int n)
+{
+	char dir[352], music[352];
+	cfg_dir(music, sizeof(music));
+	strncat(music, "music", sizeof(music) - strlen(music) - 1);
+	mkdir(music, 0777);
+	dlist_dir(dir, sizeof(dir));
+	mkdir(dir, 0777);
+	char safe[64];
+	int k = 0;
+	for (const char *p = title && title[0] ? title : "Playlist"; *p && k < 60; p++)
+		if (!strchr("/\\:\"?*<>|", *p))
+			safe[k++] = *p;
+	safe[k] = '\0';
+	char path[440];
+	snprintf(path, sizeof(path), "%s/%s.txt", dir, safe);
+	FILE *f = fopen(path, "w");
+	if (!f)
+		return;
+	for (int i = 0; i < n; i++) {
+		if (rows[i].is_playlist ||
+		    strncmp(rows[i].uri, "spotify:track:", 14) != 0)
+			continue;
+		char name[160];
+		download_name(rows[i].sub, rows[i].label, name, sizeof(name));
+		fprintf(f, "%s\n", name);
+	}
+	fclose(f);
+}
+
+static int fetch_downloads(const char *arg, native_row *rows, int max)
 {
 	char dir[352];
 	cfg_dir(dir, sizeof(dir));
 	strncat(dir, "music", sizeof(dir) - strlen(dir) - 1);
+	char ldir[352];
+	dlist_dir(ldir, sizeof(ldir));
+	int n = 0;
+
+	/* Inside one saved playlist: its songs, in list order, if on the card. */
+	if (arg && strncmp(arg, "dlist:", 6) == 0) {
+		char path[440];
+		snprintf(path, sizeof(path), "%s/%s", ldir, arg + 6);
+		FILE *f = fopen(path, "r");
+		if (!f)
+			return 0;
+		char line[200];
+		while (n < max && fgets(line, sizeof(line), f)) {
+			char *nl = strpbrk(line, "\r\n");
+			if (nl)
+				*nl = '\0';
+			if (line[0] && file_exists(dir, line))
+				download_row(dir, line, &rows[n++]);
+		}
+		fclose(f);
+		nlog("FETCH downloads %s -> %d\n", arg + 6, n);
+		return n;
+	}
+
+	/* The top: one folder per saved playlist, then every song. */
+	DIR *ld = opendir(ldir);
+	if (ld) {
+		struct dirent *e;
+		while (n < max && (e = readdir(ld))) {
+			const size_t len = strlen(e->d_name);
+			if (len < 5 || strcasecmp(e->d_name + len - 4, ".txt") != 0)
+				continue;
+			char path[440];
+			snprintf(path, sizeof(path), "%s/%s", ldir, e->d_name);
+			FILE *f = fopen(path, "r");
+			if (!f)
+				continue;
+			int have = 0;
+			char first[200] = "", line[200];
+			while (fgets(line, sizeof(line), f)) {
+				char *nl = strpbrk(line, "\r\n");
+				if (nl)
+					*nl = '\0';
+				if (line[0] && file_exists(dir, line)) {
+					if (!have)
+						snprintf(first, sizeof(first), "%s", line);
+					have++;
+				}
+			}
+			fclose(f);
+			if (!have)
+				continue;   /* nothing of it saved (yet): no empty folder */
+			native_row *r = &rows[n++];
+			memset(r, 0, sizeof(*r));
+			snprintf(r->uri, sizeof(r->uri), "dlist:%s", e->d_name);
+			snprintf(r->label, sizeof(r->label), "%.*s", (int)len - 4, e->d_name);
+			snprintf(r->sub, sizeof(r->sub), "%d songs", have);
+			native_row tmp;
+			download_row(dir, first, &tmp);
+			snprintf(r->art, sizeof(r->art), "%s", tmp.art);
+			r->is_playlist = true;   /* opens instead of playing */
+		}
+		closedir(ld);
+	}
 
 	DIR *d = opendir(dir);
 	if (!d)
-		return 0;   /* nothing saved yet: an empty list, not an error */
-
-	int n = 0;
+		return n;   /* nothing saved yet: an empty list, not an error */
 	struct dirent *e;
 	while (n < max && (e = readdir(d))) {
 		size_t len = strlen(e->d_name);
 		if (len < 5 || strcasecmp(e->d_name + len - 4, ".ogg") != 0)
 			continue;
-		native_row *r = &rows[n++];
-		snprintf(r->uri, sizeof(r->uri), "file:%s", e->d_name);
-		snprintf(r->label, sizeof(r->label), "%.*s", (int)len - 4,
-		         e->d_name);
-		struct stat st;
-		char path[400];
-		snprintf(path, sizeof(path), "%s/%s", dir, e->d_name);
-		if (stat(path, &st) == 0)
-			snprintf(r->sub, sizeof(r->sub), "%.1f MB",
-			         (double)st.st_size / (1024.0 * 1024.0));
-		/* A saved <name>.jpg beside the .ogg is the row's thumbnail; the
-		 * file: scheme tells artwork.c to read it off the SD. */
-		char jpg[200];
-		snprintf(jpg, sizeof(jpg), "%.*s.jpg", (int)len - 4, e->d_name);
-		snprintf(path, sizeof(path), "%s/%s", dir, jpg);
-		if (stat(path, &st) == 0 && st.st_size > 0)
-			snprintf(r->art, sizeof(r->art), "file:%s", jpg);
+		download_row(dir, e->d_name, &rows[n++]);
 	}
 	closedir(d);
 	nlog("FETCH downloads -> %d\n", n);
@@ -1888,7 +2010,7 @@ int native_fetch(native_view view, const char *arg, native_row *rows, int max,
 	 * it answers from the SD even before sign-in, which is what makes the
 	 * offline mode more than an error screen. */
 	if (view == NATIVE_DOWNLOADS)
-		return fetch_downloads(rows, max);
+		return fetch_downloads(arg, rows, max);
 
 	if (!g.ready) {
 		snprintf(err, errlen, "not signed in");

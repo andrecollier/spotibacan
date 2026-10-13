@@ -2018,6 +2018,24 @@ static void track_ended(void)
 
 // What activating an absolute list row means: the synthetic Liked Songs or
 // Downloads rows, drilling into a playlist, or playing a track.
+/* One step up: a saved playlist inside Downloads goes back to Downloads,
+ * everything else to the playlists. */
+static void lib_back(void)
+{
+	if (nat_view == NATIVE_DOWNLOADS && nat_arg[0]) {
+		nat_arg[0] = '\0';
+		snprintf(nat_title, sizeof(nat_title), "%s", tr(S_DL_VIEW));
+	} else {
+		nat_view = NATIVE_PLAYLISTS;
+		nat_arg[0] = '\0';
+		snprintf(nat_title, sizeof(nat_title), "%s", tr(S_LISTS));
+	}
+	lib.sel = 0;
+	native_fetch_cancel();   /* drop the old view's in-flight fetch */
+	lib.scroll = lib.velocity = 0.0f;
+	lib_reload = true;
+}
+
 static void activate_row(int abs)
 {
 	int extra = (nat_view == NATIVE_PLAYLISTS) ? 2 : 0;
@@ -2030,6 +2048,12 @@ static void activate_row(int abs)
 		nat_view = NATIVE_DOWNLOADS;
 		nat_arg[0] = '\0';
 		snprintf(nat_title, sizeof(nat_title), "%s", tr(S_DL_VIEW));
+	} else if (idx >= 0 && idx < nat_count && nat_rows[idx].is_playlist &&
+	           strncmp(nat_rows[idx].uri, "dlist:", 6) == 0) {
+		/* A saved playlist inside Downloads: the same view, narrowed. */
+		snprintf(nat_arg, sizeof(nat_arg), "%s", nat_rows[idx].uri);
+		snprintf(nat_title, sizeof(nat_title), "%s", nat_rows[idx].label);
+		nat_view = NATIVE_DOWNLOADS;
 	} else if (idx >= 0 && idx < nat_count && nat_rows[idx].is_playlist) {
 		snprintf(nat_arg, sizeof(nat_arg), "%s", nat_rows[idx].uri);
 		if (strncmp(nat_arg, "spotify:album:", 14) == 0 ||
@@ -2430,7 +2454,7 @@ int main(int argc, char **argv)
 				break;
 			case 5:   // queue every track of the list last shown
 				if (list_downloadable()) {
-					native_dl_enqueue_list(nat_rows, nat_count);
+					native_dl_enqueue_list(nat_rows, nat_count, nat_title);
 					settings_open = false;
 					queue_open = true;   /* show what got queued */
 				}
@@ -2780,14 +2804,8 @@ int main(int argc, char **argv)
 				lib.open = false;
 			else if (g_touch.clicked == SL_BTN_BACK &&
 			         nat_view != NATIVE_PLAYLISTS) {
-				// Same trip the B button makes: up to the playlists.
-				nat_view = NATIVE_PLAYLISTS;
-				nat_arg[0] = '\0';
-				snprintf(nat_title, sizeof(nat_title), "%s", tr(S_LISTS));
-				lib.sel = 0;
-				native_fetch_cancel();   /* drop the old view's in-flight fetch */
-				lib.scroll = lib.velocity = 0.0f;
-				lib_reload = true;
+				// Same trip the B button makes.
+				lib_back();
 			}
 			else if (g_touch.clicked >= SL_ROW0)
 				activate_row(g_touch.clicked - SL_ROW0);
@@ -2815,13 +2833,7 @@ int main(int argc, char **argv)
 			}
 			if (down & KEY_B) {
 				if (nat_view != NATIVE_PLAYLISTS) {
-					nat_view = NATIVE_PLAYLISTS;
-					nat_arg[0] = '\0';
-					snprintf(nat_title, sizeof(nat_title), "%s", tr(S_LISTS));
-					lib.sel = 0;
-				native_fetch_cancel();   /* drop the old view's in-flight fetch */
-					lib.scroll = lib.velocity = 0.0f;
-					lib_reload = true;
+					lib_back();
 				} else {
 					lib.open = false;
 				}
