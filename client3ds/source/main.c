@@ -2264,8 +2264,15 @@ int main(int argc, char **argv)
 					break;
 				case NATIVE_FAILED:
 					snprintf(now_title, sizeof(now_title), "%s", tr(S_PLAY_FAIL));
-					snprintf(now_artist, sizeof(now_artist), "%s",
-					         native_last_error());
+					/* A refused audio key is an account/catalog answer, not a
+					 * bug: show the friendly line, the hex code stays in the
+					 * log for debugging. */
+					if (strstr(native_last_error(), "no permite esta cancion"))
+						snprintf(now_artist, sizeof(now_artist), "%s",
+						         tr(S_PREMIUM_REQ));
+					else
+						snprintf(now_artist, sizeof(now_artist), "%s",
+						         native_last_error());
 					break;
 				default:
 					break;

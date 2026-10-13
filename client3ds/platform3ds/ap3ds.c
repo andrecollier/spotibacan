@@ -687,8 +687,8 @@ int ap_audio_key(ap_session *s, const uint8_t file_id[20],
 			if (refused_code)
 				*refused_code = code;
 			snprintf(err, errlen,
-			         "Spotify refused the audio key (0x%04X). This is the "
-			         "restriction on newer accounts, not a bug.", code);
+			         "Spotify no permite esta cancion (0x%04X): se "
+			         "requiere Premium o no esta disponible", code);
 			return AP_KEY_REFUSED;
 		}
 		if (cmd == AP_PKT_PING)
