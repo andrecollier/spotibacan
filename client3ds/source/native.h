@@ -32,6 +32,10 @@ typedef struct {
 	char sub[40];               /* artist, or the track count */
 	char uri[192];              /* spotify:track:... or file:<name>.ogg */
 	char art[200];               /* 64px cover URL, empty when there is none */
+	/* For "go to artist / album" on a selected row; empty when unknown. */
+	char album[48];
+	char artist_uri[40];
+	char album_uri[40];
 	bool is_playlist;
 } native_row;
 

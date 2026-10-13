@@ -1138,12 +1138,42 @@ static bool list_downloadable(void)
 #define ACT_ROW0 0x7200
 static bool actions_open = false;
 static int  actions_sel = 0;
+/* Whose artist and album the menu offers, captured when it opens: the row
+ * selected in an open list, else the song playing. */
+static struct {
+	char artist[128], artist_uri[40];
+	char album[128], album_uri[40];
+} act;
 
 static bool action_enabled(int row)
 {
-	if (row == 0) return native_now_artist_uri()[0] != '\0';
-	if (row == 1) return native_now_album_uri()[0] != '\0';
+	if (row == 0) return act.artist_uri[0] != '\0';
+	if (row == 1) return act.album_uri[0] != '\0';
 	return true;
+}
+
+/* Fills act; false when neither source has anything to go to. */
+static bool actions_capture(void)
+{
+	memset(&act, 0, sizeof(act));
+	if (lib.open) {
+		const int extra = (nat_view == NATIVE_PLAYLISTS) ? 2 : 0;
+		const int idx = lib.sel - extra;
+		if (idx >= 0 && idx < nat_count && !nat_rows[idx].is_playlist &&
+		    (nat_rows[idx].artist_uri[0] || nat_rows[idx].album_uri[0])) {
+			const native_row *r = &nat_rows[idx];
+			snprintf(act.artist, sizeof(act.artist), "%s", r->sub);
+			snprintf(act.artist_uri, sizeof(act.artist_uri), "%s", r->artist_uri);
+			snprintf(act.album, sizeof(act.album), "%s", r->album);
+			snprintf(act.album_uri, sizeof(act.album_uri), "%s", r->album_uri);
+			return true;
+		}
+	}
+	snprintf(act.artist, sizeof(act.artist), "%s", native_now_artist());
+	snprintf(act.artist_uri, sizeof(act.artist_uri), "%s", native_now_artist_uri());
+	snprintf(act.album, sizeof(act.album), "%s", native_now_album());
+	snprintf(act.album_uri, sizeof(act.album_uri), "%s", native_now_album_uri());
+	return act.artist_uri[0] || act.album_uri[0];
 }
 
 static void draw_actions(const Skin *sk)
@@ -1159,7 +1189,7 @@ static void draw_actions(const Skin *sk)
 	ui_depth(0.7f);
 	const char *labels[ACT_ROWS] = { tr(S_GO_ARTIST), tr(S_GO_ALBUM),
 	                                 tr(S_SETTINGS) };
-	const char *subs[ACT_ROWS] = { native_now_artist(), native_now_album(), "" };
+	const char *subs[ACT_ROWS] = { act.artist, act.album, "" };
 	const float rh = 40.0f, ry = py + 16.0f;
 	for (int i = 0; i < ACT_ROWS; i++) {
 		const float y = ry + i * rh;
@@ -2316,11 +2346,9 @@ int main(int argc, char **argv)
 					/* An album or artist opens like a playlist would. */
 					nat_view = NATIVE_TRACKS;
 					snprintf(nat_arg, sizeof(nat_arg), "%s",
-					         row == 0 ? native_now_artist_uri()
-					                  : native_now_album_uri());
+					         row == 0 ? act.artist_uri : act.album_uri);
 					snprintf(nat_title, sizeof(nat_title), "%s",
-					         row == 0 ? native_now_artist()
-					                  : native_now_album());
+					         row == 0 ? act.artist : act.album);
 					lib.open = true;
 					lib.sel = 0;
 					native_fetch_cancel();
@@ -2386,7 +2414,7 @@ int main(int argc, char **argv)
 		} else if (down & KEY_START) {
 			/* With a Spotify track playing, START offers its artist and
 			 * album first; otherwise it is straight to the settings. */
-			if (native_now_artist_uri()[0] || native_now_album_uri()[0]) {
+			if (actions_capture()) {
 				actions_open = true;
 				actions_sel = 0;
 			} else {

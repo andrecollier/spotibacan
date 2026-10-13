@@ -1678,6 +1678,11 @@ static int name_tracks(char uris[][64], int n, native_row *rows, int max,
 			snprintf(r->uri, sizeof(r->uri), "%s",
 			         meta[i].uri[0] ? meta[i].uri : uris[base + i]);
 			snprintf(r->art, sizeof(r->art), "%s", meta[i].art_small);
+			snprintf(r->album, sizeof(r->album), "%s", meta[i].album);
+			snprintf(r->artist_uri, sizeof(r->artist_uri), "%s",
+			         meta[i].artist_uri);
+			snprintf(r->album_uri, sizeof(r->album_uri), "%s",
+			         meta[i].album_uri);
 			r->is_playlist = false;
 		}
 		if (named > done - base)

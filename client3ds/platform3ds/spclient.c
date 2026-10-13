@@ -598,12 +598,18 @@ static int metadata_batch_request(const char *host, http_session *sess,
 					pbv an;
 					if (pb_get_bytes(v.p, v.len, 2, &an))
 						copy_str(out[filled].album, sizeof(out[filled].album), &an);
+					if (pb_get_bytes(v.p, v.len, 1, &an) && an.len == 16)
+						gid_to_uri("album", an.p, out[filled].album_uri,
+						           sizeof(out[filled].album_uri));
 				}
 				read_cover_urls(&track, &out[filled]);
 				if (pb_get_bytes(track.p, track.len, 4, &v)) {
 					pbv an;
 					if (pb_get_bytes(v.p, v.len, 2, &an))
 						copy_str(out[filled].artist, sizeof(out[filled].artist), &an);
+					if (pb_get_bytes(v.p, v.len, 1, &an) && an.len == 16)
+						gid_to_uri("artist", an.p, out[filled].artist_uri,
+						           sizeof(out[filled].artist_uri));
 				}
 				size_t fat = 0;
 				while (fat < track.len && out[filled].file_count < SP_MAX_FILES) {
