@@ -82,6 +82,12 @@ int  native_fetch(native_view view, const char *arg, native_row *rows, int max,
  * The next fetch clears the flag on entry. */
 void native_fetch_cancel(void);
 
+/* Progress hook for long list fetches: fires after each named chunk with the
+ * staging rows filled so far. The UI commits them progressively, so a 500-
+ * song list shows its first 50 after one round trip instead of sitting on a
+ * spinner until the last chunk lands. */
+void native_set_progress_cb(void (*cb)(native_row *rows, int done, int total));
+
 /* ------------------------------------------------------------- playback */
 
 /* Asks for a track. Returns immediately: resolving, fetching the key and

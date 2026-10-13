@@ -405,6 +405,28 @@ static void vcache_store(native_view view, const char *arg, int count)
 	           (int)view, arg ? arg : "-", count, slot);
 }
 
+/* The in-flight fetch's identity, for the progressive commit below. */
+static native_view fetch_view = (native_view)-1;
+static char fetch_arg[64] = "";
+static volatile int fetch_total = 0;
+
+/* Progressive commit: each chunk that lands becomes visible at once, so a
+ * long list starts answering after the first round trip. Dropped the moment
+ * the user navigates away -- the cancel kills the fetch and the discard path
+ * invalidates what was shown. */
+static void list_progress(native_row *rows, int done, int total)
+{
+	const char *cur = nat_view == NATIVE_SEARCH ? lib.query : nat_arg;
+	if (fetch_view != nat_view || strcmp(fetch_arg, cur ? cur : "") != 0)
+		return;
+	memcpy(nat_rows, rows, (size_t)done * sizeof(native_row));
+	nat_count = done;
+	nat_loaded_view = fetch_view;
+	snprintf(nat_loaded_arg, sizeof(nat_loaded_arg), "%s", fetch_arg);
+	fetch_total = total;
+	lib.total = nat_count + (fetch_view == NATIVE_PLAYLISTS ? 2 : 0);
+}
+
 // Pulls one view from Spotify and caches the rows. The fetch is cached by
 // view and argument: scrolling must not cost a round trip, because on this
 // console round trips are the expensive part.
@@ -431,6 +453,9 @@ static void library_fetch(void)
 		} else {
 			lib.loading = true;
 			lib_retry_at = 0;
+			fetch_total = 0;
+			fetch_view = view;
+			snprintf(fetch_arg, sizeof(fetch_arg), "%s", arg);
 			char err[160] = "";
 			/* Fetch into staging, never nat_rows: a fetch whose view is
 			 * discarded (the user navigated away mid-flight) must leave
@@ -450,6 +475,11 @@ static void library_fetch(void)
 			    strcmp(arg, cur ? cur : "") != 0) {
 				native_log("LISTA: fetch de %d descartado (navegacion)\n",
 				           (int)view);
+				/* Partial rows may be on screen from the progressive
+				 * commit: invalidate so coming back refetches the whole
+				 * view rather than trusting the fragment. */
+				if (nat_loaded_view == view)
+					nat_loaded_view = (native_view)-1;
 				return;
 			}
 			if (n < 0) {
@@ -1018,19 +1048,22 @@ static void draw_native_list(const Skin *sk)
 {
 	// While the fetch thread is between views, the cached rows still belong
 	// to the previous one. Drawing them under the new title reads as a
-	// broken list, so the window stays empty and the screen shows the
-	// loading state until the cache matches what is on screen.
+	// broken list, so the window stays empty until the cache matches what is
+	// on screen. A fetch in progress is the exception: its chunks commit
+	// progressively under the matching tag, and those partial rows do show.
 	const char *want_arg = (nat_view == NATIVE_SEARCH) ? lib.query : nat_arg;
-	bool loading = lib.loading || nat_view != nat_loaded_view ||
-	               strcmp(want_arg ? want_arg : "", nat_loaded_arg) != 0;
+	bool match = nat_view == nat_loaded_view &&
+	             strcmp(want_arg ? want_arg : "", nat_loaded_arg) == 0;
+	bool loading = lib.loading || !match;
+	bool show = match && lib.total > 0;
 
 	int extra = (nat_view == NATIVE_PLAYLISTS) ? 2 : 0;
-	int first = (!loading && lib.total) ? (int)(lib.scroll / SL_ROW_H) : 0;
-	float frac = loading ? 0.0f : lib.scroll - first * SL_ROW_H;
+	int first = show ? (int)(lib.scroll / SL_ROW_H) : 0;
+	float frac = show ? lib.scroll - first * SL_ROW_H : 0.0f;
 
 	sl_row rows[8];
 	int n = 0;
-	if (!loading) {
+	if (show) {
 		for (int i = first; i < lib.total && n < 7; i++) {
 			sl_row *r = &rows[n++];
 			if (extra && i == 0) {
@@ -1047,7 +1080,9 @@ static void draw_native_list(const Skin *sk)
 	}
 
 	char count[32] = "";
-	if (!loading && lib.total > 0)
+	if (show && lib.loading && fetch_total > nat_count)
+		snprintf(count, sizeof(count), "%d / %d…", nat_count, fetch_total);
+	else if (show)
 		snprintf(count, sizeof(count), "%d / %d", lib.sel + 1, lib.total);
 
 	screen_list_args a = {0};
@@ -1058,12 +1093,12 @@ static void draw_native_list(const Skin *sk)
 	a.count = count[0] ? count : NULL;
 	a.empty = loading ? tr(S_LOADING) :
 	          nat_status[0] ? nat_status : tr(S_EMPTY_LIST);
-	a.loading = loading;
+	a.loading = loading && !show;
 	a.rows = rows;
 	a.n = n;
 	a.first = first;
 	a.frac = frac;
-	a.total = loading ? 0 : lib.total;
+	a.total = show ? lib.total : 0;
 	a.sel = lib.sel;
 	a.pressed_id = g_touch.down ? g_touch.press_id : -1;
 	a.animation_ms = (unsigned)osGetTime();
@@ -1860,6 +1895,7 @@ int main(int argc, char **argv)
 	liked_load();
 	like_pending_load();
 	native_set_downloads(downloads_on);
+	native_set_progress_cb(list_progress);
 	srand((unsigned)osGetTime());
 
 	// Everything that can fail runs first, while a text console is still the

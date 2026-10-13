@@ -130,6 +130,13 @@ static char dlq_active_title[128];
  * chunks. */
 static volatile bool fetch_cancel;
 
+static void (*progress_cb)(native_row *rows, int done, int total);
+
+void native_set_progress_cb(void (*cb)(native_row *, int, int))
+{
+	progress_cb = cb;
+}
+
 void native_fetch_cancel(void) { fetch_cancel = true; }
 
 static void save_download(const track_stream *ts);
@@ -1404,6 +1411,8 @@ static int name_tracks(char uris[][64], int n, native_row *rows, int max,
 		}
 		if (named > done - base)
 			done = base + named;
+		if (progress_cb)
+			progress_cb(rows, done, n);
 	}
 	http_session_close(sess);
 	if (done <= 0)
