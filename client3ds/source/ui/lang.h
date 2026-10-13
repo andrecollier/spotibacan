@@ -109,6 +109,8 @@ typedef enum {
 	S_PLAY_NEXT,
 	S_DELETE_DL,
 	S_DELETE_CONFIRM,
+	S_VIS_START,
+	S_VIS_STOP,
 	S_COUNT
 } str_id;
 

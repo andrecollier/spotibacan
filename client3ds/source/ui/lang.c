@@ -106,6 +106,8 @@ static const char *const s_strings[LANG_COUNT][S_COUNT] = {
 		[S_PLAY_NEXT]         = "Reproducir a continuacion",
 		[S_DELETE_DL]         = "Borrar descarga",
 		[S_DELETE_CONFIRM]    = "Pulsa A otra vez para borrar",
+		[S_VIS_START]         = "Iniciar visualizador",
+		[S_VIS_STOP]          = "Cerrar visualizador",
 	},
 	[LANG_EN] = {
 		[S_NOTHING_PLAYING]   = "Nothing playing",
@@ -208,6 +210,8 @@ static const char *const s_strings[LANG_COUNT][S_COUNT] = {
 		[S_PLAY_NEXT]         = "Play next",
 		[S_DELETE_DL]         = "Delete download",
 		[S_DELETE_CONFIRM]    = "Press A again to delete",
+		[S_VIS_START]         = "Start visualizer",
+		[S_VIS_STOP]          = "Stop visualizer",
 	},
 };
 

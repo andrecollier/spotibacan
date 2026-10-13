@@ -24,6 +24,7 @@
 #include "ui/screen_lyrics.h"
 #include "ui/screen_player.h"
 #include "ui/thumbs.h"
+#include "ui/visualizer.h"
 #include "ui/touch.h"
 #include "ui/ui.h"
 #include "ui/volume_overlay.h"
@@ -114,6 +115,9 @@ static bool batt_charging = false;
  * charger came off (or the app started); -1 while there is too little to
  * go on. The MCU gives no current draw, only the percent. */
 static int  batt_left_min = -1;
+/* The spectrum visualizer replaces the now-playing top screen while on. */
+static bool vis_open = false;
+static vis_style vis_mode = VIS_CLASSIC;
 /* What the playing list was called, for the status line on top. */
 static char play_ctx_title[64] = "";
 static int  settings_sel = 0;
@@ -349,6 +353,7 @@ static void audio_thread(void *arg)
 			u32 got = ring_read(dst, buf_bytes);
 			if (got < buf_bytes) memset(dst + got, 0, buf_bytes - got);
 			eq_process((int16_t *)dst, FRAMES_PER_BUF);
+			vis_feed(i, (const int16_t *)dst, FRAMES_PER_BUF);
 			DSP_FlushDataCache(dst, buf_bytes);
 			ndspChnWaveBufAdd(0, &waves[i]);
 		}
@@ -1063,6 +1068,34 @@ static void draw_top(const Skin *sk, bool buffering, bool muted, float par)
 	volume_overlay_draw(&va);
 }
 
+/* The visualizer's top screen: a dimmed wash of the cover colour, the
+ * song on one line, the bars below. */
+static void draw_vis_top(const Skin *sk, float par)
+{
+	const u32 tint = tint_cur ? tint_cur : sk->accent;
+	const u32 wash = C2D_Color32((u8)((tint & 0xFF) / 5), (u8)(((tint >> 8) & 0xFF) / 5),
+	                             (u8)(((tint >> 16) & 0xFF) / 5), 0xFF);
+	C2D_DrawRectangle(0.0f, 0.0f, 0.0f, TOP_W, 240.0f, wash, wash,
+	                  0xFF000000, 0xFF000000);
+	char line[200];
+	if (now_artist[0])
+		snprintf(line, sizeof(line), "%s  -  %s", now_title, now_artist);
+	else
+		snprintf(line, sizeof(line), "%s",
+		         now_title[0] ? now_title : tr(S_NOTHING_PLAYING));
+	text_fit(line, 18.0f + par * 0.6f, 12.0f, 0.56f, sk->text, TOP_W - 36.0f);
+	if (now_dur > 1.0f) {
+		char a[12], b[12], t[32];
+		clock_text(a, sizeof(a), now_pos);
+		clock_text(b, sizeof(b), now_dur);
+		snprintf(t, sizeof(t), "%s / %s", a, b);
+		text_at(t, 18.0f + par * 0.6f, 30.0f, 0.42f, sk->dim, 0);
+	}
+	vis_draw(par, tint, vis_mode);
+	volume_overlay_args va = { text_buf, volume, vol_overlay };
+	volume_overlay_draw(&va);
+}
+
 #define BAND_H 40.0f          // title band across the top
 #define BAR_Y  198.0f         // the full-width action bar (setup screens)
 
@@ -1164,7 +1197,7 @@ static bool list_downloadable(void)
 
 /* START while a song plays: jump to its artist or album, or on to the
  * settings. Same modal pattern as the settings sheet, three rows. */
-#define ACT_ROWS 5
+#define ACT_ROWS 6
 #define ACT_ROW0 0x7200
 static bool actions_open = false;
 static int  actions_sel = 0;
@@ -1177,8 +1210,8 @@ static struct {
 	native_row row;
 } act;
 
-/* Rows: 0 play next, 1 artist, 2 album, 3 delete download, 4 settings.
- * Delete takes two presses: the first only arms it. */
+/* Rows: 0 play next, 1 artist, 2 album, 3 visualizer, 4 delete download,
+ * 5 settings. Delete takes two presses: the first only arms it. */
 static bool act_delete_armed = false;
 
 static bool action_enabled(int row)
@@ -1186,7 +1219,8 @@ static bool action_enabled(int row)
 	if (row == 0) return act.has_row;
 	if (row == 1) return act.artist_uri[0] != '\0';
 	if (row == 2) return act.album_uri[0] != '\0';
-	if (row == 3) return act.has_row && strncmp(act.row.uri, "file:", 5) == 0;
+	if (row == 3) return vis_open || native_now_uri()[0] != '\0';
+	if (row == 4) return act.has_row && strncmp(act.row.uri, "file:", 5) == 0;
 	return true;
 }
 
@@ -1214,7 +1248,8 @@ static bool actions_capture(void)
 	snprintf(act.artist_uri, sizeof(act.artist_uri), "%s", native_now_artist_uri());
 	snprintf(act.album, sizeof(act.album), "%s", native_now_album());
 	snprintf(act.album_uri, sizeof(act.album_uri), "%s", native_now_album_uri());
-	return act.artist_uri[0] || act.album_uri[0];
+	/* Anything playing (a saved song too) at least offers the visualizer. */
+	return act.artist_uri[0] || act.album_uri[0] || native_now_uri()[0];
 }
 
 static void draw_actions(const Skin *sk)
@@ -1223,19 +1258,20 @@ static void draw_actions(const Skin *sk)
 	const u32 bord  = C2D_Color32(0x38, 0x38, 0x38, 0xFF);
 	const u32 panel = C2D_Color32(0x1B, 0x1B, 0x1B, 0xFF);
 	C2D_DrawRectSolid(0.0f, 0.0f, 0.6f, BOT_W, SCR_H, dim);
-	const float px = 20.0f, py = 12.0f, pw = 280.0f, ph = 216.0f;
+	const float px = 20.0f, py = 8.0f, pw = 280.0f, ph = 224.0f;
 	C2D_DrawRectSolid(px, py, 0.6f, pw, ph, bord);
 	C2D_DrawRectSolid(px + 1.0f, py + 1.0f, 0.6f, pw - 2.0f, ph - 2.0f, panel);
 
 	ui_depth(0.7f);
 	const char *labels[ACT_ROWS] = { tr(S_PLAY_NEXT), tr(S_GO_ARTIST),
 	                                 tr(S_GO_ALBUM),
+	                                 tr(vis_open ? S_VIS_STOP : S_VIS_START),
 	                                 tr(act_delete_armed ? S_DELETE_CONFIRM
 	                                                     : S_DELETE_DL),
 	                                 tr(S_SETTINGS) };
 	const char *subs[ACT_ROWS] = { act.has_row ? act.row.label : "",
-	                               act.artist, act.album, "", "" };
-	const float rh = 40.0f, ry = py + 14.0f;
+	                               act.artist, act.album, "", "", "" };
+	const float rh = 35.0f, ry = py + 12.0f;
 	for (int i = 0; i < ACT_ROWS; i++) {
 		const float y = ry + i * rh;
 		const bool on = action_enabled(i);
@@ -2485,7 +2521,7 @@ int main(int argc, char **argv)
 			if (g_touch.clicked >= ACT_ROW0 &&
 			    g_touch.clicked < ACT_ROW0 + ACT_ROWS)
 				row = g_touch.clicked - ACT_ROW0;
-			if (row == 3 && action_enabled(3) && !act_delete_armed) {
+			if (row == 4 && action_enabled(4) && !act_delete_armed) {
 				act_delete_armed = true;   /* ask once more */
 				row = -1;
 			}
@@ -2494,11 +2530,15 @@ int main(int argc, char **argv)
 				if (row == 0) {
 					play_insert_next(&act.row);
 				} else if (row == 3) {
+					vis_open = !vis_open;
+					if (vis_open)
+						lib.open = false;   /* the player stays below */
+				} else if (row == 4) {
 					act_delete_armed = false;
 					native_delete_download(act.row.uri);
 					lib_reload = true;   /* the Downloads list rereads the card */
 					nat_loaded_view = (native_view)-1;
-				} else if (row == 4) {
+				} else if (row == 5) {
 					settings_open = true;
 					settings_sel = 0;
 				} else {
@@ -2577,7 +2617,8 @@ int main(int argc, char **argv)
 				actions_open = true;
 				act_delete_armed = false;
 				/* In Downloads the likely wish is the delete row. */
-				actions_sel = strncmp(act.row.uri, "file:", 5) == 0 ? 3 : 0;
+				actions_sel = strncmp(act.row.uri, "file:", 5) == 0 ? 4
+				              : (act.has_row ? 0 : 3);
 			} else {
 				settings_open = true;
 				settings_sel = 0;
@@ -2840,6 +2881,17 @@ int main(int argc, char **argv)
 			}
 		}
 
+		if (vis_open && !lib_was_open && !lib.open && !lyr_open) {
+			/* B leaves the visualizer; X flips between its two looks. */
+			if (down & KEY_B) {
+				vis_open = false;
+				down &= ~KEY_B;
+			}
+			if (down & KEY_X) {
+				vis_mode = (vis_style)((vis_mode + 1) % VIS_STYLE_COUNT);
+				down &= ~KEY_X;
+			}
+		}
 		if (!lib_was_open && !lib.open && !lyr_open && (down & KEY_B)) {
 			lib.open = true;
 			lib_reload = true;
@@ -2981,12 +3033,28 @@ int main(int argc, char **argv)
 		C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
 		const float par = osGet3DSliderState() * 1.5f;
 		tint_cur = tint_step(tint_cur, tint_target ? tint_target : sk->top_bg);
+		if (vis_open) {
+			/* The slot NDSP is playing and where in it: the bars follow
+			 * the speaker, not the decoder running seconds ahead. */
+			int slot = -1;
+			if (!paused && !buffering)
+				for (int i = 0; i < WAVE_BUFFERS; i++)
+					if (waves[i].status == NDSP_WBUF_PLAYING)
+						slot = i;
+			vis_update(slot, ndspChnGetSamplePos(0));
+		}
 		C2D_TargetClear(top, 0xFF000000);
 		C2D_SceneBegin(top);
-		draw_top(sk, buffering, muted, -par);
+		if (vis_open)
+			draw_vis_top(sk, -par);
+		else
+			draw_top(sk, buffering, muted, -par);
 		C2D_TargetClear(topR, 0xFF000000);
 		C2D_SceneBegin(topR);
-		draw_top(sk, buffering, muted, par);
+		if (vis_open)
+			draw_vis_top(sk, par);
+		else
+			draw_top(sk, buffering, muted, par);
 		C2D_TargetClear(bottom, sk->bottom_bg);
 		C2D_SceneBegin(bottom);
 		draw_bottom(sk);
