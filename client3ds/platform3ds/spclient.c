@@ -96,8 +96,20 @@ const char *sp_format_name(int format)
 	}
 }
 
+static volatile bool s_high_quality;
+
+void sp_set_high_quality(bool on) { s_high_quality = on; }
+bool sp_high_quality(void) { return s_high_quality; }
+
 const sp_file *sp_pick_file(const sp_track *t)
 {
+	/* 320 when asked for and the file fits the buffer: about 40 KB a
+	 * second, plus headroom for Vorbis running over its nominal rate. */
+	if (s_high_quality && t->duration_ms > 0 &&
+	    (uint64_t)t->duration_ms * 40 * 11 / 10 + 65536 < SP_HQ_MAX_BYTES)
+		for (int i = 0; i < t->file_count; i++)
+			if (t->files[i].format == SP_FMT_OGG_320)
+				return &t->files[i];
 	/* 160 first, then 96, then 320: the order of what this console should
 	 * actually stream and decode, not of audio quality. */
 	static const int WANT[] = { SP_FMT_OGG_160, SP_FMT_OGG_96, SP_FMT_OGG_320 };

@@ -129,6 +129,13 @@ int  sp_storage_resolve(const char *host, const char *token,
 
 /* Picks the best file this client can actually play, or NULL. */
 const sp_file *sp_pick_file(const sp_track *t);
+
+/* Opt-in 320 kbps (Settings). Only taken when the whole file fits the
+ * stream buffer (SP_HQ_MAX_BYTES, kept equal to TRACK_STREAM_MAX): a long
+ * track quietly falls back to 160 rather than failing. */
+#define SP_HQ_MAX_BYTES (12u * 1024u * 1024u)
+void sp_set_high_quality(bool on);
+bool sp_high_quality(void);
 const char *sp_format_name(int format);
 
 /* The user's profile image URL, from the Web API's /v1/me (the one service
