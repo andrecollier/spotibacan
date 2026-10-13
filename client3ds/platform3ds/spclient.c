@@ -103,9 +103,14 @@ bool sp_high_quality(void) { return s_high_quality; }
 
 const sp_file *sp_pick_file(const sp_track *t)
 {
+	return sp_pick_file_q(t, s_high_quality);
+}
+
+const sp_file *sp_pick_file_q(const sp_track *t, bool hq)
+{
 	/* 320 when asked for and the file fits the buffer: about 40 KB a
 	 * second, plus headroom for Vorbis running over its nominal rate. */
-	if (s_high_quality && t->duration_ms > 0 &&
+	if (hq && t->duration_ms > 0 &&
 	    (uint64_t)t->duration_ms * 40 * 11 / 10 + 65536 < SP_HQ_MAX_BYTES)
 		for (int i = 0; i < t->file_count; i++)
 			if (t->files[i].format == SP_FMT_OGG_320)
@@ -152,8 +157,29 @@ int sp_resolve(char *host, size_t hostlen, char *err, size_t errlen)
 	return 0;
 }
 
+/* One request over the caller's keep-alive session when it has one, else
+ * over a fresh connection. A fresh TLS handshake costs the ARM11 a second
+ * or two; the player pays it for nothing on every track otherwise. */
+static int sp_req(http_session *sess, const char *host, const char *path,
+                  const char *method, const char *token, const char *ctype,
+                  const void *body, size_t len, http_reply *r)
+{
+	if (sess)
+		return http_session_request(sess, path, method, token, ctype,
+		                            "application/x-protobuf", body, len, 0, r);
+	return http_request(host, path, method, token, ctype,
+	                    "application/x-protobuf", body, len, 0, r);
+}
+
 int sp_track_metadata(const char *host, const char *token, const char *track_uri,
                       sp_track *out, char *err, size_t errlen)
+{
+	return sp_track_metadata_s(NULL, host, token, track_uri, out, err, errlen);
+}
+
+int sp_track_metadata_s(http_session *sess, const char *host, const char *token,
+                        const char *track_uri, sp_track *out, char *err,
+                        size_t errlen)
 {
 	memset(out, 0, sizeof(*out));
 
@@ -175,9 +201,8 @@ int sp_track_metadata(const char *host, const char *token, const char *track_uri
 	/* The Bearer matters here as much as on the GETs: without it the service
 	 * answers 200 with an empty body rather than 401, which reads like a
 	 * malformed request. */
-	if (http_request(host, "/extended-metadata/v0/extended-metadata", "POST",
-	                 token, "application/x-protobuf", "application/x-protobuf",
-	                 req.p, req.len, 0, &r) != 0) {
+	if (sp_req(sess, host, "/extended-metadata/v0/extended-metadata", "POST",
+	           token, "application/x-protobuf", req.p, req.len, &r) != 0) {
 		snprintf(err, errlen, "metadata: %s", r.err);
 		return -1;
 	}
@@ -690,6 +715,13 @@ int sp_storage_resolve(const char *host, const char *token,
                        const uint8_t file_id[20], sp_storage *out,
                        char *err, size_t errlen)
 {
+	return sp_storage_resolve_s(NULL, host, token, file_id, out, err, errlen);
+}
+
+int sp_storage_resolve_s(http_session *sess, const char *host,
+                         const char *token, const uint8_t file_id[20],
+                         sp_storage *out, char *err, size_t errlen)
+{
 	memset(out, 0, sizeof(*out));
 
 	char hex[41];
@@ -701,7 +733,7 @@ int sp_storage_resolve(const char *host, const char *token,
 	         "/storage-resolve/files/audio/interactive/%s", hex);
 
 	http_reply r;
-	if (http_get_proto(host, path, token, &r) != 0) {
+	if (sp_req(sess, host, path, "GET", token, NULL, NULL, 0, &r) != 0) {
 		snprintf(err, errlen, "storage-resolve: %s", r.err);
 		return -1;
 	}

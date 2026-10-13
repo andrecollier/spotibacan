@@ -60,6 +60,12 @@ void track_free(track_audio *t);
 #define TRACK_STREAM_MAX (12 * 1024 * 1024)
 
 typedef struct {
+	/* Set by the caller before track_stream_begin: a download for the
+	 * card may take the 320 kbps file, streaming always takes 160. */
+	bool     want_hq;
+	/* Optional keep-alive session to the spclient host for metadata and
+	 * storage-resolve (caller-owned, one thread at a time). */
+	struct http_session *sess;
 	uint8_t *data;              /* reserved whole file; NULL until the
 	                             * total is known */
 	size_t   len;               /* the file's full size */

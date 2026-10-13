@@ -135,6 +135,9 @@ bool         native_current_saved(void);
 /* The player lets the queue start a download (a few blocking seconds) only
  * while the ring has less than this much room left, i.e. is nearly full. */
 #define NATIVE_PUMP_FREE_MAX (96 * 1024)
+/* ...and only with this many seconds of the song still to decode: a start
+ * that runs long must not hold up the next track. */
+#define NATIVE_PUMP_MIN_LEFT_S 45u
 
 /* native_last_error() when Spotify withholds audio keys from the account
  * (librespot#1649). The UI matches it to show a translated explanation. */

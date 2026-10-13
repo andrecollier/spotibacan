@@ -155,6 +155,9 @@ static struct {
 	char          sp_host[128];
 	char          username[128];
 	ap_session   *ap;
+	/* Keep-alive link to spclient for track metadata and storage-resolve.
+	 * Player thread only; it saves a TLS handshake or two per track. */
+	http_session *sp_sess;
 	/* Everything a reconnect needs: the OAuth token the AP logs in with, the
 	 * device id, and the candidate list apresolve gave at init. */
 	char          access_token[1280];
@@ -822,10 +825,16 @@ static void dlq_pump(void)
 	int rc = -1;
 	if (job) {
 		snprintf(job->uri, sizeof(job->uri), "%s", e.uri);
+		/* Only the card copy gets the bigger file: streaming 320 kbps
+		 * outran this console's link and songs took half a minute. */
+		job->ts.want_hq = sp_high_quality();
+		job->ts.sess = g.sp_sess;
 		rc = track_stream_begin(g.sp_host, l5_token(), g.ap, e.uri, NULL,
 		                        &job->ts, err, sizeof(err));
 		if (rc != 0 && strstr(err, "401")) {
 			l5_refresh(true);
+			job->ts.want_hq = sp_high_quality();
+			job->ts.sess = g.sp_sess;
 			rc = track_stream_begin(g.sp_host, l5_token(), g.ap, e.uri,
 			                        NULL, &job->ts, err, sizeof(err));
 		}
@@ -954,7 +963,8 @@ static void play_stream(track_stream *ts)
 		 * the ring, the link is idle: let the download queue use it. The
 		 * start blocks a few seconds, which the full ring covers. */
 		if (ts->dl_done && dlq_count > 0 && !dlq_job &&
-		    g.sink.free_space() < NATIVE_PUMP_FREE_MAX)
+		    g.sink.free_space() < NATIVE_PUMP_FREE_MAX &&
+		    g.total_frames > g.frames_out + NATIVE_PUMP_MIN_LEFT_S * NATIVE_RATE)
 			dlq_pump();
 		long want = g.want_seek_frame;
 		if (want >= 0) {
@@ -1239,11 +1249,13 @@ static void player_thread(void *arg)
 			}
 			snprintf(job->uri, sizeof(job->uri), "%s", uri);
 			char err[192];
+			job->ts.sess = g.sp_sess;
 			int rc = track_stream_begin(g.sp_host, l5_token(), g.ap,
 			                            uri, NULL, &job->ts, err, sizeof(err));
 			if (rc != 0 && strstr(err, "401")) {
 				/* The library token ran out: renew it and try once more. */
 				l5_refresh(true);
+				job->ts.sess = g.sp_sess;
 				rc = track_stream_begin(g.sp_host, l5_token(), g.ap, uri,
 				                        NULL, &job->ts, err, sizeof(err));
 			}
@@ -1263,10 +1275,12 @@ static void player_thread(void *arg)
 					ap_close(g.ap);
 					g.ap = NULL;
 				}
-				if (ap_reconnect())
+				if (ap_reconnect()) {
+					job->ts.sess = g.sp_sess;
 					rc = track_stream_begin(g.sp_host, l5_token(),
 					                        g.ap, uri, NULL, &job->ts, err,
 					                        sizeof(err));
+				}
 			}
 			if (rc != 0) {
 				snprintf(g.error, sizeof(g.error), "%s", err);
@@ -1491,6 +1505,7 @@ int native_init(const native_sink *sink, void (*progress)(const char *step),
 
 	char ignored[128];
 	sp_resolve(g.sp_host, sizeof(g.sp_host), ignored, sizeof(ignored));
+	g.sp_sess = http_session_open(g.sp_host);   /* connects lazily */
 
 	LightLock_Init(&g.lock);
 	g.want_seek_frame = -1;
@@ -1570,6 +1585,7 @@ void native_exit(void)
 	}
 	if (g.ap)
 		ap_close(g.ap);
+	http_session_close(g.sp_sess);
 	memset(&g, 0, sizeof(g));
 	tls_global_exit();
 	psExit();

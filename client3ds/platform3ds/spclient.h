@@ -54,6 +54,10 @@ int  sp_resolve(char *host, size_t hostlen, char *err, size_t errlen);
 /* One track's metadata, via the extended-metadata batch service. */
 int  sp_track_metadata(const char *host, const char *token, const char *track_uri,
                        sp_track *out, char *err, size_t errlen);
+/* The same over a caller-owned keep-alive session (NULL = fresh connection). */
+int  sp_track_metadata_s(http_session *sess, const char *host, const char *token,
+                         const char *track_uri, sp_track *out, char *err,
+                         size_t errlen);
 
 /* Several at once. The service takes a repeated entity_request, so a screenful
  * of tracks costs one round trip instead of one each -- which on this console
@@ -126,6 +130,9 @@ typedef struct {
 int  sp_storage_resolve(const char *host, const char *token,
                         const uint8_t file_id[20], sp_storage *out,
                         char *err, size_t errlen);
+int  sp_storage_resolve_s(http_session *sess, const char *host,
+                          const char *token, const uint8_t file_id[20],
+                          sp_storage *out, char *err, size_t errlen);
 
 /* Picks the best file this client can actually play, or NULL. */
 const sp_file *sp_pick_file(const sp_track *t);
@@ -135,6 +142,8 @@ const sp_file *sp_pick_file(const sp_track *t);
  * track quietly falls back to 160 rather than failing. */
 #define SP_HQ_MAX_BYTES (12u * 1024u * 1024u)
 void sp_set_high_quality(bool on);
+/* sp_pick_file with an explicit choice; sp_pick_file follows the setting. */
+const sp_file *sp_pick_file_q(const sp_track *t, bool hq);
 bool sp_high_quality(void);
 const char *sp_format_name(int format);
 

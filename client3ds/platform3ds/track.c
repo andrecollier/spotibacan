@@ -143,20 +143,25 @@ int track_stream_begin(const char *sp_host, const char *token, ap_session *ap,
                        const char *track_uri, void (*progress)(const char *),
                        track_stream *out, char *err, size_t errlen)
 {
+	/* The fields set by the caller survive the reset. */
+	const bool want_hq = out->want_hq;
+	struct http_session *sess = out->sess;
 	memset(out, 0, sizeof(*out));
+	out->want_hq = want_hq;
+	out->sess = sess;
 	out->dl_restart_at = -1;
 
 	/* The same three steps as track_fetch, in the same order: the key must
 	 * be asked for before the bytes are worth fetching. */
 	if (progress) progress("metadata");
-	if (sp_track_metadata(sp_host, token, track_uri, &out->meta,
-	                      err, errlen) != 0)
+	if (sp_track_metadata_s(out->sess, sp_host, token, track_uri, &out->meta,
+	                        err, errlen) != 0)
 		return -1;
 	if (!out->meta.has_gid) {
 		snprintf(err, errlen, "metadata carried no track id");
 		return -1;
 	}
-	const sp_file *file = sp_pick_file(&out->meta);
+	const sp_file *file = sp_pick_file_q(&out->meta, out->want_hq);
 	if (!file) {
 		snprintf(err, errlen, "no Vorbis file this console can play");
 		return -1;
@@ -164,8 +169,8 @@ int track_stream_begin(const char *sp_host, const char *token, ap_session *ap,
 	out->format = file->format;
 
 	if (progress) progress("storage-resolve");
-	if (sp_storage_resolve(sp_host, token, file->id, &out->storage,
-	                       err, errlen) < 0)
+	if (sp_storage_resolve_s(out->sess, sp_host, token, file->id,
+	                         &out->storage, err, errlen) < 0)
 		return -1;
 
 	if (progress) progress("clave de audio");
