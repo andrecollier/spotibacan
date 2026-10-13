@@ -302,12 +302,21 @@ tls_conn *tls_connect(const char *host, u16 port, int timeout_ms,
 
 	if (rc) {
 		/* A chain that did not verify is the interesting case, so report the
-		 * flags rather than just "handshake failed". */
+		 * flags rather than just "handshake failed". A console with an unset
+		 * clock (fresh battery, never configured) fails every certificate
+		 * with FUTURE/EXPIRED: say so plainly, it is the most common
+		 * setup mistake and "handshake error" sends people nowhere. */
 		st->verify_flags = mbedtls_ssl_get_verify_result(&c->ssl);
 		char reason[128];
 		tls_strerror(rc, reason, sizeof(reason));
-		snprintf(err, errlen, "handshake: %s (verify 0x%08lX)",
-		         reason, (unsigned long)st->verify_flags);
+		if (st->verify_flags & (MBEDTLS_X509_BADCERT_FUTURE |
+		                        MBEDTLS_X509_BADCERT_EXPIRED))
+			snprintf(err, errlen,
+			         "certificado fuera de fecha: revisa la FECHA y HORA "
+			         "de la consola en Configuracion");
+		else
+			snprintf(err, errlen, "handshake: %s (verify 0x%08lX)",
+			         reason, (unsigned long)st->verify_flags);
 		goto drop;
 	}
 
