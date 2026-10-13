@@ -26,18 +26,20 @@ typedef struct {
 } preset_spec;
 
 /* Each preset pays for part of its lift with a cut in overall level, so
- * the limiter only catches the odd peak; Boost runs hot into it. Boost is
- * for the speakers: it trims the lows they cannot play (wasted headroom
- * that only made them rattle) and lifts presence and air instead. */
+ * the limiter only catches the odd peak; Boost runs hot into it. Boost
+ * lifts everything about 5 dB with some low-mid warmth, but leaves the
+ * deep bass (rattle on the speakers) and the top end (harsh) alone. */
 static const preset_spec PRESETS[EQ_COUNT] = {
 	[EQ_OFF]    = { "off",    0.0f, {{0}} },
 	[EQ_BASS]   = { "bass",  -2.5f, {{ BQ_LOWSHELF, 200.0f, 5.0f, 0.7f }} },
 	[EQ_TREBLE] = { "treble",-2.0f, {{ BQ_HIGHSHELF, 5000.0f, 4.0f, 0.7f }} },
 	[EQ_VOCAL]  = { "vocal", -1.0f, {{ BQ_LOWSHELF, 150.0f, -3.0f, 0.7f },
 	                                 { BQ_PEAK, 2500.0f, 3.0f, 1.0f }} },
-	[EQ_BOOST]  = { "boost",  5.0f, {{ BQ_LOWSHELF, 120.0f, -4.0f, 0.7f },
-	                                 { BQ_PEAK, 1500.0f, 3.0f, 0.8f },
-	                                 { BQ_HIGHSHELF, 6000.0f, 3.0f, 0.7f }} },
+	/* Boost was heard as too bright: warmth in the low mids instead of a
+	 * presence bump, and the top end eased back under the added gain. */
+	[EQ_BOOST]  = { "boost",  4.5f, {{ BQ_PEAK, 250.0f, 3.0f, 0.8f },
+	                                 { BQ_PEAK, 3000.0f, 1.0f, 1.0f },
+	                                 { BQ_HIGHSHELF, 8000.0f, -2.5f, 0.7f }} },
 };
 
 static volatile int s_want = EQ_OFF;
