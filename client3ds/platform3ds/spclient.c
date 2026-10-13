@@ -13,6 +13,8 @@
  * EntityRequest { entity_uri 1, query 2 }, ExtensionQuery { extension_kind 1 }.
  * Putting the entity request in field 1 yields HTTP 200 and an empty body,
  * which is a confusing way to be told the shape is wrong. */
+#define EXT_KIND_ARTIST_V4 8
+#define EXT_KIND_ALBUM_V4  9
 #define EXT_KIND_TRACK_V4 10
 
 /* Defined with the playlist code below; the rootlist is the same shape and
@@ -698,6 +700,152 @@ int sp_search_tracks(const char *host, const char *token, const char *query,
 	if (count == 0)
 		snprintf(err, errlen, "no tracks matched");
 	return count;
+}
+
+/* One extended-metadata round trip for n entities of one extension kind;
+ * the caller parses r (and frees it) on success. */
+static int ext_request(http_session *sess, const char *host, const char *token,
+                       int kind, const char *const *uris, int n,
+                       http_reply *r, char *err, size_t errlen)
+{
+	uint8_t q_store[16];
+	pb q;
+	pb_init(&q, q_store, sizeof(q_store));
+	pb_varint(&q, 1, (uint64_t)kind);
+	size_t cap = (size_t)n * 128 + 64;
+	uint8_t *req_store = malloc(cap);
+	if (!req_store) {
+		snprintf(err, errlen, "out of memory");
+		return -1;
+	}
+	pb req;
+	pb_init(&req, req_store, cap);
+	for (int i = 0; i < n; i++) {
+		uint8_t er_store[192];
+		pb er;
+		pb_init(&er, er_store, sizeof(er_store));
+		pb_str(&er, 1, uris[i]);
+		pb_sub(&er, 2, &q);
+		pb_sub(&req, 2, &er);
+	}
+	if (!pb_ok(&req)) {
+		free(req_store);
+		snprintf(err, errlen, "metadata request did not fit");
+		return -1;
+	}
+	int rc = sp_req(sess, host, "/extended-metadata/v0/extended-metadata",
+	                "POST", token, "application/x-protobuf", req.p, req.len, r);
+	free(req_store);
+	if (rc != 0) {
+		snprintf(err, errlen, "metadata: %s", r->err);
+		return -1;
+	}
+	if (r->status != 200) {
+		snprintf(err, errlen, "metadata returned HTTP %d", r->status);
+		http_reply_free(r);
+		return -1;
+	}
+	return 0;
+}
+
+/* The message inside the i-th EntityExtensionData, by walking the array. */
+static bool ext_entity(const http_reply *r, int want, pbv *uri, pbv *msg)
+{
+	pbv arr;
+	if (!pb_get_bytes((const uint8_t *)r->body, r->len, 2, &arr))
+		return false;
+	size_t at = 0;
+	for (int i = 0; at < arr.len; i++) {
+		pbv rest = { arr.p + at, arr.len - at };
+		pbv ed, any;
+		if (!pb_get_bytes(rest.p, rest.len, 3, &ed))
+			return false;
+		at = (size_t)(ed.p + ed.len - arr.p);
+		if (i != want)
+			continue;
+		if (!pb_get_bytes(ed.p, ed.len, 2, uri))
+			uri->len = 0;
+		return pb_get_bytes(ed.p, ed.len, 3, &any) &&
+		       pb_get_bytes(any.p, any.len, 2, msg);
+	}
+	return false;
+}
+
+int sp_artist_releases(http_session *sess, const char *host, const char *token,
+                       const char *artist_uri, sp_release *out, int max,
+                       char *err, size_t errlen)
+{
+	http_reply r;
+	const char *one[1] = { artist_uri };
+	if (ext_request(sess, host, token, EXT_KIND_ARTIST_V4, one, 1, &r,
+	                err, errlen) != 0)
+		return -1;
+	pbv uri, artist;
+	if (!ext_entity(&r, 0, &uri, &artist)) {
+		http_reply_free(&r);
+		snprintf(err, errlen, "no artist metadata");
+		return -1;
+	}
+	/* Artist.album_group (5) then single_group (6): each group lists the
+	 * same release once per market, the first one is the one to use. */
+	int n = 0;
+	static const int GROUPS[2] = { 5, 6 };
+	for (int g = 0; g < 2 && n < max; g++) {
+		size_t at = 0;
+		while (at < artist.len && n < max) {
+			pbv rest = { artist.p + at, artist.len - at };
+			pbv grp, alb, gid;
+			if (!pb_get_bytes(rest.p, rest.len, (uint32_t)GROUPS[g], &grp))
+				break;
+			at = (size_t)(grp.p + grp.len - artist.p);
+			if (!pb_get_bytes(grp.p, grp.len, 1, &alb) ||
+			    !pb_get_bytes(alb.p, alb.len, 1, &gid) || gid.len != 16)
+				continue;
+			memset(&out[n], 0, sizeof(out[n]));
+			gid_to_uri("album", gid.p, out[n].uri, sizeof(out[n].uri));
+			out[n].type = g + 1;
+			n++;
+		}
+	}
+	http_reply_free(&r);
+	if (n == 0)
+		return 0;
+
+	/* Names, years and covers: the artist record only carries the ids. */
+	for (int base = 0; base < n; base += 50) {
+		const int chunk = n - base > 50 ? 50 : n - base;
+		const char *uris[50];
+		for (int i = 0; i < chunk; i++)
+			uris[i] = out[base + i].uri;
+		if (ext_request(sess, host, token, EXT_KIND_ALBUM_V4, uris, chunk,
+		                &r, err, errlen) != 0)
+			break;   /* rows keep their ids; the view names them "Album" */
+		for (int i = 0; i < chunk; i++) {
+			pbv au, album, v;
+			if (!ext_entity(&r, i, &au, &album))
+				break;
+			sp_release *rel = &out[base + i];
+			if (pb_get_bytes(album.p, album.len, 2, &v))
+				copy_str(rel->name, sizeof(rel->name), &v);
+			if (pb_get_bytes(album.p, album.len, 6, &v)) {   /* Date */
+				uint64_t y = 0;
+				if (pb_get_varint(v.p, v.len, 1, &y))
+					rel->year = (int)y;
+			}
+			char ids[3][41] = {{0}};
+			pbv group;
+			if (pb_get_bytes(album.p, album.len, 17, &group))
+				read_image_ids(&group, 1, ids);
+			if (!ids[0][0] && !ids[1][0] && !ids[2][0])
+				read_image_ids(&album, 9, ids);
+			const char *small = ids[1][0] ? ids[1] : ids[0][0] ? ids[0] : ids[2];
+			if (small[0])
+				snprintf(rel->art, sizeof(rel->art),
+				         "https://i.scdn.co/image/%s", small);
+		}
+		http_reply_free(&r);
+	}
+	return n;
 }
 
 int sp_context_tracks(const char *host, const char *token, const char *uri,

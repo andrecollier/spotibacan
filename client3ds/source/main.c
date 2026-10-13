@@ -1837,15 +1837,23 @@ static void play_index(int idx)
 	 * Downloads and its long path would not fit the recent entry anyway. */
 	if (strncmp(nat_rows[idx].uri, "file:", 5) != 0)
 		recents_push(nat_rows[idx].uri, nat_rows[idx].art);
+	/* Only tracks go into the snapshot: an artist view mixes in release
+	 * rows, which open rather than play. */
+	int n = 0, at = -1;
 	for (int i = 0; i < nat_count; i++) {
-		snprintf(play_uris[i], sizeof(play_uris[i]), "%s", nat_rows[i].uri);
-		snprintf(play_art[i], sizeof(play_art[i]), "%s", nat_rows[i].art);
-		snprintf(play_labels[i], sizeof(play_labels[i]), "%s",
+		if (nat_rows[i].is_playlist)
+			continue;
+		if (i == idx)
+			at = n;
+		snprintf(play_uris[n], sizeof(play_uris[n]), "%s", nat_rows[i].uri);
+		snprintf(play_art[n], sizeof(play_art[n]), "%s", nat_rows[i].art);
+		snprintf(play_labels[n], sizeof(play_labels[n]), "%s",
 		         nat_rows[i].label);
-		snprintf(play_subs[i], sizeof(play_subs[i]), "%s", nat_rows[i].sub);
+		snprintf(play_subs[n], sizeof(play_subs[n]), "%s", nat_rows[i].sub);
+		n++;
 	}
-	play_count = nat_count;
-	play_idx = idx;
+	play_count = n;
+	play_idx = at;
 	now_idx = idx;
 	now_view = nat_view;
 	snprintf(now_arg, sizeof(now_arg), "%s",
@@ -1983,7 +1991,10 @@ static void activate_row(int abs)
 		snprintf(nat_title, sizeof(nat_title), "%s", tr(S_DL_VIEW));
 	} else if (idx >= 0 && idx < nat_count && nat_rows[idx].is_playlist) {
 		snprintf(nat_arg, sizeof(nat_arg), "%s", nat_rows[idx].uri);
-		if (native_playlist_name(nat_arg, nat_title, sizeof(nat_title)) != 0)
+		if (strncmp(nat_arg, "spotify:album:", 14) == 0)
+			/* An artist's release row already knows its name. */
+			snprintf(nat_title, sizeof(nat_title), "%s", nat_rows[idx].label);
+		else if (native_playlist_name(nat_arg, nat_title, sizeof(nat_title)) != 0)
 			snprintf(nat_title, sizeof(nat_title), "%s", tr(S_PLAYLIST_FALLBACK));
 		nat_view = NATIVE_TRACKS;
 	} else if (idx >= 0 && idx < nat_count) {

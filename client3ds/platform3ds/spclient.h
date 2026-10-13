@@ -134,6 +134,20 @@ typedef struct {
 int  sp_storage_resolve(const char *host, const char *token,
                         const uint8_t file_id[20], sp_storage *out,
                         char *err, size_t errlen);
+/* An artist's albums and singles, newest Spotify order, for the artist
+ * view. type is 1 for an album, 2 for a single/EP. */
+typedef struct {
+	char uri[40];
+	char name[64];
+	char art[80];       /* 64px cover, "" when none */
+	int  year;          /* 0 when unknown */
+	int  type;
+} sp_release;
+
+int  sp_artist_releases(http_session *sess, const char *host, const char *token,
+                        const char *artist_uri, sp_release *out, int max,
+                        char *err, size_t errlen);
+
 /* The tracks of any context the context service knows: an album, or an
  * artist (its top tracks). Returns the count, or -1 with err set. */
 int  sp_context_tracks(const char *host, const char *token, const char *uri,

@@ -1898,7 +1898,36 @@ int native_fetch(native_view view, const char *arg, native_row *rows, int max,
 			                          err, errlen);
 			if (n < 0)
 				return -1;
-			return name_tracks(uris, n, rows, max, err, errlen);
+			n = name_tracks(uris, n, rows, max, err, errlen);
+			if (n < 0 || strncmp(arg, "spotify:artist:", 15) != 0)
+				return n;
+			/* An artist's context is only its top ten: the albums and
+			 * singles follow as rows that open like a playlist. */
+			static sp_release rel[NATIVE_ROWS];
+			char rerr[160] = "";
+			http_session *s = http_session_open(g.sp_host);
+			int m = sp_artist_releases(s, g.sp_host, token, arg, rel,
+			                           max - n, rerr, sizeof(rerr));
+			http_session_close(s);
+			if (m < 0)
+				nlog("  releases failed: %s\n", rerr);
+			for (int i = 0; i < m && n < max; i++, n++) {
+				native_row *r = &rows[n];
+				memset(r, 0, sizeof(*r));
+				snprintf(r->uri, sizeof(r->uri), "%s", rel[i].uri);
+				snprintf(r->label, sizeof(r->label), "%s",
+				         rel[i].name[0] ? rel[i].name : "Album");
+				if (rel[i].year)
+					snprintf(r->sub, sizeof(r->sub), "%s · %d",
+					         rel[i].type == 2 ? "Single" : "Album", rel[i].year);
+				else
+					snprintf(r->sub, sizeof(r->sub), "%s",
+					         rel[i].type == 2 ? "Single" : "Album");
+				snprintf(r->art, sizeof(r->art), "%s", rel[i].art);
+				r->is_playlist = true;   /* opens instead of playing */
+			}
+			nlog("  artist: %d releases\n", m);
+			return n;
 		}
 		if (!arg || strncmp(arg, "spotify:playlist:", 17) != 0) {
 			snprintf(err, errlen, "not a playlist uri");
