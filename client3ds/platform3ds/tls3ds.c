@@ -67,7 +67,21 @@ static struct {
 	char                     ticket_host[TLS_TICKET_SLOTS][128];
 	bool                     have_ticket[TLS_TICKET_SLOTS];
 	int                      ticket_next;
+	/* Every thread that fetches (player, downloads, art, lister) dials
+	 * through here at once, and MBEDTLS_THREADING_C is off: the ticket ring
+	 * and the DRBG are shared state. Unlocked, a handshake finishing on one
+	 * thread freed a ticket another thread was deep-copying, and the heap
+	 * corruption surfaced later as a crash inside poll(). */
+	LightLock                lock;
 } g;
+
+static int locked_drbg(void *p, unsigned char *out, size_t len)
+{
+	LightLock_Lock(&g.lock);
+	int rc = mbedtls_ctr_drbg_random(p, out, len);
+	LightLock_Unlock(&g.lock);
+	return rc;
+}
 
 /* The matching slot, or the next victim when the host has none yet. */
 static int ticket_slot(const char *host, bool *found)
@@ -100,6 +114,7 @@ int tls_global_init(void)
 	if (g.ready)
 		return 0;
 
+	LightLock_Init(&g.lock);
 	mbedtls_entropy_init(&g.entropy);
 	mbedtls_ctr_drbg_init(&g.drbg);
 	mbedtls_x509_crt_init(&g.anchors);
@@ -271,7 +286,7 @@ tls_conn *tls_connect(const char *host, u16 port, int timeout_ms,
 	mbedtls_ssl_conf_max_tls_version(&c->conf, MBEDTLS_SSL_VERSION_TLS1_2);
 	mbedtls_ssl_conf_authmode(&c->conf, MBEDTLS_SSL_VERIFY_REQUIRED);
 	mbedtls_ssl_conf_ca_chain(&c->conf, &g.anchors, NULL);
-	mbedtls_ssl_conf_rng(&c->conf, mbedtls_ctr_drbg_random, &g.drbg);
+	mbedtls_ssl_conf_rng(&c->conf, locked_drbg, &g.drbg);
 	mbedtls_ssl_conf_ciphersuites(&c->conf, SUITES);
 	mbedtls_ssl_conf_groups(&c->conf, GROUPS);
 	mbedtls_ssl_conf_session_tickets(&c->conf, MBEDTLS_SSL_SESSION_TICKETS_ENABLED);
@@ -285,9 +300,11 @@ tls_conn *tls_connect(const char *host, u16 port, int timeout_ms,
 	if ((rc = mbedtls_ssl_set_hostname(&c->ssl, host)))
 		goto fail;
 	bool found = false;
+	LightLock_Lock(&g.lock);
 	const int slot = ticket_slot(host, &found);
 	if (found)
 		mbedtls_ssl_set_session(&c->ssl, &g.ticket[slot]);
+	LightLock_Unlock(&g.lock);
 
 	mbedtls_ssl_set_bio(&c->ssl, c, bio_send, bio_recv, NULL);
 
@@ -311,9 +328,7 @@ tls_conn *tls_connect(const char *host, u16 port, int timeout_ms,
 		tls_strerror(rc, reason, sizeof(reason));
 		if (st->verify_flags & (MBEDTLS_X509_BADCERT_FUTURE |
 		                        MBEDTLS_X509_BADCERT_EXPIRED))
-			snprintf(err, errlen,
-			         "certificado fuera de fecha: revisa la FECHA y HORA "
-			         "de la consola en Configuracion");
+			snprintf(err, errlen, TLS_ERR_CLOCK);
 		else
 			snprintf(err, errlen, "handshake: %s (verify 0x%08lX)",
 			         reason, (unsigned long)st->verify_flags);
@@ -334,6 +349,9 @@ tls_conn *tls_connect(const char *host, u16 port, int timeout_ms,
 	/* Keep the ticket for the next connection to this host. The slot lookup
 	 * already ran before the handshake: a match is refreshed in place, a miss
 	 * lands on the ring's next victim. */
+	LightLock_Lock(&g.lock);
+	/* Another thread may have handed this slot to a different host while
+	 * the handshake ran; storing still just overwrites one cache entry. */
 	mbedtls_ssl_session_free(&g.ticket[slot]);
 	mbedtls_ssl_session_init(&g.ticket[slot]);
 	if (mbedtls_ssl_get_session(&c->ssl, &g.ticket[slot]) == 0) {
@@ -342,6 +360,7 @@ tls_conn *tls_connect(const char *host, u16 port, int timeout_ms,
 	} else {
 		g.have_ticket[slot] = false;
 	}
+	LightLock_Unlock(&g.lock);
 
 	return c;
 

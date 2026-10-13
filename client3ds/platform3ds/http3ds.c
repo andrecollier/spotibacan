@@ -124,7 +124,9 @@ static size_t dechunk(char *p, size_t len)
 			break;
 		unsigned long size = strtoul(in, NULL, 16);
 		in = nl + 1;
-		if (size == 0 || in + size > end)
+		/* Compare lengths, not pointers: a huge size wraps in + size on a
+		 * 32-bit address space and slips past an end-pointer check. */
+		if (size == 0 || size > (unsigned long)(end - in))
 			break;
 		memmove(out, in, size);
 		out += size;
@@ -554,6 +556,12 @@ static int sess_exact(http_session *s, char *dst, size_t n)
 static int sess_grow(char **buf, size_t *cap, size_t have, size_t extra,
                      size_t limit, char *err, size_t errlen)
 {
+	/* Sizes come off the wire (Content-Length, chunk sizes): reject before
+	 * any addition can wrap a 32-bit size_t into a value that passes. */
+	if (have >= limit || extra >= limit - have) {
+		snprintf(err, errlen, "response over %u bytes", (unsigned)limit);
+		return -1;
+	}
 	if (have + extra + 1 <= *cap)
 		return 0;
 	size_t want = *cap ? *cap : 8192;

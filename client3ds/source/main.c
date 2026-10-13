@@ -15,6 +15,7 @@
 #include "cfg3ds.h"
 #include "lyrics3ds.h"
 #include "native.h"
+#include "tls3ds.h"
 #include "ui/artwork.h"
 #include "ui/lang.h"
 #include "ui/screen_list.h"
@@ -37,7 +38,9 @@
 #include <unistd.h>
 
 #define SOC_BUFFER      0x100000
-#define RING_BYTES      (512 * 1024)   // ~5.9 s at 22050 Hz stereo
+/* ~8.9 s at 44.1 kHz stereo. The cushion lets the download queue spend a
+ * few blocking seconds starting its next file without an audible gap. */
+#define RING_BYTES      (1536 * 1024)
 #define WAVE_BUFFERS    4
 #define FRAMES_PER_BUF  2048
 
@@ -1088,8 +1091,15 @@ static void clock_text(char *out, size_t n, float secs)
 // palm cannot kill the music. Rows draw up to z=0.1 and the list header at
 // 0.5, so the panel lives at 0.6 and its type at 0.7. It takes over the
 // touch map wholesale, so the view below cannot answer taps meant for it.
-#define SETTINGS_ROWS 6
+#define SETTINGS_ROWS 7
 #define SET_ROW0      0x7100
+
+/* Whether the list last shown holds tracks the queue can take. */
+static bool list_downloadable(void)
+{
+	return nat_view != NATIVE_PLAYLISTS && nat_view != NATIVE_DOWNLOADS &&
+	       nat_count > 0 && !native_offline();
+}
 
 static void draw_settings(const Skin *sk)
 {
@@ -1118,8 +1128,8 @@ static void draw_settings(const Skin *sk)
 	}
 
 	const char *labels[SETTINGS_ROWS] = {
-		tr(S_LANGUAGE), tr(S_ACCENT), tr(S_DOWNLOADS), tr(S_UNLINK),
-		tr(S_QUIT), tr(S_BACK_MENU),
+		tr(S_LANGUAGE), tr(S_ACCENT), tr(S_DOWNLOADS), tr(S_DL_LIST),
+		tr(S_UNLINK), tr(S_QUIT), tr(S_BACK_MENU),
 	};
 	const float rh = 27.0f, ry = py + 32.0f;
 	for (int i = 0; i < SETTINGS_ROWS; i++) {
@@ -1153,6 +1163,17 @@ static void draw_settings(const Skin *sk)
 			        ui_baseline(y + 5.0f, TY_ROW_SUB), TY_ROW_SUB, w,
 			        downloads_on ? fg : sk->dim);
 		} else if (i == 3) {
+			/* Which list it would take, or why it cannot. */
+			char note[96];
+			if (list_downloadable())
+				snprintf(note, sizeof(note), "%s (%d)", nat_title,
+				         nat_count);
+			else
+				snprintf(note, sizeof(note), "%s", tr(S_DL_LIST_NOTE));
+			ui_text(text_buf, note, px + 16.0f,
+			        ui_baseline(y + 14.0f, TY_MICRO), TY_MICRO,
+			        pw - 32.0f, i == settings_sel ? fg : sk->dim);
+		} else if (i == 4) {
 			ui_text(text_buf, tr(S_UNLINKED_NOTE), px + 16.0f,
 			        ui_baseline(y + 14.0f, TY_MICRO), TY_MICRO,
 			        pw - 32.0f, i == settings_sel ? fg : sk->dim);
@@ -1457,6 +1478,15 @@ static void draw_queue(const Skin *sk)
 	float y = py + 8.0f;
 	ui_text(text_buf, tr(S_QUEUE), px + 12.0f,
 	        ui_baseline(y, TY_ROW_NAME), TY_ROW_NAME, pw - 24.0f, sk->warm);
+	int q_done = 0, q_total = 0;
+	native_dl_progress(&q_done, &q_total);
+	if (q_total > 0) {
+		char prog[32];
+		snprintf(prog, sizeof(prog), "%d / %d", q_done, q_total);
+		float w = ui_text_width(text_buf, prog, TY_ROW_SUB);
+		ui_text(text_buf, prog, px + pw - 12.0f - w,
+		        ui_baseline(y + 3.0f, TY_ROW_SUB), TY_ROW_SUB, w, sk->accent);
+	}
 	y += 24.0f;
 
 	char active[128];
@@ -1489,7 +1519,7 @@ static void draw_queue(const Skin *sk)
 		        ui_baseline(y, TY_ROW_SUB), TY_ROW_SUB, pw - 24.0f,
 		        sk->dim);
 	} else {
-		for (int i = 0; i < n && y < py + ph - 16.0f; i++) {
+		for (int i = 0; i < n && y < py + ph - 30.0f; i++) {
 			char title[128];
 			if (!native_dl_queue_entry(i, title, sizeof(title)))
 				break;
@@ -1500,6 +1530,10 @@ static void draw_queue(const Skin *sk)
 			        sk->dim);
 			y += 14.5f;
 		}
+		if (n > 0)
+			ui_text(text_buf, tr(S_QUEUE_CLEAR), px + 12.0f,
+			        ui_baseline(py + ph - 18.0f, TY_MICRO), TY_MICRO,
+			        pw - 24.0f, sk->accent);
 	}
 	ui_depth(0.0f);
 }
@@ -1592,10 +1626,20 @@ static void draw_bottom(const Skin *sk)
 	}
 }
 
+/* Set while track_ended starts the next song: the ring still holds the
+ * finished song's last seconds, which must play out instead of being cut. */
+static bool auto_advance = false;
+/* Seconds of the old song left in the ring when the next one is fetched:
+ * about what a track takes to start, so the handover is near gapless. */
+#define END_LEAD_S 4
+/* The decoder finished a song; the ring is still draining it. */
+static bool end_pending = false;
+
 // Starts a track by URI alone, for the shelf: no list context to remember,
 // so prev/next grey out until a list play gives them bounds again.
 static void play_uri(const char *uri)
 {
+	end_pending = false;
 	native_play(uri);
 	now_idx = -1;
 	play_count = 0;   /* off-list: no neighbours to step to */
@@ -1603,7 +1647,8 @@ static void play_uri(const char *uri)
 	buffering = true;
 	paused = false;
 	ndspChnSetPaused(0, false);
-	ring_clear();
+	if (!auto_advance)
+		ring_clear();
 }
 
 // Starts a track from the cached rows and snapshots the whole list: that
@@ -1637,6 +1682,7 @@ static void play_index(int idx)
 // the row index still matches if that list is the one displayed.
 static void play_step(int idx)
 {
+	end_pending = false;
 	if (strncmp(play_uris[idx], "file:", 5) != 0)
 		recents_push(play_uris[idx], play_art[idx]);
 	native_play(play_uris[idx]);
@@ -1645,7 +1691,8 @@ static void play_step(int idx)
 	buffering = true;
 	paused = false;
 	ndspChnSetPaused(0, false);
-	ring_clear();
+	if (!auto_advance)
+		ring_clear();
 }
 
 // Whether the list still shows the view the playing track came from.
@@ -1679,8 +1726,10 @@ static int step_index(int dir)
  * Anything played off-list (the shelf) simply stops. */
 static void track_ended(void)
 {
+	auto_advance = true;
 	if (repeat_mode == 2 && native_now_uri()[0]) {
 		play_uri(native_now_uri());
+		auto_advance = false;
 		return;
 	}
 	int next = step_index(+1);
@@ -1688,6 +1737,7 @@ static void track_ended(void)
 		next = 0;
 	if (next >= 0)
 		play_step(next);
+	auto_advance = false;
 }
 
 // What activating an absolute list row means: the synthetic Liked Songs or
@@ -1770,6 +1820,22 @@ static char setup_code[16] = "";
 static char setup_url[128] = "";
 static char setup_error[192] = "";
 
+/* The few failures a person can do something about, in their language;
+ * anything else is shown as the backend reported it. */
+static const char *friendly_error(const char *e)
+{
+	if (!e)
+		return "";
+	if (strncmp(e, TLS_ERR_CLOCK_PREFIX, strlen(TLS_ERR_CLOCK_PREFIX)) == 0)
+		return tr(S_ERR_CLOCK);
+	if (strncmp(e, NATIVE_ERR_KEY_BLOCKED, 11) == 0)
+		return tr(S_ERR_KEY_BLOCKED);
+	if (strstr(e, "DNS failed") || strstr(e, "connect()") ||
+	    strstr(e, "Network init"))
+		return tr(S_ERR_NETWORK);
+	return e;
+}
+
 static C3D_RenderTarget *g_top, *g_bottom;
 
 // One painted screen for everything that happens before the library exists:
@@ -1784,7 +1850,16 @@ static void draw_setup(void)
 	C2D_SceneBegin(g_top);
 	if (setup_error[0]) {
 		text_at(tr(S_SIGNIN_FAIL), 28, 40, 0.80f, sk->warm, 0);
-		text_fit(setup_error, 28, 86, 0.50f, sk->text, TOP_W - 56);
+		/* Wrapped, not clipped: the useful half of these messages ("set
+		 * the Date & Time") used to fall off the right edge. */
+		const char *nice = friendly_error(setup_error);
+		float bl = ui_text_wrapped(text_buf, nice, 28.0f,
+		                           ui_baseline(80.0f, TY_ROW_NAME),
+		                           TY_ROW_NAME, TOP_W - 56.0f, sk->text, 5,
+		                           1.35f);
+		if (nice != setup_error)
+			ui_text_wrapped(text_buf, setup_error, 28.0f, bl + 22.0f,
+			                TY_ROW_SUB, TOP_W - 56.0f, sk->dim, 3, 1.3f);
 	} else if (setup_code[0]) {
 		text_at(tr(S_PAIR_TITLE), 28, 36, 0.80f, sk->warm, 0);
 		text_at(tr(S_PAIR_LINE1), 28, 84, 0.50f, sk->dim, 0);
@@ -1809,7 +1884,9 @@ static void draw_setup(void)
 		/* The offline hint is the useful action here, so it gets the
 		 * middle of the screen in accent, not a line clipped under the
 		 * bar. */
-		text_at(tr(S_OFFLINE_A), BOT_W / 2, 108, 0.56f, sk->accent,
+		text_at(tr(S_X_RETRY), BOT_W / 2, 84, 0.56f, sk->accent,
+		        C2D_AlignCenter);
+		text_at(tr(S_OFFLINE_A), BOT_W / 2, 124, 0.56f, sk->accent,
 		        C2D_AlignCenter);
 		C2D_DrawRectSolid(0, BAR_Y, 0.0f, BOT_W, SCR_H - BAR_Y, sk->accent);
 		text_at(tr(S_START_QUIT), BOT_W / 2, BAR_Y + 10, 0.54f, sk->on_accent,
@@ -1922,6 +1999,9 @@ int main(int argc, char **argv)
 
 		// First run on a console: pair here rather than in a separate tool.
 		bool ok = true;
+	retry_signin:
+		ok = true;
+		setup_error[0] = '\0';
 		if (!native_has_token())
 			ok = native_pair(pair_show_code, pair_poll_frame, nat_err,
 			                 sizeof(nat_err)) == 0;
@@ -1937,6 +2017,12 @@ int main(int argc, char **argv)
 			while (aptMainLoop()) {
 				hidScanInput();
 				u32 d = hidKeysDown();
+				if (d & KEY_X) {
+					/* A fixed clock or a found network needs no restart. */
+					snprintf(setup_step, sizeof(setup_step), "%s",
+					         tr(S_STARTING));
+					goto retry_signin;
+				}
 				if (d & KEY_A) {
 					ok = native_init_offline(&sink) == 0;
 					if (ok) {
@@ -1996,6 +2082,10 @@ int main(int argc, char **argv)
 		// The rects belong to the frame just drawn, so this runs before any
 		// of them are rebuilt below.
 		touch_update(&g_touch, g_tb.rects, g_tb.n);
+		/* B closes the list, then B on the player opens it again: judged
+		 * against the state at the top of the frame, so one press never
+		 * does both. */
+		const bool lib_was_open = lib.open;
 
 		// A settings change armed last frame applies now: the menu already
 		// showed its busy hint, so the SD write stalls behind feedback
@@ -2041,10 +2131,17 @@ int main(int argc, char **argv)
 			case 2:   // downloads toggle -- same
 				settings_pending = row;
 				break;
-			case 3:   // unlink: wipe the token (and prefs) and leave
+			case 3:   // queue every track of the list last shown
+				if (list_downloadable()) {
+					native_dl_enqueue_list(nat_rows, nat_count);
+					settings_open = false;
+					queue_open = true;   /* show what got queued */
+				}
+				break;
+			case 4:   // unlink: wipe the token (and prefs) and leave
 				cfg_clear();
 				goto quit;
-			case 4:   // quit
+			case 5:   // quit
 				goto quit;
 			default:
 				break;
@@ -2092,9 +2189,11 @@ int main(int argc, char **argv)
 			g_touch.clicked = -1;
 			g_touch.long_pressed = -1;
 		} else if (queue_open) {
-			// Read-only and live: a key or a tap anywhere closes it.
-			if (down & (KEY_B | KEY_START | KEY_SELECT | KEY_A) ||
-			    g_touch.clicked >= 0)
+			// Live: X empties what is still waiting, anything else closes.
+			if (down & KEY_X)
+				native_dl_clear();
+			else if (down & (KEY_B | KEY_START | KEY_SELECT | KEY_A) ||
+			         g_touch.clicked >= 0)
 				queue_open = false;
 			down = 0;
 			g_touch.clicked = -1;
@@ -2127,6 +2226,7 @@ int main(int argc, char **argv)
 				now_pos = frac * now_dur;
 			} else {
 				native_seek(now_pos);
+				ring_clear();   /* the cushion holds pre-seek audio */
 				scrubbing = false;
 			}
 		}
@@ -2218,8 +2318,11 @@ int main(int argc, char **argv)
 					lid_mode_set(true);
 				else if (st == NATIVE_IDLE || st == NATIVE_FAILED)
 					lid_mode_set(false);
+				/* The decoder is done, the speaker is not: wait until
+				 * about as much audio is left as the next track takes to
+				 * start, then fetch it, so neither end gets cut. */
 				if (st == NATIVE_IDLE && prev_state == NATIVE_PLAYING)
-					track_ended();
+					end_pending = true;
 				switch (st) {
 				case NATIVE_LOADING:
 					snprintf(now_title, sizeof(now_title), "%s", tr(S_LOADING_DOTS));
@@ -2229,17 +2332,29 @@ int main(int argc, char **argv)
 				case NATIVE_FAILED:
 					snprintf(now_title, sizeof(now_title), "%s", tr(S_PLAY_FAIL));
 					snprintf(now_artist, sizeof(now_artist), "%s",
-					         native_last_error());
+					         friendly_error(native_last_error()));
 					break;
 				default:
 					break;
 				}
 			}
+			if (end_pending &&
+			    ring_used() < (u32)SAMPLE_RATE * 4 * END_LEAD_S) {
+				end_pending = false;
+				track_ended();
+			}
 			if (st == NATIVE_PLAYING) {
 				snprintf(now_title, sizeof(now_title), "%s", native_now_title());
 				snprintf(now_artist, sizeof(now_artist), "%s", native_now_artist());
 				snprintf(now_album, sizeof(now_album), "%s", native_now_album());
-				now_pos = scrubbing ? now_pos : native_position();
+				if (!scrubbing) {
+					/* The decoder runs a ring ahead of the speaker. */
+					float queued = (float)ring_used() /
+					               (float)(SAMPLE_RATE * 4);
+					now_pos = native_position() - queued;
+					if (now_pos < 0.0f)
+						now_pos = 0.0f;
+				}
 				now_dur = native_duration();
 				server_playing = true;
 				// The cover follows the track; the art worker fetches it and
@@ -2357,6 +2472,11 @@ int main(int argc, char **argv)
 					lib.open = false;
 				}
 			}
+		}
+
+		if (!lib_was_open && !lib.open && !lyr_open && (down & KEY_B)) {
+			lib.open = true;
+			lib_reload = true;
 		}
 
 		if (!lib.open && (down & KEY_A)) {

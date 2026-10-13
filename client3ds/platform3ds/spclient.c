@@ -735,12 +735,12 @@ int sp_user_image(const char *token, char *url, size_t urllen,
 	if (retry_after)
 		*retry_after = 0;
 	if (http_get("api.spotify.com", "/v1/me", token, &r) != 0) {
-		snprintf(err, errlen, "perfil: %s", r.err);
+		snprintf(err, errlen, "profile: %s", r.err);
 		http_reply_free(&r);
 		return -1;
 	}
 	if (r.status != 200) {
-		snprintf(err, errlen, "perfil: HTTP %d", r.status);
+		snprintf(err, errlen, "profile: HTTP %d", r.status);
 		if (r.status == 429 && retry_after)
 			*retry_after = r.retry_after;
 		http_reply_free(&r);
@@ -769,7 +769,7 @@ int sp_user_image(const char *token, char *url, size_t urllen,
 	}
 	http_reply_free(&r);
 	if (!url[0]) {
-		snprintf(err, errlen, "la cuenta no tiene foto usable");
+		snprintf(err, errlen, "the account has no usable picture");
 		return -1;
 	}
 	return 0;
@@ -788,14 +788,14 @@ int sp_library_modify(const char *token, const char *track_id, bool save,
 	 * a Content-Type the tiny client does not bother with elsewhere. */
 	if (http_request("api.spotify.com", path, save ? "PUT" : "DELETE",
 	                 token, NULL, NULL, NULL, 0, 0, &r) != 0) {
-		snprintf(err, errlen, "me gusta: %s", r.err);
+		snprintf(err, errlen, "like: %s", r.err);
 		http_reply_free(&r);
 		return -1;
 	}
 	if (r.status == 429 && retry_after)
 		*retry_after = r.retry_after;
 	if (r.status != 200) {
-		snprintf(err, errlen, "me gusta: HTTP %d", r.status);
+		snprintf(err, errlen, "like: HTTP %d", r.status);
 		http_reply_free(&r);
 		return r.status == 403 ? 1 : -1;   /* 1: missing scope, re-pair */
 	}

@@ -85,6 +85,13 @@ static const char *const s_strings[LANG_COUNT][S_COUNT] = {
 		[S_QUEUE_EMPTY]       = "La cola esta vacia",
 		[S_QUEUE_DLING]       = "Descargando",
 		[S_UPNEXT]            = "A continuacion",
+		[S_DL_LIST]           = "Descargar esta lista",
+		[S_DL_LIST_NOTE]      = "Abre una lista o Me gusta primero",
+		[S_QUEUE_CLEAR]       = "X  Vaciar la cola",
+		[S_X_RETRY]           = "X  Reintentar",
+		[S_ERR_CLOCK]         = "La fecha de la consola es incorrecta. Ajusta Fecha y hora en la Configuracion de la consola y pulsa X.",
+		[S_ERR_NETWORK]       = "Sin conexion a internet. Revisa el Wi-Fi y pulsa X.",
+		[S_ERR_KEY_BLOCKED]   = "Spotify no deja reproducir con esta cuenta (cuentas nuevas)",
 	},
 	[LANG_EN] = {
 		[S_NOTHING_PLAYING]   = "Nothing playing",
@@ -166,6 +173,13 @@ static const char *const s_strings[LANG_COUNT][S_COUNT] = {
 		[S_QUEUE_EMPTY]       = "The queue is empty",
 		[S_QUEUE_DLING]       = "Downloading",
 		[S_UPNEXT]            = "Up next",
+		[S_DL_LIST]           = "Download this list",
+		[S_DL_LIST_NOTE]      = "Open a playlist or Liked Songs first",
+		[S_QUEUE_CLEAR]       = "X  Clear the queue",
+		[S_X_RETRY]           = "X  Retry",
+		[S_ERR_CLOCK]         = "The console clock is wrong. Set Date & Time in System Settings, then press X.",
+		[S_ERR_NETWORK]       = "No internet connection. Check Wi-Fi, then press X.",
+		[S_ERR_KEY_BLOCKED]   = "Spotify blocks playback for this account (newer accounts)",
 	},
 };
 

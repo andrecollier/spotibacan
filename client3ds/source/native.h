@@ -130,7 +130,23 @@ bool         native_current_saved(void);
 /* An armed download that gets cut short (its background slot is taken by a
  * newer one) is queued here instead of dying: the player drains the queue
  * one track at a time whenever no other download is using the link. */
-#define NATIVE_DLQ_MAX 12
+#define NATIVE_DLQ_MAX 512      /* a whole list: rows cap at NATIVE_ROWS */
+
+/* The player lets the queue start a download (a few blocking seconds) only
+ * while the ring has less than this much room left, i.e. is nearly full. */
+#define NATIVE_PUMP_FREE_MAX (96 * 1024)
+
+/* native_last_error() when Spotify withholds audio keys from the account
+ * (librespot#1649). The UI matches it to show a translated explanation. */
+#define NATIVE_ERR_KEY_BLOCKED "key-blocked: Spotify refuses audio keys for this account"
+
+/* Queues every track row of a list for download; returns how many were
+ * added (rows already queued or past NATIVE_DLQ_MAX are skipped). */
+int  native_dl_enqueue_list(const native_row *rows, int n);
+/* Drops everything still waiting (the running download finishes). */
+void native_dl_clear(void);
+/* Finished (incl. failed) and total for the current batch. */
+void native_dl_progress(int *done, int *total);
 
 /* Queue length for the badge, and entry i's title for the popup
  * (0 = the oldest). Returns false when i is out of range. */

@@ -13,6 +13,13 @@
 
 typedef struct tls_conn tls_conn;
 
+/* The error text a handshake reports when every certificate is outside its
+ * validity window -- almost always a console clock that was never set. The
+ * UI matches the "clock:" prefix to show a translated fix instead. */
+#define TLS_ERR_CLOCK_PREFIX "clock:"
+#define TLS_ERR_CLOCK TLS_ERR_CLOCK_PREFIX \
+	" certificate dates invalid, set Date & Time in System Settings"
+
 /* Everything the probe wants to report, filled in even when the connection
  * fails -- the stage that is still zero is the one that broke. */
 typedef struct {

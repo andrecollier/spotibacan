@@ -108,6 +108,7 @@ typedef struct dl_job {
 	 * 0 both alive, 1 player detached (thread frees), 2 thread finished
 	 * (player joins and frees). The CAS makes the handoff race-free. */
 	volatile int  handoff;
+	bool          from_queue;   /* started by the download queue */
 	struct dl_job *next;
 } dl_job;
 
@@ -122,8 +123,13 @@ typedef struct {
 
 static dlq_entry dlq[NATIVE_DLQ_MAX];
 static int dlq_count;                    /* guarded by g.lock */
-static volatile int dlq_active_pct = -1; /* 0-100 while draining, else -1 */
 static char dlq_active_title[128];
+/* The queue's one in-flight download (guarded by g.lock). The job is
+ * detached the moment it starts, so its thread clears this before it frees
+ * the job; anyone holding the lock may read through it. */
+static struct dl_job *dlq_job;
+/* Progress for the "12 / 87" readout, reset whenever the queue runs dry. */
+static int dlq_done, dlq_failed;
 
 /* Navigation away from a view whose fetch is still walking chunks sets
  * this; native_fetch clears it on entry and name_tracks honors it between
@@ -137,6 +143,14 @@ static void save_download(const track_stream *ts);
 static struct {
 	bool          ready;
 	login5_token  l5;
+	/* The login5 token lasts about an hour. It is renewed on the player
+	 * thread from the stored credentials; readers on other threads take it
+	 * through l5_token(), which flips between two buffers so a refresh
+	 * never rewrites a token someone is in the middle of sending. */
+	char          l5_tok[2][1024];
+	volatile int  l5_cur;
+	uint8_t       l5_cred[320];
+	size_t        l5_cred_len;
 	char          sp_host[128];
 	char          username[128];
 	ap_session   *ap;
@@ -181,6 +195,8 @@ static struct {
 	 * completes, which a skip interrupts -- so it means "let this one
 	 * finish". Cleared when the track changes. */
 	volatile bool want_save;
+	/* Armed after the current file already landed: the player saves it. */
+	volatile bool save_now;
 
 	/* Offline mode: the player thread runs but never touches the network.
 	 * Set once at init, read everywhere, never cleared. */
@@ -189,19 +205,61 @@ static struct {
 
 void native_set_downloads(bool on) { g.downloads_on = on; }
 
+static const char *l5_token(void) { return g.l5_tok[g.l5_cur]; }
+
+static void l5_publish(void)
+{
+	const int next = !g.l5_cur;
+	snprintf(g.l5_tok[next], sizeof(g.l5_tok[next]), "%s", g.l5.access_token);
+	if (g.l5.stored_len && g.l5.stored_len <= sizeof(g.l5_cred)) {
+		memcpy(g.l5_cred, g.l5.stored, g.l5.stored_len);
+		g.l5_cred_len = g.l5.stored_len;
+	}
+	__sync_synchronize();
+	g.l5_cur = next;
+}
+
+/* Renews the library token ahead of its expiry (or right away when force is
+ * set, after a 401). Player thread only. Without this, every metadata and
+ * browse call started failing with HTTP 401 about an hour in. */
+static void l5_refresh(bool force)
+{
+	if (!g.l5_cred_len || g.offline)
+		return;
+	static time_t next_try;
+	time_t now = time(NULL);
+	if (!force && (g.l5.expires_at == 0 || now < g.l5.expires_at - 300))
+		return;
+	if (now < next_try)
+		return;
+	next_try = now + 30;   /* a failing login5 is not retried in a tight loop */
+	login5_token fresh;
+	char err[192];
+	if (login5_from_credentials(g.username, g.l5_cred, g.l5_cred_len,
+	                            g.device_id, &fresh, err, sizeof(err)) != 0) {
+		nlog("L5: refresh failed: %s\n", err);
+		return;
+	}
+	g.l5 = fresh;
+	l5_publish();
+	nlog("L5: token refreshed\n");
+}
+
 void native_save_current(void)
 {
 	g.want_save = !g.want_save;
+	LightLock_Lock(&g.lock);
 	if (g.job) {
 		g.job->save = g.want_save;
 		/* The download may already be complete (a 3-minute song lands in
-		 * seconds), in which case the download thread checked the flag
-		 * long ago and nobody else will save it: do it here. The CAS
-		 * keeps this from racing the thread's own save. */
-		if (g.want_save && g.job->ts.dl_done && !g.job->ts.dl_failed &&
-		    !__sync_lock_test_and_set(&g.job->saved, 1))
-			save_download(&g.job->ts);
+		 * seconds), so the download thread checked the flag long ago. The
+		 * save itself (MBs to SD plus a cover fetch) used to run right
+		 * here on the UI thread, freezing it, racing the job's teardown.
+		 * The player thread does it instead. */
+		if (g.want_save)
+			g.save_now = true;
 	}
+	LightLock_Unlock(&g.lock);
 }
 bool native_save_armed(void) { return g.want_save; }
 
@@ -225,17 +283,61 @@ bool native_dl_queue_entry(int i, char *title, size_t titlelen)
 
 int native_dl_active(char *title_out, size_t titlelen)
 {
-	int pct = dlq_active_pct;
-	if (pct >= 0)
+	int pct = -1;
+	LightLock_Lock(&g.lock);
+	if (dlq_job) {
+		const track_stream *ts = &dlq_job->ts;
+		pct = ts->len ? (int)((uint64_t)ts->downloaded * 100 / ts->len) : 0;
+		if (pct > 100)
+			pct = 100;
 		snprintf(title_out, titlelen, "%s", dlq_active_title);
+	}
+	LightLock_Unlock(&g.lock);
 	return pct;
 }
 
-/* Appends a track to the download queue, unless it is already queued or
- * already on the card. Caller holds no lock. Returns false when the queue
- * is full: twelve pending downloads is plenty for a handheld. */
-static bool dlq_enqueue(const char *uri, const char *artist,
-                        const char *title)
+void native_dl_progress(int *done, int *total)
+{
+	LightLock_Lock(&g.lock);
+	*done = dlq_done + dlq_failed;
+	*total = *done + dlq_count + (dlq_job ? 1 : 0);
+	LightLock_Unlock(&g.lock);
+}
+
+/* The queue survives a restart: one "uri<TAB>artist<TAB>title" per line
+ * beside the config. Rewritten whole on every change, which is a few KB at
+ * most and happens once per track. */
+static void dlq_file(char *out, size_t n)
+{
+	char d[320];
+	cfg_dir(d, sizeof(d));
+	snprintf(out, n, "%sdlqueue.txt", d);
+}
+
+static void dlq_save(void)
+{
+	char path[352], tmp[360];
+	dlq_file(path, sizeof(path));
+	snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+	FILE *f = fopen(tmp, "w");
+	if (!f)
+		return;
+	LightLock_Lock(&g.lock);
+	for (int i = 0; i < dlq_count; i++)
+		fprintf(f, "%s\t%s\t%s\n", dlq[i].uri, dlq[i].artist, dlq[i].title);
+	LightLock_Unlock(&g.lock);
+	if (fclose(f) == 0) {
+		remove(path);
+		rename(tmp, path);
+	} else {
+		remove(tmp);
+	}
+}
+
+/* Appends a track to the download queue, unless it is already queued.
+ * Caller holds no lock. Returns false when the queue is full. */
+static bool dlq_add(const char *uri, const char *artist, const char *title,
+                    bool quiet)
 {
 	LightLock_Lock(&g.lock);
 	for (int i = 0; i < dlq_count; i++)
@@ -253,8 +355,68 @@ static bool dlq_enqueue(const char *uri, const char *artist,
 	snprintf(e->artist, sizeof(e->artist), "%s", artist);
 	snprintf(e->title, sizeof(e->title), "%s", title);
 	LightLock_Unlock(&g.lock);
-	nlog("DLQ: en cola %s - %s\n", artist, title);
+	if (!quiet)
+		nlog("DLQ: en cola %s - %s\n", artist, title);
 	return true;
+}
+
+static bool dlq_enqueue(const char *uri, const char *artist,
+                        const char *title)
+{
+	bool ok = dlq_add(uri, artist, title, false);
+	dlq_save();
+	return ok;
+}
+
+int native_dl_enqueue_list(const native_row *rows, int n)
+{
+	if (!g.ready || g.offline)
+		return 0;
+	int added = 0, before = native_dl_queue_count();
+	for (int i = 0; i < n; i++) {
+		const native_row *r = &rows[i];
+		if (r->is_playlist || strncmp(r->uri, "spotify:track:", 14) != 0)
+			continue;
+		if (!dlq_add(r->uri, r->sub, r->label, true))
+			break;   /* full */
+	}
+	added = native_dl_queue_count() - before;
+	nlog("DLQ: %d of %d tracks queued from a list\n", added, n);
+	dlq_save();
+	return added;
+}
+
+void native_dl_clear(void)
+{
+	LightLock_Lock(&g.lock);
+	dlq_count = 0;
+	LightLock_Unlock(&g.lock);
+	dlq_save();
+}
+
+static void dlq_load(void)
+{
+	char path[352];
+	dlq_file(path, sizeof(path));
+	FILE *f = fopen(path, "r");
+	if (!f)
+		return;
+	char line[400];
+	while (fgets(line, sizeof(line), f)) {
+		char *nl = strpbrk(line, "\r\n");
+		if (nl)
+			*nl = '\0';
+		char *a = strchr(line, '\t');
+		char *t = a ? strchr(a + 1, '\t') : NULL;
+		if (!t)
+			continue;
+		*a++ = '\0';
+		*t++ = '\0';
+		if (strncmp(line, "spotify:track:", 14) == 0)
+			dlq_add(line, a, t, true);
+	}
+	fclose(f);
+	nlog("DLQ: %d tracks restored from the card\n", native_dl_queue_count());
 }
 
 bool native_ready(void) { return g.ready; }
@@ -281,7 +443,7 @@ int native_pair(void (*show_code)(const char *code, const char *url),
 	 * so it brings up what it needs itself. Both calls are no-ops the second
 	 * time around. */
 	if (R_FAILED(psInit())) {
-		snprintf(err, errlen, "sin fuente de entropia (ps:ps)");
+		snprintf(err, errlen, "no entropy source (ps:ps)");
 		return -1;
 	}
 	int rc = tls_global_init();
@@ -307,7 +469,7 @@ int native_pair(void (*show_code)(const char *code, const char *url),
 		 * keep the code on screen and the buttons alive. */
 		for (int i = 0; i < interval * 60; i++)
 			if (poll && !poll(attempt)) {
-				snprintf(err, errlen, "cancelado");
+				snprintf(err, errlen, "cancelled");
 				return -1;
 			}
 
@@ -317,7 +479,7 @@ int native_pair(void (*show_code)(const char *code, const char *url),
 		if (st == PAIR_OK) {
 			if (!tok.refresh_token[0] ||
 			    !cfg_save_refresh_token(tok.refresh_token, tok.scope)) {
-				snprintf(err, errlen, "no se pudo guardar el token");
+				snprintf(err, errlen, "could not save the token to the SD card");
 				return -1;
 			}
 			nlog("PAIR: ok\n");
@@ -328,11 +490,11 @@ int native_pair(void (*show_code)(const char *code, const char *url),
 			continue;
 		}
 		if (st != PAIR_PENDING) {
-			snprintf(err, errlen, "%s", perr[0] ? perr : "el pareo fallo");
+			snprintf(err, errlen, "%s", perr[0] ? perr : "pairing failed");
 			return -1;
 		}
 	}
-	snprintf(err, errlen, "el codigo caduco");
+	snprintf(err, errlen, "the code expired, start the app again");
 	return -1;
 }
 
@@ -379,7 +541,7 @@ int native_like(const char *uri, bool like, char *err, size_t errlen,
 {
 	const char *id = strrchr(uri, ':');
 	if (!id || !id[1] || !g.access_token[0]) {
-		snprintf(err, errlen, "uri o token invalido");
+		snprintf(err, errlen, "invalid uri or token");
 		return -1;
 	}
 	return sp_library_modify(g.access_token, id + 1, like, err, errlen,
@@ -443,16 +605,32 @@ static void save_download(const track_stream *ts)
 	char path[520];
 	download_path(ts->meta.artist, ts->meta.name, path, sizeof(path));
 
+	/* A length under the key header would underflow into a dump of the
+	 * heap; anything that is not an Ogg stream is not worth keeping. */
+	if (!ts->data || ts->len <= SPOTIFY_OGG_HEADER + 4 ||
+	    memcmp(ts->data + SPOTIFY_OGG_HEADER, "OggS", 4) != 0) {
+		nlog("DL: not saving %s (no Ogg stream)\n", path);
+		return;
+	}
+
 	char tmp[528];
 	snprintf(tmp, sizeof(tmp), "%s.tmp", path);
 	FILE *f = fopen(tmp, "wb");
 	if (!f) {
-		nlog("DL: no se pudo guardar %s\n", path);
+		nlog("DL: could not open %s\n", tmp);
 		return;
 	}
-	fwrite(ts->data + SPOTIFY_OGG_HEADER, 1, ts->len - SPOTIFY_OGG_HEADER, f);
-	fclose(f);
-	rename(tmp, path);
+	/* A full card fails the write or the close; renaming the stub anyway
+	 * would leave a truncated .ogg that every "already saved?" check
+	 * trusts from then on. */
+	const size_t want = ts->len - SPOTIFY_OGG_HEADER;
+	bool ok = fwrite(ts->data + SPOTIFY_OGG_HEADER, 1, want, f) == want;
+	ok = fclose(f) == 0 && ok;
+	if (!ok || rename(tmp, path) != 0) {
+		remove(tmp);
+		nlog("DL: write failed for %s (SD card full?)\n", path);
+		return;
+	}
 	/* The saved check caches per URI; make it look again. */
 	saved_checked_uri[0] = '\0';
 	nlog("DL: guardada %s (%.1f MB)\n", path,
@@ -537,6 +715,16 @@ static void download_thread(void *arg)
 	if (job->save && !g.quit && job->ts.dl_done && !job->ts.dl_failed &&
 	    !__sync_lock_test_and_set(&job->saved, 1))
 		save_download(&job->ts);
+	if (job->from_queue) {
+		LightLock_Lock(&g.lock);
+		if (dlq_job == job)
+			dlq_job = NULL;
+		if (job->ts.dl_done && !job->ts.dl_failed)
+			dlq_done++;
+		else
+			dlq_failed++;
+		LightLock_Unlock(&g.lock);
+	}
 	__sync_synchronize();
 	if (__sync_bool_compare_and_swap(&job->handoff, 0, 2))
 		return;   /* the player is still around: it joins and frees */
@@ -571,6 +759,99 @@ static void job_detach(dl_job *job)
 	free(job);
 }
 
+/* Starts the next queued download when nothing else is downloading. Only
+ * ever called on the player thread, the owner of g.ap: the audio key rides
+ * the access point session. Returns at once when there is nothing to do;
+ * starting costs a few seconds (metadata, storage-resolve, key), so the
+ * player only calls it with a well-filled ring. The download runs detached
+ * on its own thread and saves itself when it lands. */
+static void dlq_pump(void)
+{
+	if (!g.ready || g.offline || !g.ap || g.quit)
+		return;
+	dlq_entry e;
+	bool take = false;
+	LightLock_Lock(&g.lock);
+	if (!dlq_job && dlq_count > 0) {
+		take = true;
+		for (dl_job *p = g.jobs; p; p = p->next)
+			if (!p->ts.dl_done && !p->ts.dl_failed)
+				take = false;   /* the link is busy: let it finish */
+	}
+	if (take) {
+		e = dlq[0];
+		memmove(&dlq[0], &dlq[1], (size_t)(dlq_count - 1) * sizeof(dlq[0]));
+		dlq_count--;
+	} else if (!dlq_job && dlq_count == 0) {
+		dlq_done = dlq_failed = 0;   /* ran dry: the next batch counts anew */
+	}
+	LightLock_Unlock(&g.lock);
+	if (!take)
+		return;
+	dlq_save();
+
+	/* Saved another way while it waited? Nothing to do. */
+	char path[520];
+	download_path(e.artist, e.title, path, sizeof(path));
+	struct stat st;
+	if (stat(path, &st) == 0 && st.st_size > 0) {
+		LightLock_Lock(&g.lock);
+		dlq_done++;
+		LightLock_Unlock(&g.lock);
+		return;
+	}
+
+	dl_job *job = calloc(1, sizeof(*job));
+	char err[192] = "out of memory";
+	int rc = -1;
+	if (job) {
+		snprintf(job->uri, sizeof(job->uri), "%s", e.uri);
+		rc = track_stream_begin(g.sp_host, l5_token(), g.ap, e.uri, NULL,
+		                        &job->ts, err, sizeof(err));
+		if (rc != 0 && strstr(err, "401")) {
+			l5_refresh(true);
+			rc = track_stream_begin(g.sp_host, l5_token(), g.ap, e.uri,
+			                        NULL, &job->ts, err, sizeof(err));
+		}
+	}
+	if (rc != 0) {
+		nlog("DLQ: could not start %s (%s)\n", e.title, err);
+		free(job);
+		LightLock_Lock(&g.lock);
+		dlq_failed++;
+		LightLock_Unlock(&g.lock);
+		return;   /* one bad entry loses its turn only */
+	}
+	job->save = true;
+	job->from_queue = true;
+	LightLock_Lock(&g.lock);
+	job->next = g.jobs;
+	g.jobs = job;
+	dlq_job = job;
+	snprintf(dlq_active_title, sizeof(dlq_active_title), "%s - %s",
+	         e.artist, e.title);
+	LightLock_Unlock(&g.lock);
+	Thread dl = threadCreate(download_thread, job, 96 * 1024, 0x31, -2, false);
+	if (!dl) {
+		nlog("DLQ: no thread for %s\n", e.title);
+		LightLock_Lock(&g.lock);
+		dl_job **pp = &g.jobs;
+		while (*pp && *pp != job)
+			pp = &(*pp)->next;
+		if (*pp)
+			*pp = job->next;
+		dlq_job = NULL;
+		dlq_failed++;
+		LightLock_Unlock(&g.lock);
+		track_stream_free(&job->ts);
+		free(job);
+		return;
+	}
+	job->th = dl;
+	nlog("DLQ: downloading %s\n", e.title);
+	job_detach(job);   /* the thread frees the job when it is done */
+}
+
 /* Decodes one streaming track into the ring until it ends, the download
  * fails, the UI asks for something else, or the session is shutting down. */
 static void play_stream(track_stream *ts)
@@ -581,7 +862,7 @@ static void play_stream(track_stream *ts)
 			return;
 		if (ts->dl_failed) {
 			snprintf(g.error, sizeof(g.error), "%s",
-			         ts->dl_err[0] ? ts->dl_err : "la descarga fallo");
+			         ts->dl_err[0] ? ts->dl_err : "the download failed");
 			g.state = NATIVE_FAILED;
 			return;
 		}
@@ -605,7 +886,7 @@ static void play_stream(track_stream *ts)
 	                                       &verr, NULL);
 	if (!v) {
 		snprintf(g.error, sizeof(g.error),
-		         "el decodificador rechazo el stream (%d)", verr);
+		         "the decoder rejected the stream (%d)", verr);
 		g.state = NATIVE_FAILED;
 		return;
 	}
@@ -646,6 +927,19 @@ static void play_stream(track_stream *ts)
 				}
 			}
 		}
+		if (g.save_now) {
+			g.save_now = false;
+			dl_job *cur = g.job;   /* only this thread changes g.job */
+			if (cur && &cur->ts == ts && ts->dl_done && !ts->dl_failed &&
+			    cur->save && !__sync_lock_test_and_set(&cur->saved, 1))
+				save_download(ts);
+		}
+		/* With this track's file complete and seconds of audio queued in
+		 * the ring, the link is idle: let the download queue use it. The
+		 * start blocks a few seconds, which the full ring covers. */
+		if (ts->dl_done && dlq_count > 0 && !dlq_job &&
+		    g.sink.free_space() < NATIVE_PUMP_FREE_MAX)
+			dlq_pump();
 		long want = g.want_seek_frame;
 		if (want >= 0) {
 			g.want_seek_frame = -1;
@@ -721,7 +1015,7 @@ static void play_stream(track_stream *ts)
 	stb_vorbis_close(v);
 	if (ts->dl_failed && !ts->dl_done) {
 		snprintf(g.error, sizeof(g.error), "%s",
-		         ts->dl_err[0] ? ts->dl_err : "la descarga fallo a mitad");
+		         ts->dl_err[0] ? ts->dl_err : "the download failed halfway");
 		g.state = NATIVE_FAILED;
 	}
 	nlog("PLAY fin: %u frames\n", g.frames_out);
@@ -739,7 +1033,7 @@ static void play_local(const char *name)
 
 	FILE *f = fopen(path, "rb");
 	if (!f) {
-		snprintf(g.error, sizeof(g.error), "no se encontro el archivo");
+		snprintf(g.error, sizeof(g.error), "file not found");
 		g.state = NATIVE_FAILED;
 		return;
 	}
@@ -750,7 +1044,7 @@ static void play_local(const char *name)
 	if (!data || fread(data, 1, (size_t)len, f) != (size_t)len) {
 		fclose(f);
 		free(data);
-		snprintf(g.error, sizeof(g.error), "no se pudo leer el archivo");
+		snprintf(g.error, sizeof(g.error), "could not read the file");
 		g.state = NATIVE_FAILED;
 		return;
 	}
@@ -761,7 +1055,7 @@ static void play_local(const char *name)
 	if (!v) {
 		free(data);
 		snprintf(g.error, sizeof(g.error),
-		         "el decodificador rechazo el archivo (%d)", verr);
+		         "the decoder rejected the file (%d)", verr);
 		g.state = NATIVE_FAILED;
 		return;
 	}
@@ -902,13 +1196,16 @@ static void player_thread(void *arg)
 			}
 
 			nlog("FETCH track %s\n", uri);
+			/* Back-to-back playback never reaches the idle loop, so the
+			 * token is also checked at every track change. */
+			l5_refresh(false);
 
 			/* The idle loop drops g.ap when the access point hangs up; the
 			 * background reconnect below rebuilds it, so a track asked for
 			 * right after a hiccup only has to wait for it. */
 			if (!g.ap && !ap_reconnect()) {
 				snprintf(g.error, sizeof(g.error),
-				         "reconectando con Spotify, intenta de nuevo");
+				         "reconnecting to Spotify, try again");
 				g.state = NATIVE_FAILED;
 				nlog("  fallo: sin sesion AP\n");
 				continue;
@@ -920,15 +1217,25 @@ static void player_thread(void *arg)
 			 * then on. */
 			dl_job *job = calloc(1, sizeof(*job));
 			if (!job) {
-				snprintf(g.error, sizeof(g.error), "sin memoria");
+				snprintf(g.error, sizeof(g.error), "out of memory");
 				g.state = NATIVE_FAILED;
 				continue;
 			}
 			snprintf(job->uri, sizeof(job->uri), "%s", uri);
 			char err[192];
-			int rc = track_stream_begin(g.sp_host, g.l5.access_token, g.ap,
+			int rc = track_stream_begin(g.sp_host, l5_token(), g.ap,
 			                            uri, NULL, &job->ts, err, sizeof(err));
-			if (rc != 0 &&
+			if (rc != 0 && strstr(err, "401")) {
+				/* The library token ran out: renew it and try once more. */
+				l5_refresh(true);
+				rc = track_stream_begin(g.sp_host, l5_token(), g.ap, uri,
+				                        NULL, &job->ts, err, sizeof(err));
+			}
+			if (rc == AP_KEY_REFUSED) {
+				/* An account-side block (librespot#1649): reconnecting
+				 * cannot help, it only adds seconds before the same no. */
+				snprintf(err, sizeof(err), "%s", NATIVE_ERR_KEY_BLOCKED);
+			} else if (rc != 0 &&
 			    (strstr(err, "key request") || strstr(err, "audio key") ||
 			     strstr(err, "connection"))) {
 				/* Session-flavoured failure: the keepalive can still miss a
@@ -941,7 +1248,7 @@ static void player_thread(void *arg)
 					g.ap = NULL;
 				}
 				if (ap_reconnect())
-					rc = track_stream_begin(g.sp_host, g.l5.access_token,
+					rc = track_stream_begin(g.sp_host, l5_token(),
 					                        g.ap, uri, NULL, &job->ts, err,
 					                        sizeof(err));
 			}
@@ -973,7 +1280,7 @@ static void player_thread(void *arg)
 			                         0x31, -2, false);
 			if (!dl) {
 				snprintf(g.error, sizeof(g.error),
-				         "no se pudo crear el hilo de descarga");
+				         "could not start the download thread");
 				g.state = NATIVE_FAILED;
 				LightLock_Lock(&g.lock);
 				g.jobs = job->next;
@@ -1010,7 +1317,7 @@ static void player_thread(void *arg)
 				char q_uri[64] = "", q_artist[128] = "", q_title[128] = "";
 				LightLock_Lock(&g.lock);
 				for (dl_job *p = g.jobs; p; p = p->next)
-					if (p != job && p->handoff == 1 &&
+					if (p != job && p->handoff == 1 && !p->from_queue &&
 					    !p->ts.dl_done && !p->ts.dl_failed) {
 						p->stop = true;
 						if (p->save && !p->saved && !q_uri[0]) {
@@ -1059,135 +1366,10 @@ static void player_thread(void *arg)
 			continue;
 		}
 
-		/* The download queue drains whenever the link is idle: nothing
-		 * playing, or the playing track's file already complete. One at a
-		 * time, so the queue never doubles the big stream buffers. */
-		if (dlq_count > 0 && g.ready) {
-			bool busy = false;
-			LightLock_Lock(&g.lock);
-			for (dl_job *p = g.jobs; p; p = p->next)
-				if (!p->ts.dl_done && !p->ts.dl_failed)
-					busy = true;
-			LightLock_Unlock(&g.lock);
-			if (!busy) {
-				dlq_entry e;
-				LightLock_Lock(&g.lock);
-				e = dlq[0];
-				memmove(&dlq[0], &dlq[1],
-				        (size_t)(dlq_count - 1) * sizeof(dlq[0]));
-				dlq_count--;
-				LightLock_Unlock(&g.lock);
-
-				/* Saved another way while it waited? Nothing to do. */
-				char path[520];
-				download_path(e.artist, e.title, path, sizeof(path));
-				struct stat st;
-				if (stat(path, &st) == 0 && st.st_size > 0) {
-					nlog("DLQ: %s ya estaba en la tarjeta\n", e.title);
-					continue;
-				}
-
-				snprintf(dlq_active_title, sizeof(dlq_active_title),
-				         "%s - %s", e.artist, e.title);
-				dlq_active_pct = 0;
-
-				dl_job *job = calloc(1, sizeof(*job));
-				if (job)
-					snprintf(job->uri, sizeof(job->uri), "%s", e.uri);
-				char err[192];
-				int rc = job ? track_stream_begin(g.sp_host,
-				                   g.l5.access_token, g.ap, e.uri,
-				                   NULL, &job->ts, err, sizeof(err)) : -1;
-				if (rc != 0) {
-					nlog("DLQ: no se pudo empezar %s (%s)\n", e.title,
-					     job ? err : "sin memoria");
-					free(job);
-					dlq_active_pct = -1;
-					continue;   /* one bad entry loses its turn only */
-				}
-				job->save = true;
-				LightLock_Lock(&g.lock);
-				job->next = g.jobs;
-				g.jobs = job;
-				LightLock_Unlock(&g.lock);
-				Thread dl = threadCreate(download_thread, job,
-				                         96 * 1024, 0x31, -2, false);
-				if (!dl) {
-					nlog("DLQ: sin hilo para %s\n", e.title);
-					LightLock_Lock(&g.lock);
-					g.jobs = job->next;
-					LightLock_Unlock(&g.lock);
-					track_stream_free(&job->ts);
-					free(job);
-					dlq_active_pct = -1;
-					continue;
-				}
-				job->th = dl;
-				nlog("DLQ: descargando %s\n", e.title);
-				unsigned long long ka = osGetTime();
-				while (!g.quit && !g.want_new &&
-				       !job->ts.dl_done && !job->ts.dl_failed) {
-					if (job->ts.len)
-						dlq_active_pct =
-						    (int)(job->ts.downloaded * 100 /
-						          job->ts.len);
-					/* The session still needs its pings answered while
-					 * the queue works, or the next entry's key fails. */
-					unsigned long long now = osGetTime();
-					if (g.ap && now - ka >= 1000) {
-						ka = now;
-						if (ap_wait(g.ap, 0) == 1) {
-							static uint8_t ka_buf[2048];
-							uint8_t cmd;
-							int kn = ap_recv(g.ap, &cmd, ka_buf,
-							                 sizeof(ka_buf));
-							if (kn < 0) {
-								ap_close(g.ap);
-								g.ap = NULL;
-							} else if (cmd == AP_PKT_PING) {
-								ap_handle_ping(g.ap, ka_buf,
-								               (size_t)kn);
-							}
-						}
-					}
-					svcSleepThread(200000000LL);   // 200 ms
-				}
-				dlq_active_pct = -1;
-				if (g.quit) {
-					job->stop = true;
-					threadJoin(dl, U64_MAX);
-					threadFree(dl);
-					LightLock_Lock(&g.lock);
-					dl_job **p = &g.jobs;
-					while (*p && *p != job)
-						p = &(*p)->next;
-					if (*p)
-						*p = job->next;
-					LightLock_Unlock(&g.lock);
-					track_stream_free(&job->ts);
-					free(job);
-				} else if (g.want_new) {
-					/* The user picked a track: that stream owns the link
-					 * now; this one keeps the background slot and saves
-					 * itself when it lands. */
-					job_detach(job);
-				} else {
-					/* Finished (or failed) with the player idle. */
-					threadJoin(dl, U64_MAX);
-					threadFree(dl);
-					LightLock_Lock(&g.lock);
-					dl_job **p = &g.jobs;
-					while (*p && *p != job)
-						p = &(*p)->next;
-					if (*p)
-						*p = job->next;
-					LightLock_Unlock(&g.lock);
-					track_stream_free(&job->ts);
-					free(job);
-				}
-				continue;   /* another entry, or a play request */
-			}
-		}
+		/* The queue starts its next download whenever the link is free;
+		 * the download itself runs on its own thread. */
+		l5_refresh(false);
+		dlq_pump();
 
 		/* Idle: keep the access point session alive. It only speaks to say
 		 * ping, but a session that stops answering is dropped, and then the
@@ -1218,7 +1400,7 @@ int native_init(const native_sink *sink, void (*progress)(const char *step),
 	if (g.ready)
 		return 0;
 	if (!sink || !sink->write || !sink->free_space) {
-		snprintf(err, errlen, "sin destino de audio");
+		snprintf(err, errlen, "no audio sink");
 		return -1;
 	}
 	g.sink = *sink;
@@ -1237,7 +1419,7 @@ int native_init(const native_sink *sink, void (*progress)(const char *step),
 	step(progress, "Reading the stored token...");
 	char stored[512];
 	if (!cfg_load_refresh_token(stored, sizeof(stored))) {
-		snprintf(err, errlen, "sin parear");
+		snprintf(err, errlen, "not paired");
 		return -1;
 	}
 
@@ -1286,6 +1468,9 @@ int native_init(const native_sink *sink, void (*progress)(const char *step),
 	if (login5_from_credentials(info.username, info.reusable, info.reusable_len,
 	                            device_id, &g.l5, err, errlen) != 0)
 		return -1;
+	memcpy(g.l5_cred, info.reusable, info.reusable_len);
+	g.l5_cred_len = info.reusable_len;
+	l5_publish();
 
 	char ignored[128];
 	sp_resolve(g.sp_host, sizeof(g.sp_host), ignored, sizeof(ignored));
@@ -1294,11 +1479,12 @@ int native_init(const native_sink *sink, void (*progress)(const char *step),
 	g.want_seek_frame = -1;
 	g.state = NATIVE_IDLE;
 	g.ready = true;
+	dlq_load();
 	/* track_stream_begin() handshakes TLS on this thread; 64 KB overflowed
 	 * on unlucky cert chains (two crash dumps died mid-handshake). */
 	g.player = threadCreate(player_thread, NULL, 128 * 1024, 0x30, -2, false);
 	if (!g.player) {
-		snprintf(err, errlen, "no se pudo crear el hilo del reproductor");
+		snprintf(err, errlen, "could not start the player thread");
 		g.ready = false;
 		return -1;
 	}
@@ -1314,7 +1500,7 @@ int native_init_offline(const native_sink *sink)
 		return -1;
 	g.sink = *sink;
 	g.offline = true;
-	snprintf(g.username, sizeof(g.username), "Sin conexion");
+	snprintf(g.username, sizeof(g.username), "Offline");
 	LightLock_Init(&g.lock);
 	g.want_seek_frame = -1;
 	g.state = NATIVE_IDLE;
@@ -1370,7 +1556,7 @@ static int name_tracks(char uris[][64], int n, native_row *rows, int max,
 	int done = 0;
 	for (int base = 0; base < n; base += 50) {
 		if (fetch_cancel) {
-			snprintf(err, errlen, "cancelado");
+			snprintf(err, errlen, "cancelled");
 			nlog("  naming cancelado en el lote %d\n", base);
 			http_session_close(sess);
 			return -1;
@@ -1381,9 +1567,9 @@ static int name_tracks(char uris[][64], int n, native_row *rows, int max,
 		TickCounter t;
 		osTickCounterStart(&t);
 		int named = sess
-		    ? sp_track_metadata_batch_s(sess, g.l5.access_token, ptrs,
+		    ? sp_track_metadata_batch_s(sess, l5_token(), ptrs,
 		                                chunk, meta, err, errlen)
-		    : sp_track_metadata_batch(g.sp_host, g.l5.access_token, ptrs,
+		    : sp_track_metadata_batch(g.sp_host, l5_token(), ptrs,
 		                              chunk, meta, err, errlen);
 		osTickCounterUpdate(&t);
 		nlog("  chunk %d..%d -> %d named%s%s (%.0f ms%s)\n", base,
@@ -1395,7 +1581,7 @@ static int name_tracks(char uris[][64], int n, native_row *rows, int max,
 		for (int i = 0; i < named; i++) {
 			native_row *r = &rows[base + i];
 			snprintf(r->label, sizeof(r->label), "%s",
-			         meta[i].name[0] ? meta[i].name : "(sin nombre)");
+			         meta[i].name[0] ? meta[i].name : "(untitled)");
 			snprintf(r->sub, sizeof(r->sub), "%s", meta[i].artist);
 			snprintf(r->uri, sizeof(r->uri), "%s",
 			         meta[i].uri[0] ? meta[i].uri : uris[base + i]);
@@ -1414,7 +1600,7 @@ static int name_tracks(char uris[][64], int n, native_row *rows, int max,
 		if (rows[i].uri[0])
 			continue;
 		snprintf(rows[i].uri, sizeof(rows[i].uri), "%s", uris[i]);
-		snprintf(rows[i].label, sizeof(rows[i].label), "(sin nombre)");
+		snprintf(rows[i].label, sizeof(rows[i].label), "(untitled)");
 		rows[i].is_playlist = false;
 	}
 	return n;
@@ -1480,12 +1666,12 @@ int native_fetch(native_view view, const char *arg, native_row *rows, int max,
 		return -1;
 	}
 	if (g.offline) {
-		snprintf(err, errlen, "sin conexion");
+		snprintf(err, errlen, "offline");
 		return -1;
 	}
 
 	static char uris[NATIVE_ROWS][64];
-	const char *token = g.l5.access_token;
+	const char *token = l5_token();
 	fetch_cancel = false;   /* a cancel aimed at the previous fetch dies here */
 
 	nlog("FETCH %s arg=%s max=%d\n", view_name(view), arg ? arg : "-", max);
@@ -1502,7 +1688,7 @@ int native_fetch(native_view view, const char *arg, native_row *rows, int max,
 		for (int i = 0; i < n; i++) {
 			snprintf(rows[i].uri, sizeof(rows[i].uri), "%s", uris[i]);
 			snprintf(rows[i].label, sizeof(rows[i].label), "%s",
-			         names[i][0] ? names[i] : "Lista sin nombre");
+			         names[i][0] ? names[i] : "Untitled playlist");
 			snprintf(rows[i].art, sizeof(rows[i].art), "%s", arts[i]);
 			rows[i].sub[0] = '\0';
 			rows[i].is_playlist = true;
@@ -1569,6 +1755,6 @@ int native_playlist_name(const char *uri, char *name, size_t namelen)
 	char err[160];
 	char throwaway[1][64];
 	int count = 0;
-	return sp_playlist(g.sp_host, g.l5.access_token, uri + 17, name, namelen,
+	return sp_playlist(g.sp_host, l5_token(), uri + 17, name, namelen,
 	                   throwaway, 1, &count, err, sizeof(err)) < 0 ? -1 : 0;
 }
