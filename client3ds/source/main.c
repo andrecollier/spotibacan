@@ -2610,9 +2610,11 @@ int main(int argc, char **argv)
 
 quit:
 	running = false;
-	threadJoin(lister, 2000000000LL);
-	threadJoin(snd, 2000000000LL);
-	threadJoin(art, 2000000000LL);
+	/* The lister and art threads can sit in a TLS read for a while; the
+	 * textures and buffers they use are freed below, so wait for them. */
+	threadJoin(lister, 8000000000ULL);
+	threadJoin(snd, 2000000000ULL);
+	threadJoin(art, 8000000000ULL);
 	lid_mode_set(false);
 	native_exit();
 	C3D_TexDelete(&art_tex);

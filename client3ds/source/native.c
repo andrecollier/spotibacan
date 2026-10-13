@@ -1531,9 +1531,35 @@ void native_exit(void)
 	if (!g.ready)
 		return;
 	g.quit = true;
+	/* Every download, the queue's included, is told to stop. A detached
+	 * one frees itself; the teardown below must not run under it. */
+	LightLock_Lock(&g.lock);
+	for (dl_job *p = g.jobs; p; p = p->next)
+		p->stop = true;
+	LightLock_Unlock(&g.lock);
+
+	bool player_done = true;
 	if (g.player) {
-		threadJoin(g.player, 2000000000LL);
-		threadFree(g.player);
+		player_done = R_SUCCEEDED(threadJoin(g.player, 6000000000ULL));
+		if (player_done)
+			threadFree(g.player);
+	}
+	/* A stop is only noticed when the next bytes arrive, so give the
+	 * stragglers a few seconds to drain out of the list. */
+	bool jobs_done = false;
+	for (int i = 0; i < 60 && !jobs_done; i++) {
+		LightLock_Lock(&g.lock);
+		jobs_done = g.jobs == NULL;
+		LightLock_Unlock(&g.lock);
+		if (!jobs_done)
+			svcSleepThread(100000000LL);   // 100 ms
+	}
+	if (!player_done || !jobs_done) {
+		/* Something is still blocked in a socket. Freeing the state it
+		 * uses is what crashed on quit; leaving it alone costs nothing,
+		 * the process is about to end and the kernel reclaims it all. */
+		nlog("EXIT: workers still running, skipping teardown\n");
+		return;
 	}
 	if (g.ap)
 		ap_close(g.ap);
