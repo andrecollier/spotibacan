@@ -97,6 +97,12 @@ static const char *const s_strings[LANG_COUNT][S_COUNT] = {
 		[S_QUEUE_WAITING]     = "Esperando a la cancion actual",
 		[S_GO_ARTIST]         = "Ir al artista",
 		[S_GO_ALBUM]          = "Ir al album",
+		[S_EQ]                = "Ecualizador",
+		[S_EQ_OFF]            = "Apagado",
+		[S_EQ_BASS]           = "Graves",
+		[S_EQ_TREBLE]         = "Agudos",
+		[S_EQ_VOCAL]          = "Voces",
+		[S_EQ_BOOST]          = "Boost",
 	},
 	[LANG_EN] = {
 		[S_NOTHING_PLAYING]   = "Nothing playing",
@@ -190,6 +196,12 @@ static const char *const s_strings[LANG_COUNT][S_COUNT] = {
 		[S_QUEUE_WAITING]     = "Waiting for playback",
 		[S_GO_ARTIST]         = "Go to artist",
 		[S_GO_ALBUM]          = "Go to album",
+		[S_EQ]                = "Equalizer",
+		[S_EQ_OFF]            = "Off",
+		[S_EQ_BASS]           = "Bass",
+		[S_EQ_TREBLE]         = "Treble",
+		[S_EQ_VOCAL]          = "Vocal",
+		[S_EQ_BOOST]          = "Boost",
 	},
 };
 

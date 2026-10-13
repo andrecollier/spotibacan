@@ -100,6 +100,12 @@ typedef enum {
 	S_QUEUE_WAITING,
 	S_GO_ARTIST,
 	S_GO_ALBUM,
+	S_EQ,
+	S_EQ_OFF,
+	S_EQ_BASS,
+	S_EQ_TREBLE,
+	S_EQ_VOCAL,
+	S_EQ_BOOST,
 	S_COUNT
 } str_id;
 

@@ -16,6 +16,7 @@
 #include "lyrics3ds.h"
 #include "native.h"
 #include "spclient.h"
+#include "eq.h"
 #include "tls3ds.h"
 #include "ui/artwork.h"
 #include "ui/lang.h"
@@ -268,6 +269,8 @@ static void prefs_load(void)
 		downloads_on = true;
 	if (cfg_get("quality", v, sizeof(v)) && strcmp(v, "320") == 0)
 		sp_set_high_quality(true);
+	if (cfg_get("eq", v, sizeof(v)))
+		eq_set(eq_from_key(v));
 }
 
 // ---------------------------------------------------------------- ring buffer
@@ -334,6 +337,7 @@ static void audio_thread(void *arg)
 			u8 *dst = (u8 *)waves[i].data_vaddr;
 			u32 got = ring_read(dst, buf_bytes);
 			if (got < buf_bytes) memset(dst + got, 0, buf_bytes - got);
+			eq_process((int16_t *)dst, FRAMES_PER_BUF);
 			DSP_FlushDataCache(dst, buf_bytes);
 			ndspChnWaveBufAdd(0, &waves[i]);
 		}
@@ -1102,7 +1106,7 @@ static void clock_text(char *out, size_t n, float secs)
 // palm cannot kill the music. Rows draw up to z=0.1 and the list header at
 // 0.5, so the panel lives at 0.6 and its type at 0.7. It takes over the
 // touch map wholesale, so the view below cannot answer taps meant for it.
-#define SETTINGS_ROWS 8
+#define SETTINGS_ROWS 9
 #define SET_ROW0      0x7100
 
 /* Whether the list last shown holds tracks the queue can take. */
@@ -1198,9 +1202,9 @@ static void draw_settings(const Skin *sk)
 
 	const char *labels[SETTINGS_ROWS] = {
 		tr(S_LANGUAGE), tr(S_ACCENT), tr(S_DOWNLOADS), tr(S_QUALITY),
-		tr(S_DL_LIST), tr(S_UNLINK), tr(S_QUIT), tr(S_BACK_MENU),
+		tr(S_EQ), tr(S_DL_LIST), tr(S_UNLINK), tr(S_QUIT), tr(S_BACK_MENU),
 	};
-	const float rh = 24.5f, ry = py + 30.0f;
+	const float rh = 22.0f, ry = py + 26.0f;
 	for (int i = 0; i < SETTINGS_ROWS; i++) {
 		const float y = ry + i * rh;
 		if (i == settings_sel)
@@ -1238,6 +1242,14 @@ static void draw_settings(const Skin *sk)
 			        ui_baseline(y + 5.0f, TY_ROW_SUB), TY_ROW_SUB, w,
 			        sp_high_quality() ? fg : sk->dim);
 		} else if (i == 4) {
+			static const int EQ_NAMES[EQ_COUNT] = {
+				S_EQ_OFF, S_EQ_BASS, S_EQ_TREBLE, S_EQ_VOCAL, S_EQ_BOOST };
+			const char *v = tr(EQ_NAMES[eq_get()]);
+			float w = ui_text_width(text_buf, v, TY_ROW_SUB);
+			ui_text(text_buf, v, px + pw - 16.0f - w,
+			        ui_baseline(y + 5.0f, TY_ROW_SUB), TY_ROW_SUB, w,
+			        eq_get() != EQ_OFF ? fg : sk->dim);
+		} else if (i == 5) {
 			/* Which list it would take, or why it cannot. */
 			char note[96];
 			if (list_downloadable())
@@ -1248,7 +1260,7 @@ static void draw_settings(const Skin *sk)
 			ui_text(text_buf, note, px + 16.0f,
 			        ui_baseline(y + 13.0f, TY_MICRO), TY_MICRO,
 			        pw - 32.0f, i == settings_sel ? fg : sk->dim);
-		} else if (i == 5) {
+		} else if (i == 6) {
 			ui_text(text_buf, tr(S_UNLINKED_NOTE), px + 16.0f,
 			        ui_baseline(y + 14.0f, TY_MICRO), TY_MICRO,
 			        pw - 32.0f, i == settings_sel ? fg : sk->dim);
@@ -2196,6 +2208,10 @@ int main(int argc, char **argv)
 				/* Takes effect from the next track fetched. */
 				sp_set_high_quality(!sp_high_quality());
 				cfg_set("quality", sp_high_quality() ? "320" : "160");
+			} else if (row == 4) {
+				/* Heard at once: the filter sits after the ring. */
+				eq_set((eq_preset)((eq_get() + 1) % EQ_COUNT));
+				cfg_set("eq", eq_key(eq_get()));
 			}
 			settings_busy_until = osGetTime() + 700;
 		}
@@ -2221,19 +2237,20 @@ int main(int argc, char **argv)
 			case 1:   // accent colour -- same
 			case 2:   // downloads toggle -- same
 			case 3:   // audio quality -- same
+			case 4:   // equalizer preset -- same
 				settings_pending = row;
 				break;
-			case 4:   // queue every track of the list last shown
+			case 5:   // queue every track of the list last shown
 				if (list_downloadable()) {
 					native_dl_enqueue_list(nat_rows, nat_count);
 					settings_open = false;
 					queue_open = true;   /* show what got queued */
 				}
 				break;
-			case 5:   // unlink: wipe the token (and prefs) and leave
+			case 6:   // unlink: wipe the token (and prefs) and leave
 				cfg_clear();
 				goto quit;
-			case 6:   // quit
+			case 7:   // quit
 				goto quit;
 			default:
 				break;
