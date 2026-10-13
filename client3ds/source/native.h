@@ -165,6 +165,12 @@ int  native_dl_enqueue_list(const native_row *rows, int n, const char *title);
 void native_dl_clear(void);
 /* Removes a saved song (file:<name>.ogg) and its cover from the card. */
 bool native_delete_download(const char *file_uri);
+/* Appends a track to one of the account's playlists (network: call it off
+ * the render thread). 0 on success, else err says why. */
+int  native_playlist_add(const char *playlist_uri, const char *track_uri,
+                         char *err, size_t errlen);
+/* The playlist list as last fetched (playlists.txt), for pickers. */
+int  native_playlists_cached(native_row *rows, int max);
 /* Finished (incl. failed) and total for the current batch. */
 void native_dl_progress(int *done, int *total);
 /* native_dl_active() while the finished file is being written to SD. */

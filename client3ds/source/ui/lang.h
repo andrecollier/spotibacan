@@ -111,6 +111,11 @@ typedef enum {
 	S_DELETE_CONFIRM,
 	S_VIS_START,
 	S_VIS_STOP,
+	S_ADD_TO_PL,
+	S_PL_NONE,
+	S_PL_ADDING,
+	S_PL_ADDED,
+	S_PL_FAILED,
 	S_COUNT
 } str_id;
 

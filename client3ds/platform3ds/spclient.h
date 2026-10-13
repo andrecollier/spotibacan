@@ -150,6 +150,13 @@ int  sp_artist_releases(http_session *sess, const char *host, const char *token,
 
 /* The tracks of any context the context service knows: an album, or an
  * artist (its top tracks). Returns the count, or -1 with err set. */
+/* Appends a track to a playlist the account may edit, through the same
+ * playlist service the official clients use (ListChanges on the current
+ * revision). 0 on success; err says why not (e.g. "not your playlist"). */
+int  sp_playlist_add(const char *host, const char *token,
+                     const char *playlist_uri, const char *track_uri,
+                     char *err, size_t errlen);
+
 int  sp_context_tracks(const char *host, const char *token, const char *uri,
                        char uris[][64], int max, char *err, size_t errlen);
 

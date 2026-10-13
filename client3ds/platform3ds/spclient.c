@@ -848,6 +848,94 @@ int sp_artist_releases(http_session *sess, const char *host, const char *token,
 	return n;
 }
 
+int sp_playlist_add(const char *host, const char *token,
+                    const char *playlist_uri, const char *track_uri,
+                    char *err, size_t errlen)
+{
+	if (strncmp(playlist_uri, "spotify:playlist:", 17) != 0) {
+		snprintf(err, errlen, "not a playlist");
+		return -1;
+	}
+	const char *id = playlist_uri + 17;
+
+	/* The current revision (and whether this account may edit it): a
+	 * change is applied on top of a revision, never blind. */
+	char path[160];
+	snprintf(path, sizeof(path), "/playlist/v2/playlist/%s", id);
+	http_reply r;
+	if (http_get_proto(host, path, token, &r) != 0) {
+		snprintf(err, errlen, "playlist: %s", r.err);
+		return -1;
+	}
+	if (r.status != 200) {
+		snprintf(err, errlen, "playlist returned HTTP %d", r.status);
+		http_reply_free(&r);
+		return -1;
+	}
+	const uint8_t *body = (const uint8_t *)r.body;
+	pbv rev, caps;
+	uint8_t revision[64];
+	size_t rev_len = 0;
+	if (pb_get_bytes(body, r.len, 1, &rev) && rev.len <= sizeof(revision)) {
+		memcpy(revision, rev.p, rev.len);
+		rev_len = rev.len;
+	}
+	/* SelectedListContent.capabilities.can_edit_items, when sent. */
+	bool editable = true;
+	if (pb_get_bytes(body, r.len, 18, &caps)) {
+		uint64_t can_edit = 0;
+		editable = pb_get_varint(caps.p, caps.len, 5, &can_edit) && can_edit;
+	}
+	http_reply_free(&r);
+	if (!editable) {
+		snprintf(err, errlen, "not your playlist");
+		return -1;
+	}
+	if (!rev_len) {
+		snprintf(err, errlen, "playlist has no revision");
+		return -1;
+	}
+
+	/* ListChanges{ base_revision, deltas:[ Delta{ ops:[ Op{ kind: ADD,
+	 * add: Add{ items:[Item{uri}], add_last: true } } ] } ] } */
+	uint8_t item_s[96], add_s[128], op_s[160], delta_s[192], lc_s[288];
+	pb item, add, op, delta, lc;
+	pb_init(&item, item_s, sizeof(item_s));
+	pb_str(&item, 1, track_uri);
+	pb_init(&add, add_s, sizeof(add_s));
+	pb_sub(&add, 2, &item);
+	pb_varint(&add, 4, 1);
+	pb_init(&op, op_s, sizeof(op_s));
+	pb_varint(&op, 1, 2);            /* Op.Kind.ADD */
+	pb_sub(&op, 2, &add);
+	pb_init(&delta, delta_s, sizeof(delta_s));
+	pb_sub(&delta, 2, &op);
+	pb_init(&lc, lc_s, sizeof(lc_s));
+	pb_bytes(&lc, 1, revision, rev_len);
+	pb_sub(&lc, 2, &delta);
+	if (!pb_ok(&lc)) {
+		snprintf(err, errlen, "change did not fit");
+		return -1;
+	}
+
+	snprintf(path, sizeof(path), "/playlist/v2/playlist/%s/changes", id);
+	if (http_request(host, path, "POST", token, "application/x-protobuf",
+	                 "application/x-protobuf", lc.p, lc.len, 0, &r) != 0) {
+		snprintf(err, errlen, "changes: %s", r.err);
+		return -1;
+	}
+	const int status = r.status;
+	http_reply_free(&r);
+	if (status != 200) {
+		if (status == 403)
+			snprintf(err, errlen, "not your playlist");
+		else
+			snprintf(err, errlen, "changes returned HTTP %d", status);
+		return -1;
+	}
+	return 0;
+}
+
 int sp_context_tracks(const char *host, const char *token, const char *uri,
                       char uris[][64], int max, char *err, size_t errlen)
 {

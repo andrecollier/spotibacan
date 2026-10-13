@@ -118,6 +118,22 @@ static int  batt_left_min = -1;
 /* The spectrum visualizer replaces the now-playing top screen while on. */
 static bool vis_open = false;
 static vis_style vis_mode = VIS_CLASSIC;
+/* "Add to playlist": a picker over the cached playlist list, the add itself
+ * done by the art worker (it is network), the outcome shown as a toast. */
+static bool pick_open = false;
+static native_row pick_rows[NATIVE_ROWS];
+static int  pick_n = 0, pick_sel = 0;
+static char pick_track[192];
+static volatile bool add_req = false;
+static char add_req_playlist[192], add_req_track[192], add_req_name[64];
+static char toast[96];
+static u64  toast_until = 0;
+
+static void toast_show(const char *msg)
+{
+	snprintf(toast, sizeof(toast), "%s", msg);
+	toast_until = osGetTime() + 3500;
+}
 /* What the playing list was called, for the status line on top. */
 static char play_ctx_title[64] = "";
 static int  settings_sel = 0;
@@ -702,6 +718,19 @@ static void art_thread(void *arg)
 		/* Queued likes ride out when the rate-limited Web API has a window;
 		 * same Retry-After discipline as the avatar fetch below. A 403 means
 		 * the token predates the library-modify scope: stop and say so. */
+		if (add_req) {
+			char err[128] = "";
+			char msg[96];
+			if (native_playlist_add(add_req_playlist, add_req_track, err,
+			                        sizeof(err)) == 0)
+				snprintf(msg, sizeof(msg), "%s %s", tr(S_PL_ADDED), add_req_name);
+			else
+				snprintf(msg, sizeof(msg), "%s: %s", tr(S_PL_FAILED), err);
+			toast_show(msg);
+			__sync_synchronize();
+			add_req = false;
+			continue;
+		}
 		/* Likes and list thumbnails are extras: while the playing song is
 		 * still downloading they wait, so they cannot starve it. */
 		const bool stream_busy = native_stream_busy();
@@ -1197,7 +1226,7 @@ static bool list_downloadable(void)
 
 /* START while a song plays: jump to its artist or album, or on to the
  * settings. Same modal pattern as the settings sheet, three rows. */
-#define ACT_ROWS 6
+#define ACT_ROWS 7
 #define ACT_ROW0 0x7200
 static bool actions_open = false;
 static int  actions_sel = 0;
@@ -1210,17 +1239,27 @@ static struct {
 	native_row row;
 } act;
 
-/* Rows: 0 play next, 1 artist, 2 album, 3 visualizer, 4 delete download,
- * 5 settings. Delete takes two presses: the first only arms it. */
+/* Rows: 0 play next, 1 add to playlist, 2 artist, 3 album, 4 visualizer,
+ * 5 delete download, 6 settings. Delete takes two presses: the first only
+ * arms it. */
 static bool act_delete_armed = false;
+
+/* The Spotify track the menu is about: the selected row, else the song
+ * playing; "" for local files (they have no catalogue id to add). */
+static const char *act_track_uri(void)
+{
+	const char *u = act.has_row ? act.row.uri : native_now_uri();
+	return strncmp(u, "spotify:track:", 14) == 0 ? u : "";
+}
 
 static bool action_enabled(int row)
 {
 	if (row == 0) return act.has_row;
-	if (row == 1) return act.artist_uri[0] != '\0';
-	if (row == 2) return act.album_uri[0] != '\0';
-	if (row == 3) return vis_open || native_now_uri()[0] != '\0';
-	if (row == 4) return act.has_row && strncmp(act.row.uri, "file:", 5) == 0;
+	if (row == 1) return act_track_uri()[0] != '\0' && !native_offline();
+	if (row == 2) return act.artist_uri[0] != '\0';
+	if (row == 3) return act.album_uri[0] != '\0';
+	if (row == 4) return vis_open || native_now_uri()[0] != '\0';
+	if (row == 5) return act.has_row && strncmp(act.row.uri, "file:", 5) == 0;
 	return true;
 }
 
@@ -1258,20 +1297,20 @@ static void draw_actions(const Skin *sk)
 	const u32 bord  = C2D_Color32(0x38, 0x38, 0x38, 0xFF);
 	const u32 panel = C2D_Color32(0x1B, 0x1B, 0x1B, 0xFF);
 	C2D_DrawRectSolid(0.0f, 0.0f, 0.6f, BOT_W, SCR_H, dim);
-	const float px = 20.0f, py = 8.0f, pw = 280.0f, ph = 224.0f;
+	const float px = 20.0f, py = 4.0f, pw = 280.0f, ph = 232.0f;
 	C2D_DrawRectSolid(px, py, 0.6f, pw, ph, bord);
 	C2D_DrawRectSolid(px + 1.0f, py + 1.0f, 0.6f, pw - 2.0f, ph - 2.0f, panel);
 
 	ui_depth(0.7f);
-	const char *labels[ACT_ROWS] = { tr(S_PLAY_NEXT), tr(S_GO_ARTIST),
-	                                 tr(S_GO_ALBUM),
+	const char *labels[ACT_ROWS] = { tr(S_PLAY_NEXT), tr(S_ADD_TO_PL),
+	                                 tr(S_GO_ARTIST), tr(S_GO_ALBUM),
 	                                 tr(vis_open ? S_VIS_STOP : S_VIS_START),
 	                                 tr(act_delete_armed ? S_DELETE_CONFIRM
 	                                                     : S_DELETE_DL),
 	                                 tr(S_SETTINGS) };
-	const char *subs[ACT_ROWS] = { act.has_row ? act.row.label : "",
+	const char *subs[ACT_ROWS] = { act.has_row ? act.row.label : "", "",
 	                               act.artist, act.album, "", "", "" };
-	const float rh = 35.0f, ry = py + 12.0f;
+	const float rh = 32.0f, ry = py + 10.0f;
 	for (int i = 0; i < ACT_ROWS; i++) {
 		const float y = ry + i * rh;
 		const bool on = action_enabled(i);
@@ -1288,6 +1327,41 @@ static void draw_actions(const Skin *sk)
 			        pw - 32.0f, i == actions_sel ? fg : sk->dim);
 		tb_add(&g_tb, px + 6.0f, y - 4.0f, pw - 12.0f, rh - 4.0f,
 		       ACT_ROW0 + i);
+	}
+	ui_depth(0.0f);
+}
+
+/* The playlist picker for "Add to playlist": a window of rows around the
+ * selection over a dimmed screen. */
+#define PICK_VIS 7
+static void draw_pick(const Skin *sk)
+{
+	const u32 dim   = C2D_Color32(0x00, 0x00, 0x00, 0xA8);
+	const u32 bord  = C2D_Color32(0x38, 0x38, 0x38, 0xFF);
+	const u32 panel = C2D_Color32(0x1B, 0x1B, 0x1B, 0xFF);
+	C2D_DrawRectSolid(0.0f, 0.0f, 0.6f, BOT_W, SCR_H, dim);
+	const float px = 12.0f, py = 6.0f, pw = 296.0f, ph = 228.0f;
+	C2D_DrawRectSolid(px, py, 0.6f, pw, ph, bord);
+	C2D_DrawRectSolid(px + 1.0f, py + 1.0f, 0.6f, pw - 2.0f, ph - 2.0f, panel);
+	ui_depth(0.7f);
+	ui_text(text_buf, tr(S_ADD_TO_PL), px + 12.0f,
+	        ui_baseline(py + 6.0f, TY_ROW_NAME), TY_ROW_NAME, pw - 24.0f, sk->warm);
+	int first = pick_sel - PICK_VIS / 2;
+	if (first > pick_n - PICK_VIS)
+		first = pick_n - PICK_VIS;
+	if (first < 0)
+		first = 0;
+	const float rh = 28.0f, ry = py + 30.0f;
+	for (int i = 0; i < PICK_VIS && first + i < pick_n; i++) {
+		const int idx = first + i;
+		const float y = ry + i * rh;
+		if (idx == pick_sel)
+			C2D_DrawRectSolid(px + 6.0f, y - 3.0f, 0.65f, pw - 12.0f, rh - 2.0f,
+			                  sk->accent);
+		ui_text(text_buf, pick_rows[idx].label, px + 14.0f,
+		        ui_baseline(y + 3.0f, TY_ROW_NAME), TY_ROW_NAME, pw - 28.0f,
+		        idx == pick_sel ? sk->on_accent : sk->text);
+		tb_add(&g_tb, px + 6.0f, y - 3.0f, pw - 12.0f, rh - 2.0f, ACT_ROW0 + 0x40 + i);
 	}
 	ui_depth(0.0f);
 }
@@ -1850,6 +1924,9 @@ static void draw_bottom(const Skin *sk)
 		// taps meant for the menu.
 		tb_reset(&g_tb);
 		draw_settings(sk);
+	} else if (pick_open) {
+		tb_reset(&g_tb);
+		draw_pick(sk);
 	} else if (actions_open) {
 		tb_reset(&g_tb);
 		draw_actions(sk);
@@ -1862,6 +1939,16 @@ static void draw_bottom(const Skin *sk)
 	} else if (queue_open) {
 		tb_reset(&g_tb);
 		draw_queue(sk);
+	}
+	/* A short note over everything, e.g. "Added to Road trip". */
+	if (toast[0] && osGetTime() < toast_until) {
+		ui_depth(0.9f);
+		const float w = BOT_W - 40.0f;
+		C2D_DrawRectSolid(20.0f, SCR_H - 34.0f, 0.9f, w, 26.0f,
+		                  C2D_Color32(0x10, 0x10, 0x10, 0xEE));
+		ui_text(text_buf, toast, 30.0f, ui_baseline(SCR_H - 30.0f, TY_ROW_SUB),
+		        TY_ROW_SUB, w - 20.0f, sk->text);
+		ui_depth(0.0f);
 	}
 }
 
@@ -2508,6 +2595,44 @@ int main(int argc, char **argv)
 			down = 0;
 			g_touch.clicked = -1;
 			g_touch.long_pressed = -1;
+		} else if (pick_open) {
+			if ((down & KEY_DUP) && pick_sel > 0)
+				pick_sel--;
+			if ((down & KEY_DDOWN) && pick_sel + 1 < pick_n)
+				pick_sel++;
+			if (down & KEY_L)
+				pick_sel = pick_sel > PICK_VIS ? pick_sel - PICK_VIS : 0;
+			if (down & KEY_R)
+				pick_sel = pick_sel + PICK_VIS < pick_n ? pick_sel + PICK_VIS
+				                                        : pick_n - 1;
+			int chosen = -1;
+			if (down & KEY_A)
+				chosen = pick_sel;
+			if (g_touch.clicked >= ACT_ROW0 + 0x40 &&
+			    g_touch.clicked < ACT_ROW0 + 0x40 + PICK_VIS) {
+				int first = pick_sel - PICK_VIS / 2;
+				if (first > pick_n - PICK_VIS)
+					first = pick_n - PICK_VIS;
+				if (first < 0)
+					first = 0;
+				chosen = first + (g_touch.clicked - ACT_ROW0 - 0x40);
+			}
+			if (chosen >= 0 && chosen < pick_n && !add_req) {
+				snprintf(add_req_playlist, sizeof(add_req_playlist), "%s",
+				         pick_rows[chosen].uri);
+				snprintf(add_req_name, sizeof(add_req_name), "%s",
+				         pick_rows[chosen].label);
+				snprintf(add_req_track, sizeof(add_req_track), "%s", pick_track);
+				__sync_synchronize();
+				add_req = true;
+				toast_show(tr(S_PL_ADDING));
+				pick_open = false;
+			}
+			if (down & (KEY_B | KEY_START))
+				pick_open = false;
+			down = 0;
+			g_touch.clicked = -1;
+			g_touch.long_pressed = -1;
 		} else if (actions_open) {
 			if (down & (KEY_DUP | KEY_DDOWN))
 				act_delete_armed = false;   /* moving away disarms delete */
@@ -2521,7 +2646,7 @@ int main(int argc, char **argv)
 			if (g_touch.clicked >= ACT_ROW0 &&
 			    g_touch.clicked < ACT_ROW0 + ACT_ROWS)
 				row = g_touch.clicked - ACT_ROW0;
-			if (row == 4 && action_enabled(4) && !act_delete_armed) {
+			if (row == 5 && action_enabled(5) && !act_delete_armed) {
 				act_delete_armed = true;   /* ask once more */
 				row = -1;
 			}
@@ -2529,25 +2654,34 @@ int main(int argc, char **argv)
 				actions_open = false;
 				if (row == 0) {
 					play_insert_next(&act.row);
-				} else if (row == 3) {
+				} else if (row == 1) {
+					snprintf(pick_track, sizeof(pick_track), "%s",
+					         act_track_uri());
+					pick_n = native_playlists_cached(pick_rows, NATIVE_ROWS);
+					pick_sel = 0;
+					if (pick_n > 0)
+						pick_open = true;
+					else
+						toast_show(tr(S_PL_NONE));
+				} else if (row == 4) {
 					vis_open = !vis_open;
 					if (vis_open)
 						lib.open = false;   /* the player stays below */
-				} else if (row == 4) {
+				} else if (row == 5) {
 					act_delete_armed = false;
 					native_delete_download(act.row.uri);
 					lib_reload = true;   /* the Downloads list rereads the card */
 					nat_loaded_view = (native_view)-1;
-				} else if (row == 5) {
+				} else if (row == 6) {
 					settings_open = true;
 					settings_sel = 0;
 				} else {
 					/* An album or artist opens like a playlist would. */
 					nat_view = NATIVE_TRACKS;
 					snprintf(nat_arg, sizeof(nat_arg), "%s",
-					         row == 1 ? act.artist_uri : act.album_uri);
+					         row == 2 ? act.artist_uri : act.album_uri);
 					snprintf(nat_title, sizeof(nat_title), "%s",
-					         row == 1 ? act.artist : act.album);
+					         row == 2 ? act.artist : act.album);
 					lib.open = true;
 					lib.sel = 0;
 					native_fetch_cancel();
@@ -2617,8 +2751,8 @@ int main(int argc, char **argv)
 				actions_open = true;
 				act_delete_armed = false;
 				/* In Downloads the likely wish is the delete row. */
-				actions_sel = strncmp(act.row.uri, "file:", 5) == 0 ? 4
-				              : (act.has_row ? 0 : 3);
+				actions_sel = strncmp(act.row.uri, "file:", 5) == 0 ? 5
+				              : (act.has_row ? 0 : 4);
 			} else {
 				settings_open = true;
 				settings_sel = 0;

@@ -141,6 +141,7 @@ void native_fetch_cancel(void) { fetch_cancel = true; }
 
 static void save_download(const track_stream *ts);
 static void dlist_write(const char *title, const native_row *rows, int n);
+static int rootlist_cache_load(native_row *rows, int max);
 
 static struct {
 	bool          ready;
@@ -1714,6 +1715,24 @@ static int name_tracks(char uris[][64], int n, native_row *rows, int max,
 /* Lists the .ogg files under music/ as playable rows, newest first (the
  * order the saver produced them in is the order the user last heard).
  * Pure filesystem: no session, no network. */
+int native_playlist_add(const char *playlist_uri, const char *track_uri,
+                        char *err, size_t errlen)
+{
+	if (!g.ready || g.offline) {
+		snprintf(err, errlen, "offline");
+		return -1;
+	}
+	int rc = sp_playlist_add(g.sp_host, l5_token(), playlist_uri, track_uri,
+	                         err, errlen);
+	nlog("ADD: %s -> %s: %s\n", track_uri, playlist_uri, rc == 0 ? "ok" : err);
+	return rc;
+}
+
+int native_playlists_cached(native_row *rows, int max)
+{
+	return rootlist_cache_load(rows, max);
+}
+
 bool native_delete_download(const char *file_uri)
 {
 	if (!file_uri || strncmp(file_uri, "file:", 5) != 0)

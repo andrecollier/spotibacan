@@ -108,6 +108,11 @@ static const char *const s_strings[LANG_COUNT][S_COUNT] = {
 		[S_DELETE_CONFIRM]    = "Pulsa A otra vez para borrar",
 		[S_VIS_START]         = "Iniciar visualizador",
 		[S_VIS_STOP]          = "Cerrar visualizador",
+		[S_ADD_TO_PL]         = "Agregar a una lista",
+		[S_PL_NONE]           = "Abre tus listas primero",
+		[S_PL_ADDING]         = "Agregando...",
+		[S_PL_ADDED]          = "Agregada a",
+		[S_PL_FAILED]         = "No se pudo agregar",
 	},
 	[LANG_EN] = {
 		[S_NOTHING_PLAYING]   = "Nothing playing",
@@ -212,6 +217,11 @@ static const char *const s_strings[LANG_COUNT][S_COUNT] = {
 		[S_DELETE_CONFIRM]    = "Press A again to delete",
 		[S_VIS_START]         = "Start visualizer",
 		[S_VIS_STOP]          = "Stop visualizer",
+		[S_ADD_TO_PL]         = "Add to playlist",
+		[S_PL_NONE]           = "Open your playlists once first",
+		[S_PL_ADDING]         = "Adding...",
+		[S_PL_ADDED]          = "Added to",
+		[S_PL_FAILED]         = "Could not add",
 	},
 };
 
