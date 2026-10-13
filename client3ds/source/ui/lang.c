@@ -103,6 +103,7 @@ static const char *const s_strings[LANG_COUNT][S_COUNT] = {
 		[S_EQ_TREBLE]         = "Agudos",
 		[S_EQ_VOCAL]          = "Voces",
 		[S_EQ_BOOST]          = "Boost",
+		[S_PLAY_NEXT]         = "Reproducir a continuacion",
 	},
 	[LANG_EN] = {
 		[S_NOTHING_PLAYING]   = "Nothing playing",
@@ -202,6 +203,7 @@ static const char *const s_strings[LANG_COUNT][S_COUNT] = {
 		[S_EQ_TREBLE]         = "Treble",
 		[S_EQ_VOCAL]          = "Vocal",
 		[S_EQ_BOOST]          = "Boost",
+		[S_PLAY_NEXT]         = "Play next",
 	},
 };
 

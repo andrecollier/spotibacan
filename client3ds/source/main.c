@@ -1134,7 +1134,7 @@ static bool list_downloadable(void)
 
 /* START while a song plays: jump to its artist or album, or on to the
  * settings. Same modal pattern as the settings sheet, three rows. */
-#define ACT_ROWS 3
+#define ACT_ROWS 4
 #define ACT_ROW0 0x7200
 static bool actions_open = false;
 static int  actions_sel = 0;
@@ -1143,12 +1143,16 @@ static int  actions_sel = 0;
 static struct {
 	char artist[128], artist_uri[40];
 	char album[128], album_uri[40];
+	bool has_row;       /* a track row was selected: it can be queued */
+	native_row row;
 } act;
 
+/* Rows: 0 play next, 1 artist, 2 album, 3 settings. */
 static bool action_enabled(int row)
 {
-	if (row == 0) return act.artist_uri[0] != '\0';
-	if (row == 1) return act.album_uri[0] != '\0';
+	if (row == 0) return act.has_row;
+	if (row == 1) return act.artist_uri[0] != '\0';
+	if (row == 2) return act.album_uri[0] != '\0';
 	return true;
 }
 
@@ -1160,8 +1164,11 @@ static bool actions_capture(void)
 		const int extra = (nat_view == NATIVE_PLAYLISTS) ? 2 : 0;
 		const int idx = lib.sel - extra;
 		if (idx >= 0 && idx < nat_count && !nat_rows[idx].is_playlist &&
-		    (nat_rows[idx].artist_uri[0] || nat_rows[idx].album_uri[0])) {
+		    (strncmp(nat_rows[idx].uri, "spotify:track:", 14) == 0 ||
+		     strncmp(nat_rows[idx].uri, "file:", 5) == 0)) {
 			const native_row *r = &nat_rows[idx];
+			act.has_row = true;
+			act.row = *r;
 			snprintf(act.artist, sizeof(act.artist), "%s", r->sub);
 			snprintf(act.artist_uri, sizeof(act.artist_uri), "%s", r->artist_uri);
 			snprintf(act.album, sizeof(act.album), "%s", r->album);
@@ -1182,14 +1189,15 @@ static void draw_actions(const Skin *sk)
 	const u32 bord  = C2D_Color32(0x38, 0x38, 0x38, 0xFF);
 	const u32 panel = C2D_Color32(0x1B, 0x1B, 0x1B, 0xFF);
 	C2D_DrawRectSolid(0.0f, 0.0f, 0.6f, BOT_W, SCR_H, dim);
-	const float px = 20.0f, py = 40.0f, pw = 280.0f, ph = 150.0f;
+	const float px = 20.0f, py = 22.0f, pw = 280.0f, ph = 192.0f;
 	C2D_DrawRectSolid(px, py, 0.6f, pw, ph, bord);
 	C2D_DrawRectSolid(px + 1.0f, py + 1.0f, 0.6f, pw - 2.0f, ph - 2.0f, panel);
 
 	ui_depth(0.7f);
-	const char *labels[ACT_ROWS] = { tr(S_GO_ARTIST), tr(S_GO_ALBUM),
-	                                 tr(S_SETTINGS) };
-	const char *subs[ACT_ROWS] = { act.artist, act.album, "" };
+	const char *labels[ACT_ROWS] = { tr(S_PLAY_NEXT), tr(S_GO_ARTIST),
+	                                 tr(S_GO_ALBUM), tr(S_SETTINGS) };
+	const char *subs[ACT_ROWS] = { act.has_row ? act.row.label : "",
+	                               act.artist, act.album, "" };
 	const float rh = 40.0f, ry = py + 16.0f;
 	for (int i = 0; i < ACT_ROWS; i++) {
 		const float y = ry + i * rh;
@@ -1793,11 +1801,20 @@ static bool auto_advance = false;
 /* The decoder finished a song; the ring is still draining it. */
 static bool end_pending = false;
 
+/* "Play next" inserts into the snapshot right after the playing row, in
+ * the order picked: queued_after counts how many already wait there.
+ * play_edited says the snapshot no longer mirrors the list on screen, so
+ * row indexes stop meaning on-screen highlights. */
+static int  queued_after = 0;
+static bool play_edited = false;
+
 // Starts a track by URI alone, for the shelf: no list context to remember,
 // so prev/next grey out until a list play gives them bounds again.
 static void play_uri(const char *uri)
 {
 	end_pending = false;
+	queued_after = 0;
+	play_edited = false;
 	native_play(uri);
 	now_idx = -1;
 	play_count = 0;   /* off-list: no neighbours to step to */
@@ -1841,16 +1858,61 @@ static void play_index(int idx)
 static void play_step(int idx)
 {
 	end_pending = false;
+	/* Walking into the queued songs uses them up one by one; jumping
+	 * anywhere else forgets the queue position. */
+	if (idx == play_idx + 1 && queued_after > 0)
+		queued_after--;
+	else if (idx != play_idx)
+		queued_after = 0;
 	if (strncmp(play_uris[idx], "file:", 5) != 0)
 		recents_push(play_uris[idx], play_art[idx]);
 	native_play(play_uris[idx]);
 	play_idx = idx;
-	now_idx = idx;
+	now_idx = play_edited ? -1 : idx;
 	buffering = true;
 	paused = false;
 	ndspChnSetPaused(0, false);
 	if (!auto_advance)
 		ring_clear();
+}
+
+/* Puts a row right after the playing song (after anything already queued
+ * that way). With nothing playing it simply plays the row. */
+static void play_insert_next(const native_row *r)
+{
+	const char *cur = native_now_uri();
+	if (play_idx < 0 || play_count <= 0) {
+		if (!cur[0]) {
+			play_uri(r->uri);
+			return;
+		}
+		/* Off-list (the shelf): give the playing song a context of one. */
+		snprintf(play_uris[0], sizeof(play_uris[0]), "%s", cur);
+		snprintf(play_art[0], sizeof(play_art[0]), "%s", native_now_art());
+		snprintf(play_labels[0], sizeof(play_labels[0]), "%s", now_title);
+		snprintf(play_subs[0], sizeof(play_subs[0]), "%s", now_artist);
+		play_count = 1;
+		play_idx = 0;
+		queued_after = 0;
+	}
+	if (play_count >= NATIVE_ROWS)
+		play_count = NATIVE_ROWS - 1;   /* the list's tail gives way */
+	int at = play_idx + 1 + queued_after;
+	if (at > play_count)
+		at = play_count;
+	const int tail = play_count - at;
+	memmove(play_uris[at + 1], play_uris[at], (size_t)tail * sizeof(play_uris[0]));
+	memmove(play_art[at + 1], play_art[at], (size_t)tail * sizeof(play_art[0]));
+	memmove(play_labels[at + 1], play_labels[at], (size_t)tail * sizeof(play_labels[0]));
+	memmove(play_subs[at + 1], play_subs[at], (size_t)tail * sizeof(play_subs[0]));
+	snprintf(play_uris[at], sizeof(play_uris[at]), "%s", r->uri);
+	snprintf(play_art[at], sizeof(play_art[at]), "%s", r->art);
+	snprintf(play_labels[at], sizeof(play_labels[at]), "%s", r->label);
+	snprintf(play_subs[at], sizeof(play_subs[at]), "%s", r->sub);
+	play_count++;
+	queued_after++;
+	play_edited = true;
+	now_idx = -1;   /* list rows and snapshot rows no longer line up */
 }
 
 // Whether the list still shows the view the playing track came from.
@@ -1868,6 +1930,9 @@ static int step_index(int dir)
 {
 	if (play_count == 0 || play_idx < 0)
 		return -1;
+	/* What the user queued plays next, shuffle or not. */
+	if (dir > 0 && queued_after > 0 && play_idx + 1 < play_count)
+		return play_idx + 1;
 	if (shuffle_on && play_count > 1) {
 		int r;
 		do {
@@ -1886,7 +1951,11 @@ static void track_ended(void)
 {
 	auto_advance = true;
 	if (repeat_mode == 2 && native_now_uri()[0]) {
-		play_uri(native_now_uri());
+		/* Replay in place, keeping the list (and any queue) around it. */
+		if (play_idx >= 0 && play_idx < play_count)
+			play_step(play_idx);
+		else
+			play_uri(native_now_uri());
 		auto_advance = false;
 		return;
 	}
@@ -2339,16 +2408,18 @@ int main(int argc, char **argv)
 				row = g_touch.clicked - ACT_ROW0;
 			if (row >= 0 && action_enabled(row)) {
 				actions_open = false;
-				if (row == 2) {
+				if (row == 0) {
+					play_insert_next(&act.row);
+				} else if (row == 3) {
 					settings_open = true;
 					settings_sel = 0;
 				} else {
 					/* An album or artist opens like a playlist would. */
 					nat_view = NATIVE_TRACKS;
 					snprintf(nat_arg, sizeof(nat_arg), "%s",
-					         row == 0 ? act.artist_uri : act.album_uri);
+					         row == 1 ? act.artist_uri : act.album_uri);
 					snprintf(nat_title, sizeof(nat_title), "%s",
-					         row == 0 ? act.artist : act.album);
+					         row == 1 ? act.artist : act.album);
 					lib.open = true;
 					lib.sel = 0;
 					native_fetch_cancel();
