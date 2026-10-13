@@ -820,11 +820,21 @@ int sp_artist_releases(http_session *sess, const char *host, const char *token,
 		if (ext_request(sess, host, token, EXT_KIND_ALBUM_V4, uris, chunk,
 		                &r, err, errlen) != 0)
 			break;   /* rows keep their ids; the view names them "Album" */
+		/* Matched by the uri each answer carries, not by position: the
+		 * service does not promise to answer in the order asked, and
+		 * trusting it put one album's name on another's row. */
 		for (int i = 0; i < chunk; i++) {
 			pbv au, album, v;
 			if (!ext_entity(&r, i, &au, &album))
 				break;
-			sp_release *rel = &out[base + i];
+			char got[48];
+			copy_str(got, sizeof(got), &au);
+			sp_release *rel = NULL;
+			for (int j = 0; j < chunk; j++)
+				if (strcmp(out[base + j].uri, got) == 0)
+					rel = &out[base + j];
+			if (!rel)
+				continue;
 			if (pb_get_bytes(album.p, album.len, 2, &v))
 				copy_str(rel->name, sizeof(rel->name), &v);
 			if (pb_get_bytes(album.p, album.len, 6, &v)) {   /* Date */
