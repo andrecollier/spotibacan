@@ -479,6 +479,8 @@ struct http_session {
 	char      carry[RECV_CHUNK];
 	size_t    carry_len;
 	int       reused_last;   /* the last request rode an open connection */
+	unsigned  wait_ms;       /* request sent -> status line (server time) */
+	unsigned  body_ms;       /* status line -> body complete (wire + CPU) */
 };
 
 http_session *http_session_open(const char *host)
@@ -636,6 +638,7 @@ static int sess_attempt(http_session *s, const char *path, const char *method,
 	}
 
 	char line[512];
+	const u64 t_sent = osGetTime();
 	if (sess_line(s, line, sizeof(line)) != 0) {
 		snprintf(out->err, sizeof(out->err), "connection dropped idle");
 		*stale = true;
@@ -669,6 +672,8 @@ static int sess_attempt(http_session *s, const char *path, const char *method,
 		}
 	}
 
+	const u64 t_head = osGetTime();
+	s->wait_ms = (unsigned)(t_head - t_sent);
 	char *buf = NULL;
 	size_t cap = 0, have = 0;
 	if (chunked) {
@@ -737,6 +742,7 @@ static int sess_attempt(http_session *s, const char *path, const char *method,
 	buf[have] = '\0';
 	out->body = buf;
 	out->len = have;
+	s->body_ms = (unsigned)(osGetTime() - t_head);
 	if (conn_close) {
 		tls_close(s->c);
 		s->c = NULL;
@@ -781,4 +787,11 @@ int http_session_request(http_session *s, const char *path, const char *method,
 int http_session_last_reused(const http_session *s)
 {
 	return s ? s->reused_last : 0;
+}
+
+void http_session_last_timing(const http_session *s, unsigned *wait_ms,
+                              unsigned *body_ms)
+{
+	*wait_ms = s ? s->wait_ms : 0;
+	*body_ms = s ? s->body_ms : 0;
 }

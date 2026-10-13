@@ -708,7 +708,17 @@ void native_stop(void)
 static void download_thread(void *arg)
 {
 	dl_job *job = arg;
+	const u64 t0 = osGetTime();
 	track_stream_download(&job->ts, &job->stop);
+	/* Throughput tells a slow CDN from a slow console when a song stalls. */
+	{
+		const u64 ms = osGetTime() - t0;
+		const unsigned kb = (unsigned)(job->ts.downloaded / 1024);
+		nlog("DL: %s %u KB in %llu ms (%u KB/s)%s%s\n",
+		     job->ts.dl_done ? "done" : (job->stop ? "stopped" : "FAILED"),
+		     kb, (unsigned long long)ms, ms ? (unsigned)(kb * 1000ull / ms) : 0,
+		     job->ts.dl_err[0] ? ": " : "", job->ts.dl_err);
+	}
 	/* Saving on the way out would hold HOME hostage behind an SD write
 	 * plus a cover fetch: quitting drops the save, the queue entry was
 	 * already consumed anyway. */
@@ -1572,10 +1582,12 @@ static int name_tracks(char uris[][64], int n, native_row *rows, int max,
 		    : sp_track_metadata_batch(g.sp_host, l5_token(), ptrs,
 		                              chunk, meta, err, errlen);
 		osTickCounterUpdate(&t);
-		nlog("  chunk %d..%d -> %d named%s%s (%.0f ms%s)\n", base,
-		     base + chunk - 1, named, named < 0 ? ": " : "",
+		unsigned w_ms = 0, b_ms = 0;
+		http_session_last_timing(sess, &w_ms, &b_ms);
+		nlog("  chunk %d..%d -> %d named%s%s (%.0f ms%s, server %u, body %u)\n",
+		     base, base + chunk - 1, named, named < 0 ? ": " : "",
 		     named < 0 ? err : "", osTickCounterRead(&t),
-		     sess && http_session_last_reused(sess) ? ", ka" : "");
+		     sess && http_session_last_reused(sess) ? ", ka" : "", w_ms, b_ms);
 		if (named < 0)
 			continue;
 		for (int i = 0; i < named; i++) {
@@ -1648,6 +1660,69 @@ static int fetch_downloads(native_row *rows, int max)
 	return n;
 }
 
+/* The playlist list as last fetched, so a bad minute at Spotify does not
+ * empty the home screen. "uri<TAB>name<TAB>art" per line beside the config. */
+static void rootlist_cache_file(char *out, size_t n)
+{
+	char d[320];
+	cfg_dir(d, sizeof(d));
+	snprintf(out, n, "%splaylists.txt", d);
+}
+
+static void rootlist_cache_save(const native_row *rows, int n)
+{
+	char path[352], tmp[360];
+	rootlist_cache_file(path, sizeof(path));
+	snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+	FILE *f = fopen(tmp, "w");
+	if (!f)
+		return;
+	for (int i = 0; i < n; i++) {
+		char label[64];
+		snprintf(label, sizeof(label), "%s", rows[i].label);
+		for (char *c = label; *c; c++)
+			if (*c == '\t' || *c == '\n' || *c == '\r')
+				*c = ' ';
+		fprintf(f, "%s\t%s\t%s\n", rows[i].uri, label, rows[i].art);
+	}
+	if (fclose(f) == 0) {
+		remove(path);
+		rename(tmp, path);
+	} else {
+		remove(tmp);
+	}
+}
+
+static int rootlist_cache_load(native_row *rows, int max)
+{
+	char path[352];
+	rootlist_cache_file(path, sizeof(path));
+	FILE *f = fopen(path, "r");
+	if (!f)
+		return 0;
+	char line[512];
+	int n = 0;
+	while (n < max && fgets(line, sizeof(line), f)) {
+		char *nl = strpbrk(line, "\r\n");
+		if (nl)
+			*nl = '\0';
+		char *a = strchr(line, '\t');
+		char *b = a ? strchr(a + 1, '\t') : NULL;
+		if (!b)
+			continue;
+		*a++ = '\0';
+		*b++ = '\0';
+		memset(&rows[n], 0, sizeof(rows[n]));
+		snprintf(rows[n].uri, sizeof(rows[n].uri), "%s", line);
+		snprintf(rows[n].label, sizeof(rows[n].label), "%s", a);
+		snprintf(rows[n].art, sizeof(rows[n].art), "%s", b);
+		rows[n].is_playlist = true;
+		n++;
+	}
+	fclose(f);
+	return n;
+}
+
 int native_fetch(native_view view, const char *arg, native_row *rows, int max,
                  char *err, size_t errlen)
 {
@@ -1683,8 +1758,24 @@ int native_fetch(native_view view, const char *arg, native_row *rows, int max,
 		int count = 0;
 		int n = sp_rootlist(g.sp_host, token, g.username, uris, names, arts,
 		                    max, &count, err, errlen);
-		if (n < 0)
+		if (n < 0 && strstr(err, "HTTP 5")) {
+			/* Spotify's playlist service has bad minutes (502s); one
+			 * more try after a beat often lands. */
+			svcSleepThread(1500000000LL);
+			n = sp_rootlist(g.sp_host, token, g.username, uris, names, arts,
+			                max, &count, err, errlen);
+		}
+		if (n < 0) {
+			/* Still failing: show the last list that worked rather than
+			 * an empty screen with only Liked Songs and Downloads. */
+			int c = rootlist_cache_load(rows, max);
+			if (c > 0) {
+				nlog("  rootlist failed (%s), %d playlists from the card\n",
+				     err, c);
+				return c;
+			}
 			return -1;
+		}
 		for (int i = 0; i < n; i++) {
 			snprintf(rows[i].uri, sizeof(rows[i].uri), "%s", uris[i]);
 			snprintf(rows[i].label, sizeof(rows[i].label), "%s",
@@ -1694,6 +1785,7 @@ int native_fetch(native_view view, const char *arg, native_row *rows, int max,
 			rows[i].is_playlist = true;
 		}
 		nlog("  -> %d playlists (total %d)\n", n, count);
+		rootlist_cache_save(rows, n);
 		return n;
 	}
 	case NATIVE_LIKED: {
