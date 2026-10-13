@@ -100,6 +100,10 @@ native_state native_playback_state(void);
 const char  *native_now_title(void);
 const char  *native_now_artist(void);
 const char  *native_now_album(void);
+/* spotify:album:/spotify:artist: of the playing track, "" when unknown
+ * (local files, or before the first play). */
+const char  *native_now_album_uri(void);
+const char  *native_now_artist_uri(void);
 /* 300px cover of the playing track, or "" -- the UI keeps its placeholder
  * until this has something to say. */
 const char  *native_now_art(void);

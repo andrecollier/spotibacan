@@ -184,6 +184,8 @@ static struct {
 	char          artist[128];
 	char          album[128];
 	char          art[200];
+	char          album_uri[40];
+	char          artist_uri[40];
 	char          profile_art[80];   /* the user's own avatar, for the idle hero */
 	char          error[192];
 	volatile unsigned frames_out;
@@ -518,6 +520,8 @@ native_state native_playback_state(void) { return g.state; }
 const char *native_now_title(void)  { return g.title; }
 const char *native_now_artist(void) { return g.artist; }
 const char *native_now_album(void)  { return g.album; }
+const char *native_now_album_uri(void)  { return g.album_uri; }
+const char *native_now_artist_uri(void) { return g.artist_uri; }
 /* The URI last asked for, so the lyrics view can tell its document belongs
  * to what is playing. Empty before the first play. */
 const char *native_now_uri(void)    { return g.want; }
@@ -1225,6 +1229,7 @@ static void player_thread(void *arg)
 				}
 				g.album[0] = '\0';
 				g.art[0] = '\0';
+				g.album_uri[0] = g.artist_uri[0] = '\0';
 				play_local(uri + 5);
 				if (g.state == NATIVE_PLAYING)
 					g.state = NATIVE_IDLE;
@@ -1303,6 +1308,10 @@ static void player_thread(void *arg)
 			snprintf(g.artist, sizeof(g.artist), "%s", job->ts.meta.artist);
 			snprintf(g.album, sizeof(g.album), "%s", job->ts.meta.album);
 			snprintf(g.art, sizeof(g.art), "%s", job->ts.meta.art_large);
+			snprintf(g.album_uri, sizeof(g.album_uri), "%s",
+			         job->ts.meta.album_uri);
+			snprintf(g.artist_uri, sizeof(g.artist_uri), "%s",
+			         job->ts.meta.artist_uri);
 
 			/* The download runs beside the decoder. An arm that landed
 			 * while the metadata fetch was still running has no job to
@@ -1864,6 +1873,16 @@ int native_fetch(native_view view, const char *arg, native_row *rows, int max,
 		return name_tracks(uris, n, rows, max, err, errlen);
 	}
 	case NATIVE_TRACKS: {
+		/* An album or an artist opened from the player: the context
+		 * service lists either (an artist as its top tracks). */
+		if (arg && (strncmp(arg, "spotify:album:", 14) == 0 ||
+		            strncmp(arg, "spotify:artist:", 15) == 0)) {
+			int n = sp_context_tracks(g.sp_host, token, arg, uris, max,
+			                          err, errlen);
+			if (n < 0)
+				return -1;
+			return name_tracks(uris, n, rows, max, err, errlen);
+		}
 		if (!arg || strncmp(arg, "spotify:playlist:", 17) != 0) {
 			snprintf(err, errlen, "not a playlist uri");
 			return -1;

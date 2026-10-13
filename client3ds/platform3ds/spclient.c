@@ -171,6 +171,28 @@ static int sp_req(http_session *sess, const char *host, const char *path,
 	                    "application/x-protobuf", body, len, 0, r);
 }
 
+/* A 16-byte gid as the 22-character base62 id Spotify URIs carry: the gid
+ * is one big-endian 128-bit number, written most significant digit first. */
+static void gid_to_uri(const char *kind, const uint8_t *gid, char *out,
+                       size_t outlen)
+{
+	static const char B62[] =
+	    "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+	uint8_t num[16];
+	memcpy(num, gid, 16);
+	char digits[22];
+	for (int d = 21; d >= 0; d--) {
+		unsigned rem = 0;
+		for (int i = 0; i < 16; i++) {   /* num /= 62, keep the remainder */
+			unsigned cur = (rem << 8) | num[i];
+			num[i] = (uint8_t)(cur / 62);
+			rem = cur % 62;
+		}
+		digits[d] = B62[rem];
+	}
+	snprintf(out, outlen, "spotify:%s:%.22s", kind, digits);
+}
+
 int sp_track_metadata(const char *host, const char *token, const char *track_uri,
                       sp_track *out, char *err, size_t errlen)
 {
@@ -244,6 +266,8 @@ int sp_track_metadata_s(http_session *sess, const char *host, const char *token,
 		pbv an;
 		if (pb_get_bytes(v.p, v.len, 2, &an))         /* Album.name */
 			copy_str(out->album, sizeof(out->album), &an);
+		if (pb_get_bytes(v.p, v.len, 1, &an) && an.len == 16)   /* gid */
+			gid_to_uri("album", an.p, out->album_uri, sizeof(out->album_uri));
 	}
 	read_cover_urls(&track, out);
 	if (pb_get_bytes(track.p, track.len, 4, &v)) {    /* first Artist */
@@ -252,6 +276,9 @@ int sp_track_metadata_s(http_session *sess, const char *host, const char *token,
 		 * field here would hand back raw bytes that are not text. */
 		if (pb_get_bytes(v.p, v.len, 2, &an))
 			copy_str(out->artist, sizeof(out->artist), &an);
+		if (pb_get_bytes(v.p, v.len, 1, &an) && an.len == 16)
+			gid_to_uri("artist", an.p, out->artist_uri,
+			           sizeof(out->artist_uri));
 	}
 
 	/* Track.file is repeated, and pb_get_bytes only yields the first, so the
@@ -664,6 +691,44 @@ int sp_search_tracks(const char *host, const char *token, const char *query,
 	http_reply_free(&r);
 	if (count == 0)
 		snprintf(err, errlen, "no tracks matched");
+	return count;
+}
+
+int sp_context_tracks(const char *host, const char *token, const char *uri,
+                      char uris[][64], int max, char *err, size_t errlen)
+{
+	char path[160];
+	snprintf(path, sizeof(path), "/context-resolve/v1/%s", uri);
+
+	http_reply r;
+	if (http_get(host, path, token, &r) != 0) {
+		snprintf(err, errlen, "context: %s", r.err);
+		return -1;
+	}
+	if (r.status != 200) {
+		snprintf(err, errlen, "context returned HTTP %d", r.status);
+		http_reply_free(&r);
+		return -1;
+	}
+
+	/* Same shape as search: pages[].tracks[].uri. Entries carry a metadata
+	 * object too, so the scratch buffer is roomier than search's. */
+	int count = 0;
+	size_t cursor = 0;
+	const char *obj;
+	size_t objlen;
+	while (count < max && json_array_next(r.body, "tracks", &cursor, &obj, &objlen)) {
+		char buf[2048];
+		if (!slice_to_buf(obj, objlen, buf, sizeof(buf)))
+			continue;
+		char u[64];
+		if (json_str(buf, "uri", u, sizeof(u)) &&
+		    strncmp(u, "spotify:track:", 14) == 0)
+			snprintf(uris[count++], 64, "%s", u);
+	}
+	http_reply_free(&r);
+	if (count == 0)
+		snprintf(err, errlen, "no tracks in %s", uri);
 	return count;
 }
 

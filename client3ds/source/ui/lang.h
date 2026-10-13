@@ -98,6 +98,8 @@ typedef enum {
 	S_QUALITY,
 	S_QUEUE_SAVING,
 	S_QUEUE_WAITING,
+	S_GO_ARTIST,
+	S_GO_ALBUM,
 	S_COUNT
 } str_id;
 

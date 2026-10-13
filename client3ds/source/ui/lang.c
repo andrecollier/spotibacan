@@ -95,6 +95,8 @@ static const char *const s_strings[LANG_COUNT][S_COUNT] = {
 		[S_QUALITY]           = "Calidad de descarga",
 		[S_QUEUE_SAVING]      = "Guardando en la SD",
 		[S_QUEUE_WAITING]     = "Esperando a la cancion actual",
+		[S_GO_ARTIST]         = "Ir al artista",
+		[S_GO_ALBUM]          = "Ir al album",
 	},
 	[LANG_EN] = {
 		[S_NOTHING_PLAYING]   = "Nothing playing",
@@ -186,6 +188,8 @@ static const char *const s_strings[LANG_COUNT][S_COUNT] = {
 		[S_QUALITY]           = "Download quality",
 		[S_QUEUE_SAVING]      = "Saving to SD",
 		[S_QUEUE_WAITING]     = "Waiting for playback",
+		[S_GO_ARTIST]         = "Go to artist",
+		[S_GO_ALBUM]          = "Go to album",
 	},
 };
 

@@ -42,6 +42,10 @@ typedef struct {
 	 * images. */
 	char    art_small[80];
 	char    art_large[80];
+	/* spotify:album:... and spotify:artist:... (first artist), built from
+	 * the gids, for "go to album / artist". Empty when absent. */
+	char    album_uri[40];
+	char    artist_uri[40];
 	int     duration_ms;
 	sp_file files[SP_MAX_FILES];
 	int     file_count;
@@ -130,6 +134,11 @@ typedef struct {
 int  sp_storage_resolve(const char *host, const char *token,
                         const uint8_t file_id[20], sp_storage *out,
                         char *err, size_t errlen);
+/* The tracks of any context the context service knows: an album, or an
+ * artist (its top tracks). Returns the count, or -1 with err set. */
+int  sp_context_tracks(const char *host, const char *token, const char *uri,
+                       char uris[][64], int max, char *err, size_t errlen);
+
 int  sp_storage_resolve_s(http_session *sess, const char *host,
                           const char *token, const uint8_t file_id[20],
                           sp_storage *out, char *err, size_t errlen);

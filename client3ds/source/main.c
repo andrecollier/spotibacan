@@ -1112,6 +1112,55 @@ static bool list_downloadable(void)
 	       nat_count > 0 && !native_offline();
 }
 
+/* START while a song plays: jump to its artist or album, or on to the
+ * settings. Same modal pattern as the settings sheet, three rows. */
+#define ACT_ROWS 3
+#define ACT_ROW0 0x7200
+static bool actions_open = false;
+static int  actions_sel = 0;
+
+static bool action_enabled(int row)
+{
+	if (row == 0) return native_now_artist_uri()[0] != '\0';
+	if (row == 1) return native_now_album_uri()[0] != '\0';
+	return true;
+}
+
+static void draw_actions(const Skin *sk)
+{
+	const u32 dim   = C2D_Color32(0x00, 0x00, 0x00, 0xA8);
+	const u32 bord  = C2D_Color32(0x38, 0x38, 0x38, 0xFF);
+	const u32 panel = C2D_Color32(0x1B, 0x1B, 0x1B, 0xFF);
+	C2D_DrawRectSolid(0.0f, 0.0f, 0.6f, BOT_W, SCR_H, dim);
+	const float px = 20.0f, py = 40.0f, pw = 280.0f, ph = 150.0f;
+	C2D_DrawRectSolid(px, py, 0.6f, pw, ph, bord);
+	C2D_DrawRectSolid(px + 1.0f, py + 1.0f, 0.6f, pw - 2.0f, ph - 2.0f, panel);
+
+	ui_depth(0.7f);
+	const char *labels[ACT_ROWS] = { tr(S_GO_ARTIST), tr(S_GO_ALBUM),
+	                                 tr(S_SETTINGS) };
+	const char *subs[ACT_ROWS] = { native_now_artist(), native_now_album(), "" };
+	const float rh = 40.0f, ry = py + 16.0f;
+	for (int i = 0; i < ACT_ROWS; i++) {
+		const float y = ry + i * rh;
+		const bool on = action_enabled(i);
+		if (i == actions_sel)
+			C2D_DrawRectSolid(px + 6.0f, y - 4.0f, 0.65f, pw - 12.0f,
+			                  rh - 4.0f, sk->accent);
+		const u32 fg = i == actions_sel ? sk->on_accent
+		               : (on ? sk->text : sk->dim);
+		ui_text(text_buf, labels[i], px + 16.0f,
+		        ui_baseline(y, TY_ROW_NAME), TY_ROW_NAME, pw - 32.0f, fg);
+		if (subs[i][0])
+			ui_text(text_buf, subs[i], px + 16.0f,
+			        ui_baseline(y + 17.0f, TY_ROW_SUB), TY_ROW_SUB,
+			        pw - 32.0f, i == actions_sel ? fg : sk->dim);
+		tb_add(&g_tb, px + 6.0f, y - 4.0f, pw - 12.0f, rh - 4.0f,
+		       ACT_ROW0 + i);
+	}
+	ui_depth(0.0f);
+}
+
 static void draw_settings(const Skin *sk)
 {
 	const u32 dim   = C2D_Color32(0x00, 0x00, 0x00, 0xA8);
@@ -1649,6 +1698,9 @@ static void draw_bottom(const Skin *sk)
 		// taps meant for the menu.
 		tb_reset(&g_tb);
 		draw_settings(sk);
+	} else if (actions_open) {
+		tb_reset(&g_tb);
+		draw_actions(sk);
 	} else if (srch_open) {
 		tb_reset(&g_tb);
 		draw_search_recents(sk);
@@ -2191,6 +2243,43 @@ int main(int argc, char **argv)
 			down = 0;
 			g_touch.clicked = -1;
 			g_touch.long_pressed = -1;
+		} else if (actions_open) {
+			if (down & KEY_DUP)
+				actions_sel = actions_sel > 0 ? actions_sel - 1 : ACT_ROWS - 1;
+			if (down & KEY_DDOWN)
+				actions_sel = actions_sel + 1 < ACT_ROWS ? actions_sel + 1 : 0;
+			int row = -1;
+			if (down & KEY_A)
+				row = actions_sel;
+			if (g_touch.clicked >= ACT_ROW0 &&
+			    g_touch.clicked < ACT_ROW0 + ACT_ROWS)
+				row = g_touch.clicked - ACT_ROW0;
+			if (row >= 0 && action_enabled(row)) {
+				actions_open = false;
+				if (row == 2) {
+					settings_open = true;
+					settings_sel = 0;
+				} else {
+					/* An album or artist opens like a playlist would. */
+					nat_view = NATIVE_TRACKS;
+					snprintf(nat_arg, sizeof(nat_arg), "%s",
+					         row == 0 ? native_now_artist_uri()
+					                  : native_now_album_uri());
+					snprintf(nat_title, sizeof(nat_title), "%s",
+					         row == 0 ? native_now_artist()
+					                  : native_now_album());
+					lib.open = true;
+					lib.sel = 0;
+					native_fetch_cancel();
+					lib.scroll = lib.velocity = 0.0f;
+					lib_reload = true;
+				}
+			}
+			if (down & (KEY_B | KEY_START))
+				actions_open = false;
+			down = 0;
+			g_touch.clicked = -1;
+			g_touch.long_pressed = -1;
 		} else if (srch_open) {
 			// The recents popup: pick one, forget one, or wipe them all.
 			const int c = g_touch.clicked;
@@ -2242,8 +2331,15 @@ int main(int argc, char **argv)
 			help_open = true;
 			down = 0;
 		} else if (down & KEY_START) {
-			settings_open = true;
-			settings_sel = 0;
+			/* With a Spotify track playing, START offers its artist and
+			 * album first; otherwise it is straight to the settings. */
+			if (native_now_artist_uri()[0] || native_now_album_uri()[0]) {
+				actions_open = true;
+				actions_sel = 0;
+			} else {
+				settings_open = true;
+				settings_sel = 0;
+			}
 			down = 0;
 		}
 
