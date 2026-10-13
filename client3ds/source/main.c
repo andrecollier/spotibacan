@@ -37,6 +37,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
 
 #define SOC_BUFFER      0x100000
@@ -113,6 +114,8 @@ static bool batt_charging = false;
  * charger came off (or the app started); -1 while there is too little to
  * go on. The MCU gives no current draw, only the percent. */
 static int  batt_left_min = -1;
+/* What the playing list was called, for the status line on top. */
+static char play_ctx_title[64] = "";
 static int  settings_sel = 0;
 /* Applying a preference writes the SD card, which stalls the frame long
  * enough to read as a freeze. So a tap only arms the change; the menu draws
@@ -962,32 +965,59 @@ static void draw_top(const Skin *sk, bool buffering, bool muted, float par)
 		C2D_DrawRectangle(0.0f, y0, 0.0f, TOP_W, y1 - y0, c0, c0, c1, c1);
 	}
 
+	/* Status line in what used to be an empty band: where the music comes
+	 * from on the left; queue, battery and clock on the right. Flat (no
+	 * parallax), like a system bar. */
+	{
+		const float sy = 7.0f;
+		char right[48] = "";
+		int q_done = 0, q_total = 0;
+		native_dl_progress(&q_done, &q_total);
+		if (q_total > 0)
+			snprintf(right, sizeof(right), "DL %d/%d   ", q_done, q_total);
+		if (batt_pct >= 0)
+			snprintf(right + strlen(right), sizeof(right) - strlen(right),
+			         "%s%d%%   ", batt_charging ? "+" : "", batt_pct);
+		time_t now_t = time(NULL);
+		struct tm *lt = localtime(&now_t);
+		if (lt)
+			snprintf(right + strlen(right), sizeof(right) - strlen(right),
+			         "%02d:%02d", lt->tm_hour, lt->tm_min);
+		text_at(right, TOP_W - 14.0f, sy, 0.44f,
+		        batt_pct >= 0 && batt_pct <= 15 && !batt_charging ? sk->warm
+		                                                          : sk->dim,
+		        C2D_AlignRight);
+		const char *ctx = play_idx >= 0 && play_ctx_title[0] ? play_ctx_title
+		                                                     : "SpotiBacan";
+		text_fit(ctx, 20.0f, sy, 0.44f, sk->dim, TOP_W - 20.0f - 150.0f);
+	}
+
 	// Art on the left with a real margin, text beside it, and nothing else.
 	// The text column is measured, so a long title stops at the edge instead
-	// of running off it.
-	const float ART = 152.0f;
-	const float AX = 20.0f, AY = 44.0f;
-	const float TX = AX + ART + 22.0f;
-	const float TW = TOP_W - TX - 20.0f;
+	// of running off it. Its rows line up with the cover's top and bottom.
+	const float ART = 160.0f;
+	const float AX = 20.0f, AY = 30.0f;
+	const float TX = AX + ART + 20.0f;
+	const float TW = TOP_W - TX - 18.0f;
 
 	draw_art(sk, AX + par * 3.0f, AY, ART);
 
-	text_fit(now_title[0] ? now_title : tr(S_NOTHING_PLAYING), TX + par * 2.0f, AY + 2,
+	text_fit(now_title[0] ? now_title : tr(S_NOTHING_PLAYING), TX + par * 2.0f, AY,
 	         0.70f, sk->text, TW);
-	text_fit(now_artist, TX + par * 1.4f, AY + 36, 0.54f, sk->dim, TW);
-	text_fit(now_album, TX + par * 1.0f, AY + 60, 0.46f, sk->meter, TW);
+	text_fit(now_artist, TX + par * 1.4f, AY + 30, 0.54f, sk->dim, TW);
+	text_fit(now_album, TX + par * 1.0f, AY + 52, 0.46f, sk->meter, TW);
 
 	const char *state = buffering ? tr(S_STATE_LOADING) :
 	                    paused    ? tr(S_STATE_PAUSED) :
 	                    muted     ? tr(S_STATE_MUTED) : tr(S_STATE_PLAYING);
-	C2D_DrawCircleSolid(TX + 5 + par * 0.8f, AY + 112, 0.1f, 4,
+	C2D_DrawCircleSolid(TX + 5 + par * 0.8f, AY + 106, 0.1f, 4,
 	                    buffering ? sk->warm : sk->accent);
-	text_at(state, TX + 18 + par * 0.8f, AY + 103, 0.46f, sk->dim, 0);
+	text_at(state, TX + 18 + par * 0.8f, AY + 97, 0.46f, sk->dim, 0);
 
 	if (now_dur > 1.0f) {
 		float done = now_pos / now_dur;
 		if (done > 1.0f) done = 1.0f;
-		float bx = TX + par * 0.6f, by = AY + 140, bw = TW;
+		float bx = TX + par * 0.6f, by = AY + ART - 22.0f, bw = TW;
 		C2D_DrawRectSolid(bx, by, 0.0f, bw, 3, sk->meter);
 		C2D_DrawRectSolid(bx, by, 0.1f, bw * done, 3, sk->accent);
 		char a[12], b[12];
@@ -1005,7 +1035,7 @@ static void draw_top(const Skin *sk, bool buffering, bool muted, float par)
 		if (n1 >= play_count)
 			n1 = (repeat_mode == 1 && play_count > 0) ? 0 : -1;
 		if (n1 >= 0) {
-			float uy = 208.0f;
+			float uy = 210.0f;
 			ui_text_tracked(text_buf, tr(S_UPNEXT),
 			                AX + par * 1.2f, ui_baseline(uy, TY_MICRO),
 			                TY_MICRO, 1.0f, sk->meter);
@@ -1855,6 +1885,7 @@ static void play_index(int idx)
 	play_count = n;
 	play_idx = at;
 	now_idx = idx;
+	snprintf(play_ctx_title, sizeof(play_ctx_title), "%s", nat_title);
 	now_view = nat_view;
 	snprintf(now_arg, sizeof(now_arg), "%s",
 	         nat_view == NATIVE_SEARCH ? lib.query : nat_arg);
