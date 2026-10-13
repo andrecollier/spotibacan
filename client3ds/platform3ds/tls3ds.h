@@ -38,6 +38,8 @@ typedef struct {
 /* Parses the linked CA bundle and seeds the DRBG. socInit() and psInit() must
  * already have succeeded. Returns 0, or a negative mbedTLS error. */
 int  tls_global_init(void);
+/* Receives one summary line per closed connection that moved data. */
+void tls_set_logger(void (*logger)(const char *line));
 void tls_global_exit(void);
 
 /* How many anchors tls_global_init() accepted; 0 means every chain will fail. */

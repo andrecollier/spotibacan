@@ -1431,6 +1431,7 @@ int native_init(const native_sink *sink, void (*progress)(const char *step),
 		tls_strerror(rc, err, errlen);
 		return -1;
 	}
+	tls_set_logger(write_log_line);
 
 	step(progress, "Reading the stored token...");
 	char stored[512];

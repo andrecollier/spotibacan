@@ -50,7 +50,16 @@ struct tls_conn {
 	int                      fd;
 	int                      timeout_ms;
 	char                     host[128];
+	/* Where a connection's time goes: waiting in poll() for the network,
+	 * versus everything else (decrypting, parsing). Logged on close. */
+	u64                      opened_ms;
+	u64                      wait_ms;
+	size_t                   bytes_in;
 };
+
+static void (*s_logger)(const char *line);
+
+void tls_set_logger(void (*logger)(const char *line)) { s_logger = logger; }
 
 static struct {
 	bool                     ready;
@@ -186,10 +195,14 @@ static int bio_send(void *ctx, const unsigned char *buf, size_t len)
 static int bio_recv(void *ctx, unsigned char *buf, size_t len)
 {
 	tls_conn *c = ctx;
+	const u64 t0 = osGetTime();
 	int rc = wait_io(c->fd, POLLIN, c->timeout_ms);
+	c->wait_ms += osGetTime() - t0;
 	if (rc)
 		return rc;
 	int n = recv(c->fd, buf, len, 0);
+	if (n > 0)
+		c->bytes_in += (size_t)n;
 	if (n == 0)
 		return MBEDTLS_ERR_SSL_CONN_EOF;
 	if (n < 0)
@@ -266,6 +279,7 @@ tls_conn *tls_connect(const char *host, u16 port, int timeout_ms,
 	}
 	c->timeout_ms = timeout_ms;
 	snprintf(c->host, sizeof(c->host), "%s", host);
+	c->opened_ms = osGetTime();
 
 	c->fd = dial(host, port, timeout_ms, st, err, errlen);
 	if (c->fd < 0) {
@@ -408,6 +422,19 @@ void tls_close(tls_conn *c)
 {
 	if (!c)
 		return;
+	/* Only connections that moved real data: the tiny API calls would
+	 * drown the log. */
+	if (s_logger && c->bytes_in >= 32 * 1024) {
+		const u64 total = osGetTime() - c->opened_ms;
+		char line[200];
+		snprintf(line, sizeof(line),
+		         "TLS: %s %u KB in %llu ms, %llu ms waiting on the network, "
+		         "%llu ms working\n",
+		         c->host, (unsigned)(c->bytes_in / 1024),
+		         (unsigned long long)total, (unsigned long long)c->wait_ms,
+		         (unsigned long long)(total > c->wait_ms ? total - c->wait_ms : 0));
+		s_logger(line);
+	}
 	mbedtls_ssl_close_notify(&c->ssl);
 	mbedtls_ssl_free(&c->ssl);
 	mbedtls_ssl_config_free(&c->conf);
