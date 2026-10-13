@@ -59,6 +59,10 @@ void track_free(track_audio *t);
  * piece lands, and the decoder must never read past it. */
 #define TRACK_STREAM_MAX (12 * 1024 * 1024)
 
+/* How long a download keeps retrying with nothing arriving before it gives
+ * up on the track. Long enough to walk through a dead spot in the house. */
+#define TRACK_STALL_GIVEUP_MS 90000u
+
 typedef struct {
 	/* Set by the caller before track_stream_begin: a download for the
 	 * card may take the 320 kbps file, streaming always takes 160. */

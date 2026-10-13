@@ -261,17 +261,22 @@ int track_stream_download(track_stream *ts, volatile bool *stop)
 	ts->nc_off = 0;
 	ts->aes = &aes;
 
-	/* Two passes over the URL list: a Wi-Fi blip at 90% should not cost
-	 * the track, and every attempt resumes where the last one stopped. A
-	 * reposition earns two fresh passes from the new offset. */
-	for (int pass = 0; pass < 2 && !ts->dl_done && !ts->cb_fatal; pass++) {
+	/* Keep at it while the link comes and goes: walking through a dead spot
+	 * used to burn the two passes in seconds and end the song mid-play.
+	 * Every attempt resumes where the last one stopped; the clock only runs
+	 * while nothing arrives, and any progress resets it. A reposition
+	 * starts the clock afresh from the new offset. */
+	u64 stalled_since = 0;
+	unsigned backoff_ms = 500;
+	while (!ts->dl_done && !ts->cb_fatal && !(stop && *stop)) {
 		if (ts->dl_restart_at >= 0) {
 			size_t at = (size_t)ts->dl_restart_at;
 			ts->dl_restart_at = -1;
 			stream_rewind(ts, at);
-			pass = -1;
-			continue;
+			stalled_since = 0;
+			backoff_ms = 500;
 		}
+		const size_t before = ts->write_pos;
 		for (int i = 0; i < ts->storage.count; i++) {
 			if ((stop && *stop) || ts->cb_fatal || ts->dl_restart_at >= 0)
 				break;
@@ -284,6 +289,25 @@ int track_stream_download(track_stream *ts, volatile bool *stop)
 			if (ts->dl_done || (stop && *stop))
 				break;
 		}
+		if (ts->dl_done || ts->cb_fatal || (stop && *stop) ||
+		    ts->dl_restart_at >= 0)
+			continue;
+		const u64 now = osGetTime();
+		if (ts->write_pos > before) {
+			stalled_since = 0;   /* it moved: the link is back */
+			backoff_ms = 500;
+		} else if (!stalled_since) {
+			stalled_since = now;
+		} else if (now - stalled_since > TRACK_STALL_GIVEUP_MS) {
+			break;   /* a minute and a half of nothing: really gone */
+		}
+		/* Let the Wi-Fi reassociate before the next try, checking for a
+		 * stop or a seek every 100 ms. */
+		for (unsigned w = 0; w < backoff_ms && !(stop && *stop) &&
+		                     ts->dl_restart_at < 0; w += 100)
+			svcSleepThread(100000000LL);
+		if (backoff_ms < 4000)
+			backoff_ms *= 2;
 	}
 	ts->aes = NULL;
 	mbedtls_aes_free(&aes);
