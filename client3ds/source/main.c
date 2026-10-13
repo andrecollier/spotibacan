@@ -1120,6 +1120,15 @@ static void draw_settings(const Skin *sk)
 	ui_text(text_buf, tr(S_SETTINGS), px + 16.0f,
 	        ui_baseline(py + 8.0f, TY_ROW_NAME), TY_ROW_NAME, pw - 32.0f,
 	        sk->warm);
+#ifdef APP_VERSION
+	{
+		/* Which build is installed, at a glance. */
+		const char *ver = "v" APP_VERSION;
+		float vw = ui_text_width(text_buf, ver, TY_ROW_SUB);
+		ui_text(text_buf, ver, px + pw - 16.0f - vw,
+		        ui_baseline(py + 10.0f, TY_ROW_SUB), TY_ROW_SUB, vw, sk->dim);
+	}
+#endif
 	if (settings_pending >= 0 || osGetTime() < settings_busy_until) {
 		// Three animated dots while the change applies and a beat after.
 		char dots[4] = "...";

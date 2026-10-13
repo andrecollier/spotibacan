@@ -28,6 +28,8 @@ AR = DKP / "devkitARM/bin/arm-none-eabi-gcc-ar"
 TOOL_3DSX = DKP / "tools/bin/3dsxtool"
 MAKEROM = Path(os.environ.get("MAKEROM", ROOT.parent / "tools/makerom/makerom"))
 
+VERSION = (1, 2, 0)   # shown in Settings and stamped into the CIA
+
 ARCH = ["-march=armv6k", "-mtune=mpcore", "-mfloat-abi=hard", "-mtp=soft"]
 
 STB = "2c980bb59875b0d32144a71867fbdebb2f77cd20"
@@ -125,7 +127,8 @@ def main():
         s = ROOT / rel
         pairs.append((s, adir / f"vendor_{s.stem}.o"))
     app_flags = common + ["-Wall", "-Wextra", "-I" + str(DEPS), "-I" + str(ROOT / "source"),
-                          f'-DBUILD_STAMP="{__import__("time").strftime("%H:%M:%S")}"']
+                          f'-DBUILD_STAMP="{__import__("time").strftime("%H:%M:%S")}"',
+                          '-DAPP_VERSION="%d.%d"' % VERSION[:2]]
     compile_all([p for p in pairs if "vendor" not in p[0].parts], app_flags, args.j)
     compile_all([p for p in pairs if "vendor" in p[0].parts],
                 [f for f in app_flags if f not in ("-Wall", "-Wextra")] + ["-w"], args.j)
@@ -148,7 +151,7 @@ def main():
     run([str(MAKEROM), "-f", "cia", "-o", str(cia), "-elf", str(elf),
          "-rsf", str(ROOT / "assets/spotibacan.rsf"), "-target", "t", "-exefslogo",
          "-icon", str(ROOT / "assets/icon.smdh"), "-banner", str(ROOT / "assets/banner.bnr"),
-         "-major", "1", "-minor", "1", "-micro", "0"])
+         "-major", str(VERSION[0]), "-minor", str(VERSION[1]), "-micro", str(VERSION[2])])
     print(f"Built {cia}  ({cia.stat().st_size:,} bytes)")
 
 
