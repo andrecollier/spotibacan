@@ -3,7 +3,7 @@
 Cliente de Spotify para Nintendo 3DS: escucha tu música, tus playlists y tus
 Me gusta directo en la consola, con descargas para escuchar sin internet.
 
-![icono](client3ds/icon.png)
+![icono](client3ds/assets/icon.png)
 
 ## Características
 
