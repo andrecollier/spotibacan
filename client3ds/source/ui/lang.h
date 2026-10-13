@@ -107,6 +107,8 @@ typedef enum {
 	S_EQ_VOCAL,
 	S_EQ_BOOST,
 	S_PLAY_NEXT,
+	S_DELETE_DL,
+	S_DELETE_CONFIRM,
 	S_COUNT
 } str_id;
 

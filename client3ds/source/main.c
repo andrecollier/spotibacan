@@ -1164,7 +1164,7 @@ static bool list_downloadable(void)
 
 /* START while a song plays: jump to its artist or album, or on to the
  * settings. Same modal pattern as the settings sheet, three rows. */
-#define ACT_ROWS 4
+#define ACT_ROWS 5
 #define ACT_ROW0 0x7200
 static bool actions_open = false;
 static int  actions_sel = 0;
@@ -1177,12 +1177,16 @@ static struct {
 	native_row row;
 } act;
 
-/* Rows: 0 play next, 1 artist, 2 album, 3 settings. */
+/* Rows: 0 play next, 1 artist, 2 album, 3 delete download, 4 settings.
+ * Delete takes two presses: the first only arms it. */
+static bool act_delete_armed = false;
+
 static bool action_enabled(int row)
 {
 	if (row == 0) return act.has_row;
 	if (row == 1) return act.artist_uri[0] != '\0';
 	if (row == 2) return act.album_uri[0] != '\0';
+	if (row == 3) return act.has_row && strncmp(act.row.uri, "file:", 5) == 0;
 	return true;
 }
 
@@ -1219,16 +1223,19 @@ static void draw_actions(const Skin *sk)
 	const u32 bord  = C2D_Color32(0x38, 0x38, 0x38, 0xFF);
 	const u32 panel = C2D_Color32(0x1B, 0x1B, 0x1B, 0xFF);
 	C2D_DrawRectSolid(0.0f, 0.0f, 0.6f, BOT_W, SCR_H, dim);
-	const float px = 20.0f, py = 22.0f, pw = 280.0f, ph = 192.0f;
+	const float px = 20.0f, py = 12.0f, pw = 280.0f, ph = 216.0f;
 	C2D_DrawRectSolid(px, py, 0.6f, pw, ph, bord);
 	C2D_DrawRectSolid(px + 1.0f, py + 1.0f, 0.6f, pw - 2.0f, ph - 2.0f, panel);
 
 	ui_depth(0.7f);
 	const char *labels[ACT_ROWS] = { tr(S_PLAY_NEXT), tr(S_GO_ARTIST),
-	                                 tr(S_GO_ALBUM), tr(S_SETTINGS) };
+	                                 tr(S_GO_ALBUM),
+	                                 tr(act_delete_armed ? S_DELETE_CONFIRM
+	                                                     : S_DELETE_DL),
+	                                 tr(S_SETTINGS) };
 	const char *subs[ACT_ROWS] = { act.has_row ? act.row.label : "",
-	                               act.artist, act.album, "" };
-	const float rh = 40.0f, ry = py + 16.0f;
+	                               act.artist, act.album, "", "" };
+	const float rh = 40.0f, ry = py + 14.0f;
 	for (int i = 0; i < ACT_ROWS; i++) {
 		const float y = ry + i * rh;
 		const bool on = action_enabled(i);
@@ -2442,6 +2449,8 @@ int main(int argc, char **argv)
 			g_touch.clicked = -1;
 			g_touch.long_pressed = -1;
 		} else if (actions_open) {
+			if (down & (KEY_DUP | KEY_DDOWN))
+				act_delete_armed = false;   /* moving away disarms delete */
 			if (down & KEY_DUP)
 				actions_sel = actions_sel > 0 ? actions_sel - 1 : ACT_ROWS - 1;
 			if (down & KEY_DDOWN)
@@ -2452,11 +2461,20 @@ int main(int argc, char **argv)
 			if (g_touch.clicked >= ACT_ROW0 &&
 			    g_touch.clicked < ACT_ROW0 + ACT_ROWS)
 				row = g_touch.clicked - ACT_ROW0;
+			if (row == 3 && action_enabled(3) && !act_delete_armed) {
+				act_delete_armed = true;   /* ask once more */
+				row = -1;
+			}
 			if (row >= 0 && action_enabled(row)) {
 				actions_open = false;
 				if (row == 0) {
 					play_insert_next(&act.row);
 				} else if (row == 3) {
+					act_delete_armed = false;
+					native_delete_download(act.row.uri);
+					lib_reload = true;   /* the Downloads list rereads the card */
+					nat_loaded_view = (native_view)-1;
+				} else if (row == 4) {
 					settings_open = true;
 					settings_sel = 0;
 				} else {
@@ -2533,7 +2551,9 @@ int main(int argc, char **argv)
 			 * album first; otherwise it is straight to the settings. */
 			if (actions_capture()) {
 				actions_open = true;
-				actions_sel = 0;
+				act_delete_armed = false;
+				/* In Downloads the likely wish is the delete row. */
+				actions_sel = strncmp(act.row.uri, "file:", 5) == 0 ? 3 : 0;
 			} else {
 				settings_open = true;
 				settings_sel = 0;

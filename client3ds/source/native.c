@@ -1706,6 +1706,30 @@ static int name_tracks(char uris[][64], int n, native_row *rows, int max,
 /* Lists the .ogg files under music/ as playable rows, newest first (the
  * order the saver produced them in is the order the user last heard).
  * Pure filesystem: no session, no network. */
+bool native_delete_download(const char *file_uri)
+{
+	if (!file_uri || strncmp(file_uri, "file:", 5) != 0)
+		return false;
+	const char *name = file_uri + 5;
+	/* Only a bare file name under music/: nothing that walks elsewhere. */
+	if (!name[0] || strchr(name, '/') || strchr(name, '\\') ||
+	    strstr(name, ".."))
+		return false;
+	char path[400];
+	cfg_dir(path, sizeof(path));
+	snprintf(path + strlen(path), sizeof(path) - strlen(path), "music/%s", name);
+	bool ok = remove(path) == 0;
+	/* Its cover goes with it: same name, .jpg. */
+	char *dot = strrchr(path, '.');
+	if (dot && strcmp(dot, ".ogg") == 0) {
+		strcpy(dot, ".jpg");
+		remove(path);
+	}
+	saved_checked_uri[0] = '\0';   /* the "saved?" cache must look again */
+	nlog("DL: deleted %s%s\n", name, ok ? "" : " (failed)");
+	return ok;
+}
+
 static int fetch_downloads(native_row *rows, int max)
 {
 	char dir[352];

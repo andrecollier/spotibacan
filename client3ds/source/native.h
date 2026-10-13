@@ -163,6 +163,8 @@ bool         native_current_saved(void);
 int  native_dl_enqueue_list(const native_row *rows, int n);
 /* Drops everything still waiting (the running download finishes). */
 void native_dl_clear(void);
+/* Removes a saved song (file:<name>.ogg) and its cover from the card. */
+bool native_delete_download(const char *file_uri);
 /* Finished (incl. failed) and total for the current batch. */
 void native_dl_progress(int *done, int *total);
 /* native_dl_active() while the finished file is being written to SD. */

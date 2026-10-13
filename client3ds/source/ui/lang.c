@@ -104,6 +104,8 @@ static const char *const s_strings[LANG_COUNT][S_COUNT] = {
 		[S_EQ_VOCAL]          = "Voces",
 		[S_EQ_BOOST]          = "Boost",
 		[S_PLAY_NEXT]         = "Reproducir a continuacion",
+		[S_DELETE_DL]         = "Borrar descarga",
+		[S_DELETE_CONFIRM]    = "Pulsa A otra vez para borrar",
 	},
 	[LANG_EN] = {
 		[S_NOTHING_PLAYING]   = "Nothing playing",
@@ -204,6 +206,8 @@ static const char *const s_strings[LANG_COUNT][S_COUNT] = {
 		[S_EQ_VOCAL]          = "Vocal",
 		[S_EQ_BOOST]          = "Boost",
 		[S_PLAY_NEXT]         = "Play next",
+		[S_DELETE_DL]         = "Delete download",
+		[S_DELETE_CONFIRM]    = "Press A again to delete",
 	},
 };
 
