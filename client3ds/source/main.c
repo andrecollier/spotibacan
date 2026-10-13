@@ -105,6 +105,14 @@ static touch_builder g_tb;
 // START opens the settings menu instead of killing the music outright: an
 // accidental press (a palm, a pocket) used to close the app mid-track.
 static bool settings_open = false;
+/* Battery for the settings header: percent from the MCU, refreshed every
+ * few seconds; -1 until the first read succeeds. */
+static int  batt_pct = -1;
+static bool batt_charging = false;
+/* Minutes left, estimated from how fast the percent has fallen since the
+ * charger came off (or the app started); -1 while there is too little to
+ * go on. The MCU gives no current draw, only the percent. */
+static int  batt_left_min = -1;
 static int  settings_sel = 0;
 /* Applying a preference writes the SD card, which stalls the frame long
  * enough to read as a freeze. So a tap only arms the change; the menu draws
@@ -1181,15 +1189,28 @@ static void draw_settings(const Skin *sk)
 	ui_text(text_buf, tr(S_SETTINGS), px + 16.0f,
 	        ui_baseline(py + 8.0f, TY_ROW_NAME), TY_ROW_NAME, pw - 32.0f,
 	        sk->warm);
-#ifdef APP_VERSION
 	{
-		/* Which build is installed, at a glance. */
-		const char *ver = "v" APP_VERSION;
-		float vw = ui_text_width(text_buf, ver, TY_ROW_SUB);
-		ui_text(text_buf, ver, px + pw - 16.0f - vw,
-		        ui_baseline(py + 10.0f, TY_ROW_SUB), TY_ROW_SUB, vw, sk->dim);
-	}
+		/* Battery and build, top right: "87%  v1.3", "+" while charging. */
+		char hdr[32] = "";
+		if (batt_pct >= 0) {
+			snprintf(hdr, sizeof(hdr), "%s%d%%", batt_charging ? "+" : "",
+			         batt_pct);
+			if (!batt_charging && batt_left_min >= 0)
+				snprintf(hdr + strlen(hdr), sizeof(hdr) - strlen(hdr),
+				         " ~%dh %02dm", batt_left_min / 60, batt_left_min % 60);
+		}
+#ifdef APP_VERSION
+		snprintf(hdr + strlen(hdr), sizeof(hdr) - strlen(hdr), "%sv%s",
+		         hdr[0] ? "   " : "", APP_VERSION);
 #endif
+		if (hdr[0]) {
+			const u32 col = batt_pct >= 0 && batt_pct <= 15 && !batt_charging
+			                ? sk->warm : sk->dim;   /* low: warn */
+			float vw = ui_text_width(text_buf, hdr, TY_ROW_SUB);
+			ui_text(text_buf, hdr, px + pw - 16.0f - vw,
+			        ui_baseline(py + 10.0f, TY_ROW_SUB), TY_ROW_SUB, vw, col);
+		}
+	}
 	if (settings_pending >= 0 || osGetTime() < settings_busy_until) {
 		// Three animated dots while the change applies and a beat after.
 		char dots[4] = "...";
@@ -2062,6 +2083,7 @@ int main(int argc, char **argv)
 		mix[0] = mix[1] = 1.0f;
 		ndspChnSetMix(0, mix);
 		mcuHwcInit();   // the overlay follows the hardware volume slider
+		ptmuInit();     // charging state for the battery readout
 		audio = linearAlloc(buf_bytes * WAVE_BUFFERS);
 		if (!audio) fail = "Audio memory failed.";
 	}
@@ -2665,6 +2687,39 @@ int main(int argc, char **argv)
 				play_step(t);
 		}
 
+		{
+			static u64 batt_at = 0;
+			const u64 now_ms = osGetTime();
+			if (!batt_at || now_ms - batt_at >= 5000) {
+				batt_at = now_ms;
+				u8 pct = 0, chg = 0;
+				if (R_SUCCEEDED(MCUHWC_GetBatteryLevel(&pct)))
+					batt_pct = pct > 100 ? 100 : pct;
+				if (R_SUCCEEDED(PTMU_GetBatteryChargeState(&chg)))
+					batt_charging = chg != 0;
+				/* The slope since a reference point: reset on the charger
+				 * or a rise, and trusted only once the percent has fallen
+				 * a little over a few minutes, so one tick cannot swing
+				 * it wildly. */
+				static int ref_pct = -1;
+				static u64 ref_ms = 0;
+				if (batt_pct >= 0) {
+					if (batt_charging || ref_pct < 0 || batt_pct > ref_pct) {
+						ref_pct = batt_pct;
+						ref_ms = now_ms;
+						batt_left_min = -1;
+					} else {
+						const int dropped = ref_pct - batt_pct;
+						const u64 span = now_ms - ref_ms;
+						if (dropped >= 2 && span >= 4 * 60 * 1000) {
+							const double ms_per_pct = (double)span / dropped;
+							batt_left_min = (int)(batt_pct * ms_per_pct / 60000.0);
+						}
+					}
+				}
+			}
+		}
+
 		// The overlay mirrors the hardware slider; any move pops it up.
 		{
 			u8 lvl;
@@ -2764,6 +2819,7 @@ quit:
 	C3D_Fini();
 	ndspExit();
 	mcuHwcExit();
+	ptmuExit();
 	socExit();
 	gfxExit();
 	return 0;
