@@ -109,6 +109,7 @@ typedef struct dl_job {
 	 * (player joins and frees). The CAS makes the handoff race-free. */
 	volatile int  handoff;
 	bool          from_queue;   /* started by the download queue */
+	volatile bool saving;       /* writing the file and its cover to SD */
 	struct dl_job *next;
 } dl_job;
 
@@ -290,6 +291,8 @@ int native_dl_active(char *title_out, size_t titlelen)
 		pct = ts->len ? (int)((uint64_t)ts->downloaded * 100 / ts->len) : 0;
 		if (pct > 100)
 			pct = 100;
+		if (dlq_job->saving)
+			pct = NATIVE_DL_SAVING;
 		snprintf(title_out, titlelen, "%s", dlq_active_title);
 	}
 	LightLock_Unlock(&g.lock);
@@ -723,8 +726,11 @@ static void download_thread(void *arg)
 	 * plus a cover fetch: quitting drops the save, the queue entry was
 	 * already consumed anyway. */
 	if (job->save && !g.quit && job->ts.dl_done && !job->ts.dl_failed &&
-	    !__sync_lock_test_and_set(&job->saved, 1))
+	    !__sync_lock_test_and_set(&job->saved, 1)) {
+		job->saving = true;   /* a 320 kbps file is seconds of SD writes */
 		save_download(&job->ts);
+		job->saving = false;
+	}
 	if (job->from_queue) {
 		LightLock_Lock(&g.lock);
 		if (dlq_job == job)

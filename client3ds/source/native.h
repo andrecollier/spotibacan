@@ -147,6 +147,8 @@ int  native_dl_enqueue_list(const native_row *rows, int n);
 void native_dl_clear(void);
 /* Finished (incl. failed) and total for the current batch. */
 void native_dl_progress(int *done, int *total);
+/* native_dl_active() while the finished file is being written to SD. */
+#define NATIVE_DL_SAVING 101
 
 /* Queue length for the badge, and entry i's title for the popup
  * (0 = the oldest). Returns false when i is out of range. */

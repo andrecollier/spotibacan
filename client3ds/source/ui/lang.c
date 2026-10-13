@@ -93,6 +93,8 @@ static const char *const s_strings[LANG_COUNT][S_COUNT] = {
 		[S_ERR_NETWORK]       = "Sin conexion a internet. Revisa el Wi-Fi y pulsa X.",
 		[S_ERR_KEY_BLOCKED]   = "Spotify no deja reproducir con esta cuenta (cuentas nuevas)",
 		[S_QUALITY]           = "Calidad de audio",
+		[S_QUEUE_SAVING]      = "Guardando en la SD",
+		[S_QUEUE_WAITING]     = "Esperando a la cancion actual",
 	},
 	[LANG_EN] = {
 		[S_NOTHING_PLAYING]   = "Nothing playing",
@@ -182,6 +184,8 @@ static const char *const s_strings[LANG_COUNT][S_COUNT] = {
 		[S_ERR_NETWORK]       = "No internet connection. Check Wi-Fi, then press X.",
 		[S_ERR_KEY_BLOCKED]   = "Spotify blocks playback for this account (newer accounts)",
 		[S_QUALITY]           = "Audio quality",
+		[S_QUEUE_SAVING]      = "Saving to SD",
+		[S_QUEUE_WAITING]     = "Waiting for playback",
 	},
 };
 

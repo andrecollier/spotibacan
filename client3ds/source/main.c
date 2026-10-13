@@ -1501,7 +1501,9 @@ static void draw_queue(const Skin *sk)
 	char active[128];
 	const int pct = native_dl_active(active, sizeof(active));
 	if (pct >= 0) {
-		ui_text_tracked(text_buf, tr(S_QUEUE_DLING), px + 12.0f,
+		const bool saving = pct == NATIVE_DL_SAVING;
+		ui_text_tracked(text_buf, tr(saving ? S_QUEUE_SAVING : S_QUEUE_DLING),
+		                px + 12.0f,
 		                ui_baseline(y, TY_MICRO), TY_MICRO, 1.0f,
 		                sk->accent);
 		y += 13.0f;
@@ -1513,16 +1515,23 @@ static void draw_queue(const Skin *sk)
 		C2D_DrawRectSolid(px + 12.0f, y, 0.7f, pw - 24.0f, 4.0f,
 		                  C2D_Color32(0x4D, 0x4D, 0x4D, 0xFF));
 		C2D_DrawRectSolid(px + 12.0f, y, 0.7f,
-		                  (pw - 24.0f) * (float)pct / 100.0f, 4.0f,
+		                  (pw - 24.0f) * (float)(saving ? 100 : pct) / 100.0f, 4.0f,
 		                  sk->accent);
 		char pc[12];
-		snprintf(pc, sizeof(pc), "%d%%", pct);
+		snprintf(pc, sizeof(pc), "%d%%", saving ? 100 : pct);
 		ui_text(text_buf, pc, px + pw - 16.0f, ui_baseline(y + 7.0f,
 		        TY_MICRO), TY_MICRO, 40.0f, sk->dim);
 		y += 20.0f;
 	}
 
 	const int n = native_dl_queue_count();
+	if (pct < 0 && n > 0) {
+		/* Entries waiting but nothing running: the queue holds off while
+		 * the playing track still downloads, so say so. */
+		ui_text_tracked(text_buf, tr(S_QUEUE_WAITING), px + 12.0f,
+		                ui_baseline(y, TY_MICRO), TY_MICRO, 1.0f, sk->dim);
+		y += 16.0f;
+	}
 	if (pct < 0 && n == 0) {
 		ui_text(text_buf, tr(S_QUEUE_EMPTY), px + 12.0f,
 		        ui_baseline(y, TY_ROW_SUB), TY_ROW_SUB, pw - 24.0f,

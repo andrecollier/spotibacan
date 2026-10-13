@@ -96,6 +96,8 @@ typedef enum {
 	S_ERR_NETWORK,
 	S_ERR_KEY_BLOCKED,
 	S_QUALITY,
+	S_QUEUE_SAVING,
+	S_QUEUE_WAITING,
 	S_COUNT
 } str_id;
 
