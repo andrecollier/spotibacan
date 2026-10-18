@@ -2040,16 +2040,18 @@ int native_init_offline(const native_sink *sink)
  * posts requests and reads the state. Spotify on the speaker does the
  * streaming, so the console's own player just sits paused meanwhile. */
 
-enum { CR_PLAY = 1, CR_CMD, CR_VOL, CR_END, CR_RESUME };
+enum { CR_PLAY = 1, CR_CMD, CR_VOL, CR_END, CR_RESUME, CR_FIND };
 #define CAST_REQS 8
 
-#define CAST_MAX 6
+#define CAST_MAX 12
 
 static struct {
 	bool       loaded, configured;
 	char       name[64], ip[48];  /* the speaker picked now */
 	char       names[CAST_MAX][64], ips[CAST_MAX][48];   /* cast.txt */
 	int        n, cur;
+	volatile bool finding;        /* a search for speakers is running */
+	volatile int  found;          /* what the last one found, -1 failed */
 	Thread     th;
 	LightEvent wake;
 	volatile native_cast_status state;
@@ -2129,16 +2131,16 @@ int native_cast_count(void)
 
 int native_cast_current(void) { return cast.cur; }
 
-/* Steps to the next (+1) or previous (-1) speaker in cast.txt. Only while
- * not casting: the one playing stays the one the remote talks to. */
-void native_cast_pick(int dir)
+/* Picks speaker `i` of cast.txt. Only while not casting: the one playing
+ * stays the one the remote talks to. */
+void native_cast_pick(int i)
 {
 	cast_load();
-	if (cast.n < 2 || cast.state == NATIVE_CAST_STARTING ||
+	if (i < 0 || i >= cast.n || cast.state == NATIVE_CAST_STARTING ||
 	    cast.state == NATIVE_CAST_ON)
 		return;
 	LightLock_Lock(&g.lock);
-	cast.cur = (cast.cur + dir + cast.n) % cast.n;
+	cast.cur = i;
 	snprintf(cast.name, sizeof(cast.name), "%s", cast.names[cast.cur]);
 	snprintf(cast.ip, sizeof(cast.ip), "%s", cast.ips[cast.cur]);
 	cast.dev[0] = '\0';
@@ -2191,6 +2193,77 @@ static bool cast_do_wake(void)
 	nlog("CAST: %s signed in as %s in %llu ms\n", cast.name, cast.dev,
 	     (unsigned long long)(osGetTime() - t0));
 	return true;
+}
+
+/* Writes the speaker list back, comments first so a hand-edited file
+ * still explains itself. */
+static void cast_save_list(void)
+{
+	char path[320], tmp[328];
+	cfg_dir(path, sizeof(path));
+	strncat(path, "cast.txt", sizeof(path) - strlen(path) - 1);
+	snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+	FILE *f = fopen(tmp, "w");
+	if (!f)
+		return;
+	fprintf(f, "# Speakers for START > Play on: the name as the Google Home "
+	           "app shows it,\n# then its IP address. START > Find "
+	           "speakers rewrites this list.\n");
+	LightLock_Lock(&g.lock);
+	for (int i = 0; i < cast.n; i++)
+		fprintf(f, "%s %s\n", cast.names[i], cast.ips[i]);
+	LightLock_Unlock(&g.lock);
+	if (fclose(f) == 0) {
+		remove(path);
+		rename(tmp, path);
+	} else {
+		remove(tmp);
+	}
+}
+
+/* Asks the network for speakers and folds them into the list: a known name
+ * gets its new address, a new one is added, and a speaker that did not
+ * answer (switched off, or typed in by hand) stays. */
+static void cast_find(void)
+{
+	static cast_found hits[CAST_MAX];
+	char err[96] = "";
+	const u64 t0 = osGetTime();
+	const int n = cast_discover(hits, CAST_MAX, 3000, err, sizeof(err));
+	if (n < 0) {
+		nlog("CAST: finding speakers failed: %s\n", err);
+		cast.found = -1;
+		return;
+	}
+	LightLock_Lock(&g.lock);
+	for (int i = 0; i < n; i++) {
+		int at = -1;
+		for (int j = 0; j < cast.n; j++)
+			if (strcmp(cast.names[j], hits[i].name) == 0)
+				at = j;
+		if (at < 0 && cast.n < CAST_MAX)
+			at = cast.n++;
+		if (at < 0)
+			continue;
+		snprintf(cast.names[at], sizeof(cast.names[0]), "%s", hits[i].name);
+		snprintf(cast.ips[at], sizeof(cast.ips[0]), "%s", hits[i].ip);
+	}
+	cast.configured = cast.n > 0;
+	if (cast.cur >= cast.n)
+		cast.cur = 0;
+	if (cast.configured) {
+		snprintf(cast.name, sizeof(cast.name), "%s", cast.names[cast.cur]);
+		snprintf(cast.ip, sizeof(cast.ip), "%s", cast.ips[cast.cur]);
+	}
+	LightLock_Unlock(&g.lock);
+	for (int i = 0; i < n; i++)
+		nlog("CAST: found %s (%s) at %s\n", hits[i].name, hits[i].model,
+		     hits[i].ip);
+	nlog("CAST: %d speakers answered in %llu ms\n", n,
+	     (unsigned long long)(osGetTime() - t0));
+	if (n > 0)
+		cast_save_list();
+	cast.found = n;
 }
 
 /* The Spotify id of a saved song, for casting it: from ids.txt, or, for a
@@ -2360,6 +2433,9 @@ static void cast_thread(void *arg)
 				     ok ? "worked" : "failed");
 				if (gen == cast.gen)
 					cast.state = ok ? NATIVE_CAST_ON : NATIVE_CAST_FAILED;
+			} else if (kind == CR_FIND) {
+				cast_find();
+				cast.finding = false;
 			} else if (kind == CR_END) {
 				/* Back to the console: the speaker stops. */
 				if (cast.dev[0])
@@ -2385,7 +2461,8 @@ static void cast_thread(void *arg)
 
 static void cast_post(int kind, const char *a, const char *b, long n)
 {
-	if (!g.ready || !native_cast_configured())
+	/* Finding speakers is how a cast.txt comes to exist. */
+	if (!g.ready || (kind != CR_FIND && !native_cast_configured()))
 		return;
 	LightLock_Lock(&g.lock);
 	if (!cast.th) {
@@ -2433,6 +2510,21 @@ void native_cast_volume_step(int dir)
 {
 	cast_post(CR_VOL, "", "", dir);
 }
+
+void native_cast_find(void)
+{
+	cast_load();
+	if (cast.finding || g.offline || cast.state == NATIVE_CAST_STARTING ||
+	    cast.state == NATIVE_CAST_ON)
+		return;
+	cast.finding = true;
+	cast_post(CR_FIND, "", "", 0);
+	if (!cast.th)
+		cast.finding = false;   /* no thread: nothing will run it */
+}
+
+bool native_cast_finding(void) { return cast.finding; }
+int  native_cast_found(void) { return cast.found; }
 
 void native_on_wake(void)
 {

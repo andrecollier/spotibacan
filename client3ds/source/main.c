@@ -153,6 +153,8 @@ static bool paused = false;
  * cast_paused, which is what the play button and status show. */
 static bool casting(void);
 static bool cast_paused;
+/* The START cast row's last stop: "Find speakers", past the speakers. */
+static bool cast_find_row = false;
 
 // Playback modes and the downloads preference; the settings drawer and the
 // transport both read them. The like queue lives with the files below.
@@ -1356,8 +1358,15 @@ static bool action_enabled(int row)
 	if (row == 4) return act_track_uri()[0] != '\0' && !native_offline();
 	if (row == 5) return vis_open || native_now_uri()[0] != '\0';
 	if (row == 6) return act.has_row && strncmp(act.row.uri, "file:", 5) == 0;
-	if (row == 7) return native_cast_configured() && !native_offline() &&
-	                     (casting() || native_now_uri()[0] != '\0');
+	if (row == 7) {
+		if (casting())
+			return true;
+		if (native_offline() || native_cast_finding())
+			return false;
+		if (cast_find_row || native_cast_count() == 0)
+			return true;   /* finding needs nothing playing */
+		return native_now_uri()[0] != '\0';
+	}
 	return true;
 }
 
@@ -1401,11 +1410,16 @@ static void draw_actions(const Skin *sk)
 
 	ui_depth(0.7f);
 	char cast_label[80];
+	const bool find_row = cast_find_row || native_cast_count() == 0;
 	if (casting())
 		snprintf(cast_label, sizeof(cast_label), "%s", tr(S_CAST_BACK));
+	else if (native_cast_finding())
+		snprintf(cast_label, sizeof(cast_label), "%s", tr(S_CAST_FINDING));
+	else if (find_row)
+		snprintf(cast_label, sizeof(cast_label), "%s", tr(S_CAST_FIND));
 	else
 		snprintf(cast_label, sizeof(cast_label), tr(S_CAST_TO),
-		         native_cast_configured() ? native_cast_name() : "...");
+		         native_cast_name());
 	const char *labels[ACT_ROWS] = { tr(S_PLAY_NEXT), tr(S_ADD_TO_PL),
 	                                 tr(S_GO_ARTIST), tr(S_GO_ALBUM),
 	                                 tr(S_GO_RADIO),
@@ -1414,9 +1428,11 @@ static void draw_actions(const Skin *sk)
 	                                                     : S_DELETE_DL),
 	                                 cast_label,
 	                                 tr(S_SETTINGS) };
-	/* With more than one speaker, left/right on the row picks another. */
+	/* Left/right on the row walks the speakers, then "Find speakers". */
 	char cast_sub[64] = "";
-	if (!casting() && native_cast_count() > 1)
+	if (!casting() && find_row)
+		snprintf(cast_sub, sizeof(cast_sub), "%s", tr(S_CAST_FIND_SUB));
+	else if (!casting())
 		snprintf(cast_sub, sizeof(cast_sub), tr(S_CAST_PICK),
 		         native_cast_current() + 1, native_cast_count());
 	const char *subs[ACT_ROWS] = { act.has_row ? act.row.label : "", "",
@@ -2916,9 +2932,17 @@ int main(int argc, char **argv)
 				actions_sel = actions_sel > 0 ? actions_sel - 1 : ACT_ROWS - 1;
 			if (down & KEY_DDOWN)
 				actions_sel = actions_sel + 1 < ACT_ROWS ? actions_sel + 1 : 0;
-			if (actions_sel == 7 && !casting() &&
-			    (down & (KEY_DLEFT | KEY_DRIGHT)))
-				native_cast_pick((down & KEY_DRIGHT) ? +1 : -1);
+			const int ncast = native_cast_count();
+			if (actions_sel == 7 && !casting() && ncast > 0 &&
+			    !native_cast_finding() &&
+			    (down & (KEY_DLEFT | KEY_DRIGHT))) {
+				const int dir = (down & KEY_DRIGHT) ? +1 : -1;
+				int pos = cast_find_row ? ncast : native_cast_current();
+				pos = (pos + dir + ncast + 1) % (ncast + 1);
+				cast_find_row = pos == ncast;
+				if (!cast_find_row)
+					native_cast_pick(pos);
+			}
 			int row = -1;
 			if (down & KEY_A)
 				row = actions_sel;
@@ -2962,10 +2986,14 @@ int main(int argc, char **argv)
 					lib_reload = true;   /* the Downloads list rereads the card */
 					nat_loaded_view = (native_view)-1;
 				} else if (row == 7) {
-					if (casting())
+					if (casting()) {
 						cast_finish();
-					else
+					} else if (cast_find_row || native_cast_count() == 0) {
+						native_cast_find();
+						toast_show(tr(S_CAST_FINDING));
+					} else {
 						cast_begin();
+					}
 				} else if (row == 8) {
 					settings_open = true;
 					settings_sel = 0;
@@ -3422,6 +3450,24 @@ int main(int argc, char **argv)
 				cast_dirty = false;
 				if (casting())
 					cast_start();
+			}
+			{
+				/* A speaker search just ended: say what it found and land
+				 * the row on a speaker again. */
+				static bool finding_seen = false;
+				const bool finding = native_cast_finding();
+				if (finding_seen && !finding) {
+					const int n = native_cast_found();
+					char msg[96];
+					if (n > 0)
+						snprintf(msg, sizeof(msg), tr(S_CAST_FOUND), n);
+					else
+						snprintf(msg, sizeof(msg), "%s", tr(S_CAST_NONE));
+					toast_show(msg);
+					if (native_cast_count() > 0)
+						cast_find_row = false;
+				}
+				finding_seen = finding;
 			}
 			if (cast_holds() && !paused) {   /* never both at once */
 				paused = true;

@@ -204,11 +204,17 @@ typedef enum {
 } native_cast_status;
 bool               native_cast_configured(void);
 const char        *native_cast_name(void);
-/* How many speakers cast.txt lists; native_cast_pick(+1/-1) moves to the
- * next or previous one (remembered), only while not casting. */
+/* How many speakers cast.txt lists; native_cast_pick(i) makes speaker i
+ * (0-based) the one "Play on" uses, remembered, only while not casting. */
 int                native_cast_count(void);
-int                native_cast_current(void);   /* 0-based */
-void               native_cast_pick(int dir);
+int                native_cast_current(void);
+void               native_cast_pick(int i);
+/* Looks for Google Cast speakers on the wifi (about 3 s, in the
+ * background) and adds them to cast.txt. native_cast_found() is how many
+ * answered the last time, -1 if it failed. */
+void               native_cast_find(void);
+bool               native_cast_finding(void);
+int                native_cast_found(void);
 native_cast_status native_cast_state(void);
 const char        *native_cast_error(void);
 void native_cast_play(const char *context_uri, const char *track_uri,

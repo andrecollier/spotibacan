@@ -8,9 +8,14 @@
 #include "mbedtls/md5.h"
 
 #include <3ds.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 #define CAST_APP     "CC32E753"   /* Spotify's Cast receiver */
 #define NS_CONN      "urn:x-cast:com.google.cast.tp.connection"
@@ -20,6 +25,160 @@
 #define SENDER       "sender-0"
 #define RECEIVER     "receiver-0"
 #define CAST_FRAME_MAX (64 * 1024)
+
+/* ---- Finding speakers ----------------------------------------------------
+ *
+ * One mDNS question for _googlecast._tcp.local, sent from an ordinary port:
+ * that makes it a "legacy unicast" query (RFC 6762 6.7), which responders
+ * answer straight back to that port, so no multicast membership is needed.
+ * Each answer carries the friendly name in TXT fn= and the model in md=;
+ * the address is simply where the answer came from. */
+
+/* Skips a DNS name at `at` (labels or a compression pointer); the offset
+ * after it, or -1 when it runs off the packet. */
+static int dns_skip_name(const uint8_t *p, int len, int at)
+{
+	while (at < len) {
+		const uint8_t c = p[at];
+		if (c == 0)
+			return at + 1;
+		if ((c & 0xC0) == 0xC0)
+			return at + 2 <= len ? at + 2 : -1;
+		at += 1 + c;
+	}
+	return -1;
+}
+
+/* Copies TXT key `key` ("fn=") out of a TXT rdata into out. */
+static bool dns_txt_get(const uint8_t *rd, int n, const char *key,
+                        char *out, size_t outlen)
+{
+	const size_t kl = strlen(key);
+	for (int i = 0; i < n;) {
+		const int sl = rd[i++];
+		if (i + sl > n)
+			break;
+		if ((size_t)sl >= kl && memcmp(rd + i, key, kl) == 0) {
+			snprintf(out, outlen, "%.*s", sl - (int)kl,
+			         (const char *)rd + i + kl);
+			return true;
+		}
+		i += sl;
+	}
+	return false;
+}
+
+/* Reads one answer: name, model and port of the speaker it describes. */
+static void dns_parse(const uint8_t *p, int len, char *fn, size_t fnlen,
+                      char *md, size_t mdlen, int *port)
+{
+	if (len < 12)
+		return;
+	const int qd = p[4] << 8 | p[5];
+	const int rr = (p[6] << 8 | p[7]) + (p[8] << 8 | p[9]) +
+	               (p[10] << 8 | p[11]);
+	int at = 12;
+	for (int i = 0; i < qd && at >= 0; i++) {
+		at = dns_skip_name(p, len, at);
+		if (at >= 0)
+			at += 4;
+	}
+	for (int i = 0; i < rr && at >= 0 && at < len; i++) {
+		at = dns_skip_name(p, len, at);
+		if (at < 0 || at + 10 > len)
+			return;
+		const int type = p[at] << 8 | p[at + 1];
+		const int rdlen = p[at + 8] << 8 | p[at + 9];
+		at += 10;
+		if (at + rdlen > len)
+			return;
+		if (type == 16) {          /* TXT */
+			dns_txt_get(p + at, rdlen, "fn=", fn, fnlen);
+			dns_txt_get(p + at, rdlen, "md=", md, mdlen);
+		} else if (type == 33 && rdlen >= 6) {   /* SRV */
+			*port = p[at + 4] << 8 | p[at + 5];
+		}
+		at += rdlen;
+	}
+}
+
+int cast_discover(cast_found *out, int max, int wait_ms, char *err,
+                  size_t errlen)
+{
+	const int s = socket(AF_INET, SOCK_DGRAM, 0);
+	if (s < 0) {
+		snprintf(err, errlen, "no socket");
+		return -1;
+	}
+	struct sockaddr_in me;
+	memset(&me, 0, sizeof(me));
+	me.sin_family = AF_INET;
+	me.sin_port = 0;              /* any port but 5353: legacy unicast */
+	me.sin_addr.s_addr = INADDR_ANY;
+	if (bind(s, (struct sockaddr *)&me, sizeof(me)) != 0) {
+		close(s);
+		snprintf(err, errlen, "bind failed");
+		return -1;
+	}
+
+	static const uint8_t query[] = {
+		0x12, 0x34, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0,   /* one question */
+		11, '_', 'g', 'o', 'o', 'g', 'l', 'e', 'c', 'a', 's', 't',
+		4, '_', 't', 'c', 'p', 5, 'l', 'o', 'c', 'a', 'l', 0,
+		0, 12, 0, 1,                                /* PTR, IN */
+	};
+	struct sockaddr_in to;
+	memset(&to, 0, sizeof(to));
+	to.sin_family = AF_INET;
+	to.sin_port = htons(5353);
+	to.sin_addr.s_addr = inet_addr("224.0.0.251");
+
+	int n = 0;
+	static uint8_t buf[2048];
+	const u64 end = osGetTime() + (u64)wait_ms;
+	u64 next_ask = 0;
+	for (int asked = 0;;) {
+		u64 now = osGetTime();
+		if (now >= end)
+			break;
+		/* Asked twice, a beat apart: a dropped packet is likely on wifi. */
+		if (asked < 2 && now >= next_ask) {
+			sendto(s, query, sizeof(query), 0, (struct sockaddr *)&to,
+			       sizeof(to));
+			asked++;
+			next_ask = now + 700;
+		}
+		struct pollfd pf = { .fd = s, .events = POLLIN };
+		int left = (int)(end - now);
+		if (poll(&pf, 1, left < 200 ? left : 200) <= 0)
+			continue;
+		struct sockaddr_in from;
+		socklen_t fl = sizeof(from);
+		const int got = recvfrom(s, buf, sizeof(buf), 0,
+		                         (struct sockaddr *)&from, &fl);
+		if (got <= 0)
+			continue;
+		char fn[64] = "", md[64] = "";
+		int port = 8009;
+		dns_parse(buf, got, fn, sizeof(fn), md, sizeof(md), &port);
+		/* A group is played through its leader on another port, with a
+		 * different sign-in: left out until that is supported. */
+		if (!fn[0] || port != 8009 || strcmp(md, "Google Cast Group") == 0)
+			continue;
+		bool dup = false;
+		for (int i = 0; i < n; i++)
+			if (strcmp(out[i].name, fn) == 0)
+				dup = true;
+		if (dup || n >= max)
+			continue;
+		snprintf(out[n].name, sizeof(out[n].name), "%s", fn);
+		snprintf(out[n].model, sizeof(out[n].model), "%s", md);
+		inet_ntop(AF_INET, &from.sin_addr, out[n].ip, sizeof(out[n].ip));
+		n++;
+	}
+	close(s);
+	return n;
+}
 
 void cast_device_id(const char *name, char out[CAST_DEV_LEN])
 {

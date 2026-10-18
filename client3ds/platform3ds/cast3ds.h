@@ -18,6 +18,19 @@
 
 #define CAST_DEV_LEN 33   /* 32 hex digits and the NUL */
 
+/* A Cast speaker that answered on the local network. */
+typedef struct {
+	char name[64];    /* as the Google Home app shows it */
+	char model[64];
+	char ip[48];
+} cast_found;
+
+/* Asks the local network for Google Cast speakers for `wait_ms` and fills
+ * `out` with up to `max` of them (groups left out). Returns how many, or
+ * -1 with `err` set. Blocks for the whole wait. */
+int cast_discover(cast_found *out, int max, int wait_ms, char *err,
+                  size_t errlen);
+
 /* Spotify's device id for a speaker called `name`. */
 void cast_device_id(const char *name, char out[CAST_DEV_LEN]);
 
