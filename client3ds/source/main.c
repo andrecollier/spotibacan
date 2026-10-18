@@ -2082,11 +2082,32 @@ static bool cast_changed = false;   /* the speaker moved off the paused song */
 static bool cast_paused = false;
 static long cast_pos_ms = 0;        /* where the first song starts */
 static char cast_uri[192] = "";     /* the song picked while casting */
+static bool cast_was_on = false;    /* this cast got going at least once */
+static u64  cast_lost_at = 0;       /* it dropped then; A reconnects */
+#define CAST_LOST_MS 30000
+
+/* A pressed while the "lost the speaker" prompt is up. */
+static bool cast_lost_retry(void)
+{
+	if (!cast_lost_at || native_cast_state() != NATIVE_CAST_FAILED ||
+	    osGetTime() - cast_lost_at > CAST_LOST_MS)
+		return false;
+	cast_lost_at = 0;
+	cast_paused = false;
+	native_cast_reconnect();
+	return true;
+}
 
 static bool casting(void)
 {
 	const native_cast_status st = native_cast_state();
 	return st == NATIVE_CAST_STARTING || st == NATIVE_CAST_ON;
+}
+
+/* The console keeps quiet: casting, or offering to reconnect. */
+static bool cast_holds(void)
+{
+	return casting() || cast_lost_at;
 }
 
 // Starts a track by URI alone, for the shelf: no list context to remember,
@@ -2188,6 +2209,8 @@ static bool cast_start(void)
 static void cast_begin(void)
 {
 	cast_changed = false;
+	cast_was_on = false;
+	cast_lost_at = 0;
 	cast_uri[0] = '\0';
 	cast_pos_ms = (long)(now_pos * 1000.0f);
 	if (cast_start()) {
@@ -2206,6 +2229,8 @@ static void cast_begin(void)
  * on from its paused spot, or starts what was picked while casting. */
 static void cast_finish(void)
 {
+	cast_was_on = false;
+	cast_lost_at = 0;
 	native_cast_end();
 	if (!cast_changed && native_playback_state() == NATIVE_PLAYING) {
 		paused = false;
@@ -3019,7 +3044,8 @@ int main(int argc, char **argv)
 		if (!lib.open && !lyr_open && g_touch.clicked >= 0) {
 			switch (g_touch.clicked) {
 			case BTN_P_PLAY:
-				if (casting()) {
+				if (cast_lost_retry()) {
+				} else if (casting()) {
 					cast_paused = !cast_paused;
 					native_cast_command(cast_paused ? "pause" : "resume");
 				} else if (native_playback_state() == NATIVE_PLAYING) {
@@ -3134,7 +3160,8 @@ int main(int argc, char **argv)
 			{
 				static u64 busy_at;
 				char dl_title[8];
-				const bool busy = st == NATIVE_PLAYING ||
+				/* A closed lid must not sleep the remote either. */
+				const bool busy = cast_holds() || st == NATIVE_PLAYING ||
 				                  st == NATIVE_LOADING || end_pending ||
 				                  ring_used() > 0 ||
 				                  native_dl_queue_count() > 0 ||
@@ -3148,7 +3175,7 @@ int main(int argc, char **argv)
 				}
 			}
 			/* The speaker walks its own list while casting. */
-			if (end_pending && !casting() &&
+			if (end_pending && !cast_holds() &&
 			    ring_used() < (u32)SAMPLE_RATE * 4 * END_LEAD_S) {
 				end_pending = false;
 				track_ended();
@@ -3177,7 +3204,7 @@ int main(int argc, char **argv)
 					art_present = false;
 					tint_target = 0;   // back to the skin until the cover lands
 				}
-			} else if (paused && !casting()) {
+			} else if (paused && !cast_holds()) {
 				// The track ended or failed under a paused channel; do not
 				// carry the pause into whatever plays next. While casting
 				// the pause is what keeps the console quiet.
@@ -3294,7 +3321,8 @@ int main(int argc, char **argv)
 		if (!lib.open && (down & KEY_A)) {
 			// A mirrors the on-screen disc: pause, not stop. The decoder
 			// sleeps when the ring is full, so resume costs nothing.
-			if (casting()) {
+			if (cast_lost_retry()) {
+			} else if (casting()) {
 				cast_paused = !cast_paused;
 				native_cast_command(cast_paused ? "pause" : "resume");
 			} else if (native_playback_state() == NATIVE_PLAYING) {
@@ -3357,17 +3385,24 @@ int main(int argc, char **argv)
 				if (casting())
 					cast_start();
 			}
-			if (casting() && !paused) {   /* never both at once */
+			if (cast_holds() && !paused) {   /* never both at once */
 				paused = true;
 				ndspChnSetPaused(0, true);
 			}
 			const native_cast_status cs = native_cast_state();
 			if (cs != cast_seen) {
 				char msg[160];
-				if (cs == NATIVE_CAST_ON)
+				if (cs == NATIVE_CAST_ON) {
+					cast_was_on = true;
 					snprintf(msg, sizeof(msg), tr(S_CAST_ON),
 					         native_cast_name());
-				else if (cs == NATIVE_CAST_FAILED)
+				} else if (cs == NATIVE_CAST_FAILED && cast_was_on) {
+					/* It was playing: most likely a sleep or a lost
+					 * link, and the speaker may well still be on. */
+					cast_lost_at = osGetTime();
+					snprintf(msg, sizeof(msg), tr(S_CAST_LOST),
+					         native_cast_name());
+				} else if (cs == NATIVE_CAST_FAILED)
 					snprintf(msg, sizeof(msg), tr(S_CAST_FAILED),
 					         native_cast_name());
 				else
@@ -3378,6 +3413,17 @@ int main(int argc, char **argv)
 					native_log("CAST: UI shows failure: %s\n",
 					           native_cast_error());
 				cast_seen = cs;
+			}
+			/* The offer stays up until taken or stale, so it is still
+			 * there when the lid opens again. */
+			if (cast_lost_at && cs == NATIVE_CAST_FAILED &&
+			    osGetTime() - cast_lost_at <= CAST_LOST_MS) {
+				char msg[160];
+				snprintf(msg, sizeof(msg), tr(S_CAST_LOST),
+				         native_cast_name());
+				toast_show(msg);
+			} else {
+				cast_lost_at = 0;
 			}
 			if (cs == NATIVE_CAST_STARTING || cs == NATIVE_CAST_ON) {
 				if (!cast_changed && play_idx >= 0 && play_idx < play_count) {

@@ -1932,7 +1932,7 @@ int native_init_offline(const native_sink *sink)
  * posts requests and reads the state. Spotify on the speaker does the
  * streaming, so the console's own player just sits paused meanwhile. */
 
-enum { CR_PLAY = 1, CR_CMD, CR_VOL, CR_END };
+enum { CR_PLAY = 1, CR_CMD, CR_VOL, CR_END, CR_RESUME };
 #define CAST_REQS 8
 
 static struct {
@@ -1946,6 +1946,7 @@ static struct {
 	volatile int gen;             /* bumped by every "back to the console" */
 	float      volume;            /* the speaker's level, 0..1 */
 	char       error[160];
+	char       last_ctx[192], last_track[64];   /* the last play that went */
 	struct {
 		int  kind;
 		char a[192], b[64];   /* play: context and track; cmd: endpoint */
@@ -2149,8 +2150,24 @@ static void cast_thread(void *arg)
 					continue;
 				}
 				nlog("CAST: playing %s on %s\n", a, cast.name);
+				snprintf(cast.last_ctx, sizeof(cast.last_ctx), "%s", a);
+				snprintf(cast.last_track, sizeof(cast.last_track), "%s", b);
 				if (gen == cast.gen)
 					cast.state = NATIVE_CAST_ON;
+			} else if (kind == CR_RESUME) {
+				/* Back after a drop (a sleep, a lost link): the speaker
+				 * may still be playing, or signed out and blank, in which
+				 * case the last list starts over. */
+				const int gen = cast.gen;
+				cast.error[0] = '\0';
+				bool ok = cast_send_cmd(CR_CMD, "resume", "", 0) == 0;
+				if (!ok && cast.awake && cast.last_ctx[0])
+					ok = cast_send_cmd(CR_PLAY, cast.last_ctx,
+					                   cast.last_track, 0) == 0;
+				nlog("CAST: reconnecting to %s %s\n", cast.name,
+				     ok ? "worked" : "failed");
+				if (gen == cast.gen)
+					cast.state = ok ? NATIVE_CAST_ON : NATIVE_CAST_FAILED;
 			} else if (kind == CR_END) {
 				/* Back to the console: the speaker stops. */
 				if (cast.dev[0])
@@ -2162,7 +2179,11 @@ static void cast_thread(void *arg)
 					if (cast.volume < 0.0f) cast.volume = 0.0f;
 					if (cast.volume > 1.0f) cast.volume = 1.0f;
 				}
-				cast_send_cmd(kind, a, b, n);
+				/* Even a re-wake did not get through: the link is gone,
+				 * and the UI offers to reconnect. */
+				if (cast_send_cmd(kind, a, b, n) != 0 &&
+				    cast.state == NATIVE_CAST_ON)
+					cast.state = NATIVE_CAST_FAILED;
 			}
 		}
 	}
@@ -2215,6 +2236,12 @@ void native_cast_command(const char *endpoint)
 void native_cast_volume_step(int dir)
 {
 	cast_post(CR_VOL, "", "", dir);
+}
+
+void native_cast_reconnect(void)
+{
+	cast.state = NATIVE_CAST_STARTING;
+	cast_post(CR_RESUME, "", "", 0);
 }
 
 void native_cast_end(void)
