@@ -76,14 +76,16 @@ static Library lib;
 static volatile bool lib_reload = false;
 
 static native_view nat_view = NATIVE_PLAYLISTS;
-static char nat_arg[64] = "";
+/* A row uri: "dlist:<playlist title>.txt" outgrows 64 bytes. */
+#define NAT_ARG_LEN 192
+static char nat_arg[NAT_ARG_LEN] = "";
 static char nat_title[48];
 static native_row nat_rows[NATIVE_ROWS];
 static int  nat_count = 0;
 static char nat_status[64] = "";
 // What the cached rows correspond to, so turning a page does not refetch.
 static native_view nat_loaded_view = (native_view)-1;
-static char nat_loaded_arg[64] = "\x01";
+static char nat_loaded_arg[NAT_ARG_LEN] = "\x01";
 
 /* Fixed views get their title from the string table, so a language change
  * renames them; TRACKS keeps the playlist name it drilled into. */
@@ -195,7 +197,7 @@ static void lid_mode_set(bool on)
 // Prev/next are only meaningful while the list still shows that view.
 static int now_idx = -1;
 static native_view now_view = NATIVE_PLAYLISTS;
-static char now_arg[64] = "";
+static char now_arg[NAT_ARG_LEN] = "";
 
 /* The playback context: a snapshot of the list the playing track came from.
  * Transport (prev/next, L/R, auto-advance) walks this copy, so it keeps
@@ -392,7 +394,7 @@ static u64 lib_retry_at = 0;   /* ms; when a failed view should refetch */
 #define VIEW_CACHE_TTL_MS (20 * 60 * 1000)
 static struct {
 	native_view view;
-	char arg[64];
+	char arg[NAT_ARG_LEN];
 	int count;
 	unsigned long long at;   /* osGetTime() when stored, 0 = empty */
 	native_row rows[NATIVE_ROWS];
@@ -463,7 +465,7 @@ static void library_fetch(void)
 	 * navigate away in the middle, so what nat_view says at the end is not
 	 * what it said at the start. */
 	const native_view view = nat_view;
-	char arg[64];
+	char arg[NAT_ARG_LEN];
 	snprintf(arg, sizeof(arg), "%s",
 	         view == NATIVE_SEARCH ? lib.query : nat_arg);
 	bool same = view == nat_loaded_view &&
@@ -867,28 +869,35 @@ static void text_fit(const char *str, float x, float y, float scale, u32 colour,
                      float max_w)
 {
 	if (!str || !*str) return;
-	char buf[192];
-	snprintf(buf, sizeof(buf), "%s", str);
+	/* The top screen draws these twice a frame (one per eye) with strings
+	 * that change once a song: fit each once and reuse it. Fitting by
+	 * parsing into text_buf, as this used to, spent the frame's whole text
+	 * arena on long titles and blanked the bottom screen's labels. */
+	static struct {
+		char src[192], fit[192];
+		float scale, max_w;
+	} memo[12];
+	static int memo_next;
+	const char *fit = NULL;
+	for (int i = 0; i < (int)(sizeof(memo) / sizeof(memo[0])); i++)
+		if (memo[i].scale == scale && memo[i].max_w == max_w &&
+		    strcmp(memo[i].src, str) == 0) {
+			fit = memo[i].fit;
+			break;
+		}
+	if (!fit) {
+		int i = memo_next;
+		memo_next = (memo_next + 1) % (int)(sizeof(memo) / sizeof(memo[0]));
+		snprintf(memo[i].src, sizeof(memo[i].src), "%s", str);
+		snprintf(memo[i].fit, sizeof(memo[i].fit), "%s", str);
+		ui_fit_scaled(text_buf, memo[i].fit, sizeof(memo[i].fit), scale, max_w);
+		memo[i].scale = scale;
+		memo[i].max_w = max_w;
+		fit = memo[i].fit;
+	}
 
 	C2D_Text t;
-	float w = 0, h = 0;
-	C2D_TextParse(&t, text_buf, buf);
-	C2D_TextGetDimensions(&t, scale, scale, &w, &h);
-	if (w > max_w) {
-		size_t n = strlen(buf);
-		while (n > 1 && w > max_w) {
-			n--;
-			buf[n] = '\0';
-			C2D_TextParse(&t, text_buf, buf);
-			C2D_TextGetDimensions(&t, scale, scale, &w, &h);
-		}
-		if (n > 3) {
-			buf[n - 1] = '.';
-			buf[n] = '.';
-			buf[n + 1] = '\0';
-		}
-		C2D_TextParse(&t, text_buf, buf);
-	}
+	C2D_TextParse(&t, text_buf, fit);
 	C2D_TextOptimize(&t);
 	C2D_DrawText(&t, C2D_WithColor, x, y, 0.5f, scale, scale, colour);
 }
@@ -1230,7 +1239,7 @@ static bool list_downloadable(void)
 
 /* START while a song plays: jump to its artist or album, or on to the
  * settings. Same modal pattern as the settings sheet, three rows. */
-#define ACT_ROWS 7
+#define ACT_ROWS 8
 #define ACT_ROW0 0x7200
 static bool actions_open = false;
 static int  actions_sel = 0;
@@ -1243,10 +1252,11 @@ static struct {
 	native_row row;
 } act;
 
-/* Rows: 0 play next, 1 add to playlist, 2 artist, 3 album, 4 visualizer,
- * 5 delete download, 6 settings. Delete takes two presses: the first only
- * arms it. */
+/* Rows: 0 play next, 1 add to playlist, 2 artist, 3 album, 4 radio,
+ * 5 visualizer, 6 delete download, 7 settings. Delete takes two presses:
+ * the first only arms it. */
 static bool act_delete_armed = false;
+static bool unlink_armed = false;
 
 /* The Spotify track the menu is about: the selected row, else the song
  * playing; "" for local files (they have no catalogue id to add). */
@@ -1262,8 +1272,9 @@ static bool action_enabled(int row)
 	if (row == 1) return act_track_uri()[0] != '\0' && !native_offline();
 	if (row == 2) return act.artist_uri[0] != '\0';
 	if (row == 3) return act.album_uri[0] != '\0';
-	if (row == 4) return vis_open || native_now_uri()[0] != '\0';
-	if (row == 5) return act.has_row && strncmp(act.row.uri, "file:", 5) == 0;
+	if (row == 4) return act_track_uri()[0] != '\0' && !native_offline();
+	if (row == 5) return vis_open || native_now_uri()[0] != '\0';
+	if (row == 6) return act.has_row && strncmp(act.row.uri, "file:", 5) == 0;
 	return true;
 }
 
@@ -1308,28 +1319,30 @@ static void draw_actions(const Skin *sk)
 	ui_depth(0.7f);
 	const char *labels[ACT_ROWS] = { tr(S_PLAY_NEXT), tr(S_ADD_TO_PL),
 	                                 tr(S_GO_ARTIST), tr(S_GO_ALBUM),
+	                                 tr(S_GO_RADIO),
 	                                 tr(vis_open ? S_VIS_STOP : S_VIS_START),
 	                                 tr(act_delete_armed ? S_DELETE_CONFIRM
 	                                                     : S_DELETE_DL),
 	                                 tr(S_SETTINGS) };
 	const char *subs[ACT_ROWS] = { act.has_row ? act.row.label : "", "",
-	                               act.artist, act.album, "", "", "" };
-	const float rh = 32.0f, ry = py + 10.0f;
+	                               act.artist, act.album, "", "", "", "" };
+	/* Eight rows of 28px fill the sheet; a sub line sits right under. */
+	const float rh = 28.0f, ry = py + 8.0f;
 	for (int i = 0; i < ACT_ROWS; i++) {
 		const float y = ry + i * rh;
 		const bool on = action_enabled(i);
 		if (i == actions_sel)
-			C2D_DrawRectSolid(px + 6.0f, y - 4.0f, 0.65f, pw - 12.0f,
-			                  rh - 4.0f, sk->accent);
+			C2D_DrawRectSolid(px + 6.0f, y - 3.0f, 0.65f, pw - 12.0f,
+			                  rh - 2.0f, sk->accent);
 		const u32 fg = i == actions_sel ? sk->on_accent
 		               : (on ? sk->text : sk->dim);
 		ui_text(text_buf, labels[i], px + 16.0f,
 		        ui_baseline(y, TY_ROW_NAME), TY_ROW_NAME, pw - 32.0f, fg);
 		if (subs[i][0])
 			ui_text(text_buf, subs[i], px + 16.0f,
-			        ui_baseline(y + 17.0f, TY_ROW_SUB), TY_ROW_SUB,
+			        ui_baseline(y + 13.0f, TY_ROW_SUB), TY_ROW_SUB,
 			        pw - 32.0f, i == actions_sel ? fg : sk->dim);
-		tb_add(&g_tb, px + 6.0f, y - 4.0f, pw - 12.0f, rh - 4.0f,
+		tb_add(&g_tb, px + 6.0f, y - 3.0f, pw - 12.0f, rh - 2.0f,
 		       ACT_ROW0 + i);
 	}
 	ui_depth(0.0f);
@@ -1479,7 +1492,8 @@ static void draw_settings(const Skin *sk)
 			        ui_baseline(y + 13.0f, TY_MICRO), TY_MICRO,
 			        pw - 32.0f, i == settings_sel ? fg : sk->dim);
 		} else if (i == 6) {
-			ui_text(text_buf, tr(S_UNLINKED_NOTE), px + 16.0f,
+			ui_text(text_buf, tr(unlink_armed ? S_UNLINK_CONFIRM
+			                                  : S_UNLINKED_NOTE), px + 16.0f,
 			        ui_baseline(y + 14.0f, TY_MICRO), TY_MICRO,
 			        pw - 32.0f, i == settings_sel ? fg : sk->dim);
 		}
@@ -2571,6 +2585,8 @@ int main(int argc, char **argv)
 			if (g_touch.clicked >= SET_ROW0 &&
 			    g_touch.clicked < SET_ROW0 + SETTINGS_ROWS)
 				row = g_touch.clicked - SET_ROW0;
+			if (settings_sel != 6 || (row >= 0 && row != 6))
+				unlink_armed = false;   /* moving away disarms unlink */
 			switch (row) {
 			case 0:   // language -- applied next frame, after the busy hint
 			case 1:   // accent colour -- same
@@ -2587,6 +2603,11 @@ int main(int argc, char **argv)
 				}
 				break;
 			case 6:   // unlink: wipe the token (and prefs) and leave
+				/* Re-pairing needs a phone: ask once more, as delete does. */
+				if (!unlink_armed) {
+					unlink_armed = true;
+					break;
+				}
 				cfg_clear();
 				goto quit;
 			case 7:   // quit
@@ -2594,8 +2615,10 @@ int main(int argc, char **argv)
 			default:
 				break;
 			}
-			if (row == SETTINGS_ROWS - 1 || (down & (KEY_B | KEY_START)))
+			if (row == SETTINGS_ROWS - 1 || (down & (KEY_B | KEY_START))) {
 				settings_open = false;
+				unlink_armed = false;
+			}
 			down = 0;
 			g_touch.clicked = -1;
 			g_touch.long_pressed = -1;
@@ -2650,7 +2673,7 @@ int main(int argc, char **argv)
 			if (g_touch.clicked >= ACT_ROW0 &&
 			    g_touch.clicked < ACT_ROW0 + ACT_ROWS)
 				row = g_touch.clicked - ACT_ROW0;
-			if (row == 5 && action_enabled(5) && !act_delete_armed) {
+			if (row == 6 && action_enabled(6) && !act_delete_armed) {
 				act_delete_armed = true;   /* ask once more */
 				row = -1;
 			}
@@ -2668,15 +2691,25 @@ int main(int argc, char **argv)
 					else
 						toast_show(tr(S_PL_NONE));
 				} else if (row == 4) {
+					/* A radio seeded from the song, as X does in a list. */
+					snprintf(nat_arg, sizeof(nat_arg), "%s", act_track_uri());
+					nat_view = NATIVE_RADIO;
+					snprintf(nat_title, sizeof(nat_title), "%s", tr(S_RADIO));
+					lib.open = true;
+					lib.sel = 0;
+					native_fetch_cancel();
+					lib.scroll = lib.velocity = 0.0f;
+					lib_reload = true;
+				} else if (row == 5) {
 					vis_open = !vis_open;
 					if (vis_open)
 						lib.open = false;   /* the player stays below */
-				} else if (row == 5) {
+				} else if (row == 6) {
 					act_delete_armed = false;
 					native_delete_download(act.row.uri);
 					lib_reload = true;   /* the Downloads list rereads the card */
 					nat_loaded_view = (native_view)-1;
-				} else if (row == 6) {
+				} else if (row == 7) {
 					settings_open = true;
 					settings_sel = 0;
 				} else {
@@ -2755,8 +2788,8 @@ int main(int argc, char **argv)
 				actions_open = true;
 				act_delete_armed = false;
 				/* In Downloads the likely wish is the delete row. */
-				actions_sel = strncmp(act.row.uri, "file:", 5) == 0 ? 5
-				              : (act.has_row ? 0 : 4);
+				actions_sel = strncmp(act.row.uri, "file:", 5) == 0 ? 6
+				              : (act.has_row ? 0 : 5);
 			} else {
 				settings_open = true;
 				settings_sel = 0;
