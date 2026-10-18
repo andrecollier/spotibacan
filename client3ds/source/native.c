@@ -1862,9 +1862,19 @@ static void player_thread(void *arg)
 		 * after a song ends: starting one blocks this thread for a few
 		 * seconds, and the UI is about to ask for the next song, which
 		 * would then wait behind it (an audible gap at every handover). */
+		/* A play request waits behind whatever this loop is doing, and
+		 * one sat 9 s before it was picked up: say which step was slow. */
+		u64 t_step = osGetTime();
 		l5_refresh(false);
+		if (osGetTime() - t_step > 1000)
+			nlog("SLOW: token refresh %llu ms\n",
+			     (unsigned long long)(osGetTime() - t_step));
+		t_step = osGetTime();
 		if (osGetTime() - play_ended_at > 10000)
 			dlq_pump();
+		if (osGetTime() - t_step > 1000)
+			nlog("SLOW: queue start %llu ms\n",
+			     (unsigned long long)(osGetTime() - t_step));
 
 		/* Idle: keep the access point session alive. It only speaks to say
 		 * ping, but a session that stops answering is dropped, and then the
@@ -1873,7 +1883,11 @@ static void player_thread(void *arg)
 		if (ap_wait(g.ap, 200) == 1) {
 			uint8_t buf[2048];
 			uint8_t cmd;
+			t_step = osGetTime();
 			int n = ap_recv(g.ap, &cmd, buf, sizeof(buf));
+			if (osGetTime() - t_step > 1000)
+				nlog("SLOW: access point read %llu ms\n",
+				     (unsigned long long)(osGetTime() - t_step));
 			if (n == AP_PKT_TOO_BIG) {
 				/* fine: nothing we need is that large */
 			} else if (n < 0) {
@@ -2443,10 +2457,14 @@ int native_cast_volume(void)
 	return (int)(cast.volume * 100.0f + 0.5f);
 }
 
-void native_exit(void)
+/* Tells every backend thread to wrap up, without waiting: the UI calls it
+ * first, so they stop side by side while it joins its own threads, rather
+ * than one after another inside native_exit. */
+void native_quit_signal(void)
 {
-	if (!g.ready)
+	if (!g.ready || g.quit)
 		return;
+	nlog("EXIT: begin\n");
 	g.quit = true;
 	/* Every download, the queue's included, is told to stop. A detached
 	 * one frees itself; the teardown below must not run under it. */
@@ -2454,11 +2472,36 @@ void native_exit(void)
 	for (dl_job *p = g.jobs; p; p = p->next)
 		p->stop = true;
 	LightLock_Unlock(&g.lock);
+	if (cast.th)
+		LightEvent_Signal(&cast.wake);
+	for (int i = 0; i < DL_WORKERS; i++)
+		if (dlw[i].th)
+			LightEvent_Signal(&dlw[i].go);
+}
+
+/* threadJoin, with a log line when it had to wait. */
+static bool join_noted(Thread t, u64 ns, const char *what)
+{
+	const u64 t0 = osGetTime();
+	const bool ok = R_SUCCEEDED(threadJoin(t, ns));
+	const u64 ms = osGetTime() - t0;
+	if (ms > 200 || !ok)
+		nlog("EXIT: %s thread %s after %llu ms\n", what,
+		     ok ? "done" : "STILL RUNNING", (unsigned long long)ms);
+	return ok;
+}
+
+void native_exit(void)
+{
+	if (!g.ready)
+		return;
+	const u64 t_exit = osGetTime();
+	native_quit_signal();
 
 	bool cast_done = true;
 	if (cast.th) {
 		LightEvent_Signal(&cast.wake);
-		cast_done = R_SUCCEEDED(threadJoin(cast.th, 3000000000ULL));
+		cast_done = join_noted(cast.th, 3000000000ULL, "cast");
 		if (cast_done)
 			threadFree(cast.th);
 		cast.th = NULL;
@@ -2466,7 +2509,7 @@ void native_exit(void)
 	for (int i = 0; i < DL_WORKERS; i++)
 		if (dlw[i].th) {
 			LightEvent_Signal(&dlw[i].go);
-			if (R_SUCCEEDED(threadJoin(dlw[i].th, 3000000000ULL)))
+			if (join_noted(dlw[i].th, 3000000000ULL, "download"))
 				threadFree(dlw[i].th);
 			else
 				cast_done = false;   /* still in a socket: no teardown */
@@ -2474,7 +2517,7 @@ void native_exit(void)
 		}
 	bool player_done = cast_done;
 	if (g.player) {
-		player_done = R_SUCCEEDED(threadJoin(g.player, 6000000000ULL));
+		player_done = join_noted(g.player, 6000000000ULL, "player");
 		if (player_done)
 			threadFree(g.player);
 	}
@@ -2496,6 +2539,8 @@ void native_exit(void)
 		log_tick(true);
 		return;
 	}
+	nlog("EXIT: backend down in %llu ms\n",
+	     (unsigned long long)(osGetTime() - t_exit));
 	log_tick(true);
 	if (g.ap)
 		ap_close(g.ap);

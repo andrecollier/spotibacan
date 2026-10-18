@@ -3611,11 +3611,24 @@ int main(int argc, char **argv)
 
 quit:
 	running = false;
+	/* Everything starts stopping at once: the backend's threads, a list
+	 * fetch mid-flight, these three. Quitting used to stop them one by
+	 * one, each with seconds of grace. */
+	native_quit_signal();
+	native_fetch_cancel();
 	/* The lister and art threads can sit in a TLS read for a while; the
 	 * textures and buffers they use are freed below, so wait for them. */
-	threadJoin(lister, 8000000000ULL);
-	threadJoin(snd, 2000000000ULL);
-	threadJoin(art, 8000000000ULL);
+	{
+		const u64 t0 = osGetTime();
+		threadJoin(lister, 8000000000ULL);
+		const u64 t1 = osGetTime();
+		threadJoin(snd, 2000000000ULL);
+		threadJoin(art, 8000000000ULL);
+		const u64 t2 = osGetTime();
+		native_log("EXIT: lists %llu ms, covers %llu ms\n",
+		           (unsigned long long)(t1 - t0),
+		           (unsigned long long)(t2 - t1));
+	}
 	lid_mode_set(false);
 	native_exit();
 	C3D_TexDelete(&art_tex);
