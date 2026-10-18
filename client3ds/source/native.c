@@ -14,6 +14,7 @@
 
 #include <3ds.h>
 #include <dirent.h>
+#include <malloc.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -111,6 +112,9 @@ typedef struct dl_job {
 	bool          from_queue;   /* started by the download queue */
 	int           core;         /* queue jobs: the core it was put on */
 	volatile bool saving;       /* writing the file and its cover to SD */
+	/* Queue jobs: 1 while the pump still fetches the key (the thread
+	 * waits), 2 when that failed (the thread leaves, the pump frees). */
+	volatile int  gate;
 	struct dl_job *next;
 } dl_job;
 
@@ -253,6 +257,47 @@ Thread native_spawn_worker(ThreadFunc fn, void *arg, size_t stack, int prio)
 	if (!t)
 		t = threadCreate(fn, arg, stack, prio, -2, false);
 	return t;
+}
+
+/* One line of what the console has left: the heap (used, and free inside
+ * it), the linear heap, and kernel threads. "DLQ: no thread for" ended
+ * the queue after about eight songs even with every thread detached, and
+ * this tells memory from the thread limit. */
+static void mem_note(const char *why)
+{
+	struct mallinfo mi = mallinfo();
+	const u32 heap = envGetHeapSize();
+	s64 th_cur = -1, th_max = -1;
+	Handle rl;
+	ResourceLimitType t = RESLIMIT_THREAD;
+	if (R_SUCCEEDED(svcGetResourceLimit(&rl, CUR_PROCESS_HANDLE))) {
+		svcGetResourceLimitCurrentValues(&th_cur, rl, &t, 1);
+		svcGetResourceLimitLimitValues(&th_max, rl, &t, 1);
+		svcCloseHandle(rl);
+	}
+	nlog("MEM %s: heap %u of %u KB used (%u KB free inside), "
+	     "linear %u KB free, threads %lld/%lld\n", why,
+	     (unsigned)mi.uordblks / 1024, (unsigned)heap / 1024,
+	     (unsigned)(mi.fordblks + (heap > (u32)mi.arena ? heap - mi.arena : 0)) / 1024,
+	     (unsigned)linearSpaceFree() / 1024, th_cur, th_max);
+}
+
+/* Largest block malloc still hands out, to tell a full heap from a
+ * fragmented one. Only on failure paths: it walks the heap. */
+static void mem_largest(void)
+{
+	size_t lo = 0, hi = envGetHeapSize();
+	while (hi - lo > 64 * 1024) {
+		size_t mid = lo + (hi - lo) / 2;
+		void *p = malloc(mid);
+		if (p) {
+			free(p);
+			lo = mid;
+		} else {
+			hi = mid;
+		}
+	}
+	nlog("MEM largest free block about %u KB\n", (unsigned)(lo / 1024));
 }
 
 static const char *l5_token(void) { return g.l5_tok[g.l5_cur]; }
@@ -819,6 +864,10 @@ void native_stop(void)
 static void download_thread(void *arg)
 {
 	dl_job *job = arg;
+	while (job->gate == 1)
+		svcSleepThread(10000000LL);   // 10 ms
+	if (job->gate == 2)
+		return;   /* the pump could not start it and frees the job */
 	const u64 t0 = osGetTime();
 	track_stream_download(&job->ts, &job->stop);
 	/* Throughput tells a slow CDN from a slow console when a song stalls. */
@@ -862,8 +911,11 @@ static void download_thread(void *arg)
 	if (*p)
 		*p = job->next;
 	LightLock_Unlock(&g.lock);
+	const bool queued = job->from_queue;
 	track_stream_free(&job->ts);
 	free(job);
+	if (queued)
+		mem_note("queue done");
 }
 
 /* Leaves a job with its download thread (the player is moving on). When the
@@ -896,23 +948,30 @@ static void job_detach(dl_job *job)
 }
 
 /* Puts a failed entry back at the end of the queue for another go,
- * up to a few tries; false when it is spent. */
-static bool dlq_retry(const dlq_entry *e)
+ * up to a few tries; false when it is spent. `spend` is false when the
+ * song itself was never tried (no thread), so it keeps its tries. */
+static bool dlq_retry(const dlq_entry *e, bool spend, u64 hold_ms)
 {
-	if (e->tries >= 2)
+	if (spend && e->tries >= 2)
 		return false;
 	bool ok = false;
 	LightLock_Lock(&g.lock);
 	if (dlq_count < NATIVE_DLQ_MAX) {
 		dlq[dlq_count] = *e;
-		dlq[dlq_count].tries++;
+		if (spend)
+			dlq[dlq_count].tries++;
 		dlq_count++;
 		ok = true;
 	}
 	LightLock_Unlock(&g.lock);
-	dlq_hold_until = osGetTime() + 20000;
+	dlq_hold_until = osGetTime() + hold_ms;
 	return ok;
 }
+
+/* Key refusals in a row. One is a song Spotify will not give out; two
+ * running is Spotify rationing keys after too many asks, and asking again
+ * at once only extends it, so the queue sits out a long pause. */
+static int dlq_refusals;
 
 /* Starts the next queued download when nothing else is downloading. Only
  * ever called on the player thread, the owner of g.ap: the audio key rides
@@ -967,31 +1026,69 @@ static void dlq_pump(void)
 	}
 
 	dl_job *job = calloc(1, sizeof(*job));
-	char err[192] = "out of memory";
-	int rc = -1;
-	if (job) {
-		snprintf(job->uri, sizeof(job->uri), "%s", e.uri);
-		/* Only the card copy gets the bigger file: streaming 320 kbps
-		 * outran this console's link and songs took half a minute. */
+	if (!job) {
+		nlog("DLQ: no memory for %s\n", e.title);
+		mem_note("no job");
+		dlq_retry(&e, false, 60000);
+		dlq_save();
+		return;
+	}
+	/* The thread comes first and waits at the gate: starting a song asks
+	 * the access point for its key, and a thread that then failed to start
+	 * threw that key away. Forty of those in a row got the account's keys
+	 * refused for every song after. */
+	job->gate = 1;
+	job->core = slot == 0 ? 1 : 0;
+	/* Slot 0 on the system core like every network worker; slot 1 on the
+	 * app core below the UI and the player (0x30), which idle most of a
+	 * frame, so it soaks up what they leave. */
+	Thread dl = slot == 0
+	    ? native_spawn_worker(download_thread, job, 96 * 1024, 0x31)
+	    : threadCreate(download_thread, job, 96 * 1024, 0x38, 0, false);
+	if (!dl) {
+		nlog("DLQ: no thread for %s\n", e.title);
+		mem_note("no thread");
+		mem_largest();
+		free(job);
+		dlq_retry(&e, false, 60000);
+		dlq_save();
+		return;
+	}
+	job->th = dl;
+
+	char err[192] = "";
+	snprintf(job->uri, sizeof(job->uri), "%s", e.uri);
+	/* Only the card copy gets the bigger file: streaming 320 kbps
+	 * outran this console's link and songs took half a minute. */
+	job->ts.want_hq = sp_high_quality();
+	job->ts.sess = g.sp_sess;
+	int rc = track_stream_begin(g.sp_host, l5_token(), g.ap, e.uri, NULL,
+	                            &job->ts, err, sizeof(err));
+	if (rc != 0 && strstr(err, "401")) {
+		l5_refresh(true);
 		job->ts.want_hq = sp_high_quality();
 		job->ts.sess = g.sp_sess;
-		rc = track_stream_begin(g.sp_host, l5_token(), g.ap, e.uri, NULL,
-		                        &job->ts, err, sizeof(err));
-		if (rc != 0 && strstr(err, "401")) {
-			l5_refresh(true);
-			job->ts.want_hq = sp_high_quality();
-			job->ts.sess = g.sp_sess;
-			rc = track_stream_begin(g.sp_host, l5_token(), g.ap, e.uri,
-			                        NULL, &job->ts, err, sizeof(err));
-		}
+		rc = track_stream_begin(g.sp_host, l5_token(), g.ap, e.uri,
+		                        NULL, &job->ts, err, sizeof(err));
 	}
 	if (rc != 0) {
 		nlog("DLQ: could not start %s (%s)\n", e.title, err);
-		if (job)
-			track_stream_free(&job->ts);
+		job->gate = 2;
+		threadJoin(dl, U64_MAX);
+		threadFree(dl);
+		track_stream_free(&job->ts);
 		free(job);
-		/* A dropped link or a 5xx passes: back of the line, after a pause. */
-		if (!dlq_retry(&e)) {
+		const bool refused = strstr(err, "0x0002") != NULL;
+		dlq_refusals = refused ? dlq_refusals + 1 : 0;
+		u64 hold = 20000;
+		if (dlq_refusals >= 2) {
+			hold = 10 * 60000;
+			nlog("DLQ: keys refused %d times running, pausing 10 min\n",
+			     dlq_refusals);
+		}
+		/* A dropped link or a 5xx passes: back of the line, after a pause.
+		 * Rationed keys are not the song's fault: it keeps its tries. */
+		if (!dlq_retry(&e, dlq_refusals < 2, hold)) {
 			LightLock_Lock(&g.lock);
 			dlq_failed++;
 			LightLock_Unlock(&g.lock);
@@ -999,6 +1096,7 @@ static void dlq_pump(void)
 		dlq_save();
 		return;
 	}
+	dlq_refusals = 0;
 	job->save = true;
 	job->from_queue = true;
 	LightLock_Lock(&g.lock);
@@ -1008,35 +1106,10 @@ static void dlq_pump(void)
 	snprintf(dlq_active_title[slot], sizeof(dlq_active_title[slot]),
 	         "%s - %s", e.artist, e.title);
 	LightLock_Unlock(&g.lock);
-	/* Slot 0 on the system core like every network worker; slot 1 on the
-	 * app core below the UI and the player (0x30), which idle most of a
-	 * frame, so it soaks up what they leave. */
-	job->core = slot == 0 ? 1 : 0;
-	Thread dl = slot == 0
-	    ? native_spawn_worker(download_thread, job, 96 * 1024, 0x31)
-	    : threadCreate(download_thread, job, 96 * 1024, 0x38, 0, false);
-	if (!dl) {
-		nlog("DLQ: no thread for %s\n", e.title);
-		LightLock_Lock(&g.lock);
-		dl_job **pp = &g.jobs;
-		while (*pp && *pp != job)
-			pp = &(*pp)->next;
-		if (*pp)
-			*pp = job->next;
-		dlq_jobs[slot] = NULL;
-		LightLock_Unlock(&g.lock);
-		track_stream_free(&job->ts);
-		free(job);
-		if (!dlq_retry(&e)) {
-			LightLock_Lock(&g.lock);
-			dlq_failed++;
-			LightLock_Unlock(&g.lock);
-		}
-		dlq_save();
-		return;
-	}
-	job->th = dl;
 	nlog("DLQ: downloading %s (slot %d)\n", e.title, slot);
+	mem_note("queue start");
+	__sync_synchronize();
+	job->gate = 0;
 	job_detach(job);   /* the thread frees the job when it is done */
 }
 
@@ -1709,6 +1782,7 @@ int native_init(const native_sink *sink, void (*progress)(const char *step),
 		return -1;
 	}
 	nlog("INIT: ok, %s via %s\n", g.username, g.sp_host);
+	mem_note("start");
 	return 0;
 }
 
