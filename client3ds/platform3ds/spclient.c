@@ -458,6 +458,129 @@ int sp_playlist(const char *host, const char *token, const char *playlist_id,
 	pbv whole = { body, r.len };
 	int n = read_list_items(&whole, uris, max);
 	http_reply_free(&r);
+
+	/* The service may hand back only the head of a long list (length says
+	 * how many there are): ask for the rest a window at a time. A reply
+	 * whose ListItems.pos is not where we asked means `from` was ignored,
+	 * and its rows would only repeat the head. */
+	int pages = 0;
+	while (n < (int)length && n < max && pages++ < 20) {
+		int want = max - n < 100 ? max - n : 100;
+		snprintf(path, sizeof(path),
+		         "/playlist/v2/playlist/%s?from=%d&length=%d",
+		         playlist_id, n, want);
+		if (http_get_proto(host, path, token, &r) != 0)
+			break;
+		int got = 0;
+		pbv contents;
+		uint64_t pos = 0;
+		if (r.status == 200 &&
+		    pb_get_bytes((const uint8_t *)r.body, r.len, 5, &contents) &&
+		    pb_get_varint(contents.p, contents.len, 1, &pos) &&
+		    pos == (uint64_t)n) {
+			pbv page = { (const uint8_t *)r.body, r.len };
+			got = read_list_items(&page, uris + n, max - n);
+		}
+		http_reply_free(&r);
+		if (got <= 0)
+			break;
+		n += got;
+	}
+	return n;
+}
+
+/* ------------------------------------------------------- context-resolve */
+
+/* The uri out of one tracks[] entry. Liked entries carry a metadata object
+ * that grows with the album title and can pass any fixed buffer, so the
+ * entry is not copied whole: "uri" comes first, and a prefix finds it. A
+ * whole-entry copy that skipped big entries is what dropped liked songs. */
+static bool entry_uri(const char *obj, size_t len, char out[64])
+{
+	char buf[1024];
+	size_t n = len < sizeof(buf) - 1 ? len : sizeof(buf) - 1;
+	memcpy(buf, obj, n);
+	buf[n] = '\0';
+	return json_str(buf, "uri", out, 64);
+}
+
+/* Appends the uris of one page's "tracks" array after the n already held. */
+static int page_tracks(const char *page, char uris[][64], int n, int max,
+                       bool tracks_only)
+{
+	size_t cursor = 0;
+	const char *obj;
+	size_t objlen;
+	while (n < max && json_array_next(page, "tracks", &cursor, &obj, &objlen)) {
+		char u[64];
+		if (!entry_uri(obj, objlen, u))
+			continue;
+		if (tracks_only && strncmp(u, "spotify:track:", 14) != 0)
+			continue;
+		snprintf(uris[n++], 64, "%s", u);
+	}
+	return n;
+}
+
+/* Follows a page link: hm://<path> is served by spclient at /<path>. The
+ * reply is one page; its own next_page_url, if any, goes back in `link`. */
+static int fetch_page(const char *host, const char *token, char *link,
+                      size_t linklen, char uris[][64], int n, int max,
+                      bool tracks_only)
+{
+	const char *path = strncmp(link, "hm://", 5) == 0 ? link + 4 : link;
+	if (*path != '/') {
+		link[0] = '\0';
+		return n;
+	}
+	http_reply r;
+	if (http_get(host, path, token, &r) != 0) {
+		link[0] = '\0';
+		return n;
+	}
+	if (r.status == 200) {
+		n = page_tracks(r.body, uris, n, max, tracks_only);
+		if (!json_str(r.body, "next_page_url", link, linklen))
+			link[0] = '\0';
+	} else {
+		link[0] = '\0';
+	}
+	http_reply_free(&r);
+	return n;
+}
+
+/* context-resolve answers {"pages":[...]}: the first pages inline, later
+ * ones often only as a "page_url" (a long liked list, an album's second
+ * disc), and any page may end in a "next_page_url". Reading just the first
+ * "tracks" array is what cut those lists short; this walks every page and
+ * fetches the linked ones. */
+static int context_pages(const char *host, const char *token,
+                         const char *body, char uris[][64], int max,
+                         bool tracks_only)
+{
+	int n = 0;
+	int hops = 0;
+	size_t cursor = 0;
+	const char *obj;
+	size_t objlen;
+	while (n < max && json_array_next(body, "pages", &cursor, &obj, &objlen)) {
+		char *page = malloc(objlen + 1);
+		if (!page)
+			break;
+		memcpy(page, obj, objlen);
+		page[objlen] = '\0';
+		char link[256] = "";
+		if (strstr(page, "\"tracks\""))
+			n = page_tracks(page, uris, n, max, tracks_only);
+		else
+			json_str(page, "page_url", link, sizeof(link));
+		if (!link[0])
+			json_str(page, "next_page_url", link, sizeof(link));
+		free(page);
+		while (link[0] && n < max && hops++ < 40)
+			n = fetch_page(host, token, link, sizeof(link), uris, n, max,
+			               tracks_only);
+	}
 	return n;
 }
 
@@ -479,23 +602,8 @@ int sp_liked(const char *host, const char *token, const char *username,
 		return -1;
 	}
 
-	/* {"pages":[{"tracks":[{"uri":"spotify:track:...", "metadata":{...}}, ...]}]}
-	 * The array iterator finds "tracks" wherever it sits, which saves walking
-	 * into "pages" first. */
-	int n = 0;
-	size_t cursor = 0;
-	const char *obj;
-	size_t objlen;
-	while (n < max && json_array_next(r.body, "tracks", &cursor, &obj, &objlen)) {
-		char buf[512];
-		if (objlen >= sizeof(buf))
-			continue;
-		memcpy(buf, obj, objlen);
-		buf[objlen] = '\0';
-		char uri[64];
-		if (json_str(buf, "uri", uri, sizeof(uri)))
-			snprintf(uris[n++], 64, "%s", uri);
-	}
+	/* {"pages":[{"tracks":[{"uri":"spotify:track:...", "metadata":{...}}, ...]}]} */
+	int n = context_pages(host, token, r.body, uris, max, false);
 	http_reply_free(&r);
 	return n;
 }
@@ -963,21 +1071,8 @@ int sp_context_tracks(const char *host, const char *token, const char *uri,
 		return -1;
 	}
 
-	/* Same shape as search: pages[].tracks[].uri. Entries carry a metadata
-	 * object too, so the scratch buffer is roomier than search's. */
-	int count = 0;
-	size_t cursor = 0;
-	const char *obj;
-	size_t objlen;
-	while (count < max && json_array_next(r.body, "tracks", &cursor, &obj, &objlen)) {
-		char buf[2048];
-		if (!slice_to_buf(obj, objlen, buf, sizeof(buf)))
-			continue;
-		char u[64];
-		if (json_str(buf, "uri", u, sizeof(u)) &&
-		    strncmp(u, "spotify:track:", 14) == 0)
-			snprintf(uris[count++], 64, "%s", u);
-	}
+	/* Same shape as liked: pages[].tracks[].uri, one page per disc. */
+	int count = context_pages(host, token, r.body, uris, max, true);
 	http_reply_free(&r);
 	if (count == 0)
 		snprintf(err, errlen, "no tracks in %s", uri);

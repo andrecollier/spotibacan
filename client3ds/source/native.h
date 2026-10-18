@@ -16,7 +16,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-#define NATIVE_ROWS 512         /* a whole list: liked songs easily pass 300 */
+#define NATIVE_ROWS 1024        /* a whole list: liked songs pass 512 */
 
 typedef enum {
 	NATIVE_PLAYLISTS,           /* the account's playlist folder */
@@ -145,7 +145,7 @@ bool         native_current_saved(void);
 /* An armed download that gets cut short (its background slot is taken by a
  * newer one) is queued here instead of dying: the player drains the queue
  * one track at a time whenever no other download is using the link. */
-#define NATIVE_DLQ_MAX 512      /* a whole list: rows cap at NATIVE_ROWS */
+#define NATIVE_DLQ_MAX 1024     /* a whole list: rows cap at NATIVE_ROWS */
 
 /* The player lets the queue start a download (a few blocking seconds) only
  * while the ring has less than this much room left, i.e. is nearly full. */

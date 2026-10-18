@@ -1679,13 +1679,29 @@ static int name_tracks(char uris[][64], int n, native_row *rows, int max,
 		     sess && http_session_last_reused(sess) ? ", ka" : "", w_ms, b_ms);
 		if (named < 0)
 			continue;
+		/* Answers are matched to rows by uri, not position: a list that
+		 * holds a song twice can get one answer for both, and a positional
+		 * fill would then shift every later name onto the wrong row. */
+		int next = base;
 		for (int i = 0; i < named; i++) {
-			native_row *r = &rows[base + i];
+			int j = base + i;
+			if (meta[i].uri[0]) {
+				for (int k = next; k < base + chunk; k++)
+					if (!rows[k].uri[0] && strcmp(uris[k], meta[i].uri) == 0) {
+						j = k;
+						break;
+					}
+			}
+			if (rows[j].uri[0])
+				continue;
+			if (j == next)
+				next++;
+			native_row *r = &rows[j];
 			snprintf(r->label, sizeof(r->label), "%s",
 			         meta[i].name[0] ? meta[i].name : "(untitled)");
 			snprintf(r->sub, sizeof(r->sub), "%s", meta[i].artist);
 			snprintf(r->uri, sizeof(r->uri), "%s",
-			         meta[i].uri[0] ? meta[i].uri : uris[base + i]);
+			         meta[i].uri[0] ? meta[i].uri : uris[j]);
 			snprintf(r->art, sizeof(r->art), "%s", meta[i].art_small);
 			snprintf(r->album, sizeof(r->album), "%s", meta[i].album);
 			snprintf(r->artist_uri, sizeof(r->artist_uri), "%s",
@@ -1693,6 +1709,16 @@ static int name_tracks(char uris[][64], int n, native_row *rows, int max,
 			snprintf(r->album_uri, sizeof(r->album_uri), "%s",
 			         meta[i].album_uri);
 			r->is_playlist = false;
+		}
+		/* A repeat that got no answer of its own borrows its twin's. */
+		for (int k = base; k < base + chunk; k++) {
+			if (rows[k].uri[0])
+				continue;
+			for (int m = base; m < base + chunk; m++)
+				if (rows[m].uri[0] && strcmp(uris[m], uris[k]) == 0) {
+					rows[k] = rows[m];
+					break;
+				}
 		}
 		if (named > done - base)
 			done = base + named;
@@ -2087,6 +2113,7 @@ int native_fetch(native_view view, const char *arg, native_row *rows, int max,
 		int n = sp_liked(g.sp_host, token, g.username, uris, max, err, errlen);
 		if (n < 0)
 			return -1;
+		nlog("  liked: %d tracks%s\n", n, n >= max ? " (row cap)" : "");
 		return name_tracks(uris, n, rows, max, err, errlen);
 	}
 	case NATIVE_SEARCH: {
@@ -2152,6 +2179,8 @@ int native_fetch(native_view view, const char *arg, native_row *rows, int max,
 		                    uris, max, &count, err, errlen);
 		if (n < 0)
 			return -1;
+		nlog("  playlist: %d of %d items%s\n", n, count,
+		     n >= max ? " (row cap)" : "");
 		return name_tracks(uris, n, rows, max, err, errlen);
 	}
 	case NATIVE_RADIO: {
@@ -2159,8 +2188,11 @@ int native_fetch(native_view view, const char *arg, native_row *rows, int max,
 			snprintf(err, errlen, "no seed track");
 			return -1;
 		}
-		static sp_track radio[NATIVE_ROWS];
-		int n = sp_radio(g.sp_host, token, arg, max, radio, max, err, errlen);
+		/* A radio is a mix, not a whole list: a hundred songs is plenty,
+		 * and sp_track is too big to keep a full row cap of them. */
+		static sp_track radio[100];
+		int rmax = max < 100 ? max : 100;
+		int n = sp_radio(g.sp_host, token, arg, rmax, radio, rmax, err, errlen);
 		if (n < 0)
 			return -1;
 		/* radio-apollo carries the titles but no cover URLs, and the list
