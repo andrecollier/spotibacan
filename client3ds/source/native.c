@@ -1,6 +1,7 @@
 #include "native.h"
 
 #include "ap3ds.h"
+#include "cast3ds.h"
 #include "cfg3ds.h"
 #include "http3ds.h"
 #include "login5.h"
@@ -1810,6 +1811,247 @@ int native_init_offline(const native_sink *sink)
 	return 0;
 }
 
+/* ---- Casting to a speaker ------------------------------------------------
+ *
+ * One speaker, named in cast.txt beside the config ("Kitchen 192.168.1.20":
+ * the name as the Google Home app shows it, then its address). The work is
+ * network and seconds long, so it runs on its own thread; the UI only
+ * posts requests and reads the state. Spotify on the speaker does the
+ * streaming, so the console's own player just sits paused meanwhile. */
+
+enum { CR_PLAY = 1, CR_CMD, CR_VOL, CR_END };
+#define CAST_REQS 8
+
+static struct {
+	bool       loaded, configured;
+	char       name[64], ip[48];
+	Thread     th;
+	LightEvent wake;
+	volatile native_cast_status state;
+	char       dev[CAST_DEV_LEN];
+	bool       awake;             /* signed in; a failed command re-wakes */
+	volatile int gen;             /* bumped by every "back to the console" */
+	float      volume;            /* the speaker's level, 0..1 */
+	char       error[160];
+	struct {
+		int  kind;
+		char a[192], b[64];   /* play: context and track; cmd: endpoint */
+		long n;               /* play: position in ms; vol: step */
+	} req[CAST_REQS];
+	int        head, count;
+} cast;
+
+static void cast_load(void)
+{
+	if (cast.loaded)
+		return;
+	cast.loaded = true;
+	char path[320];
+	cfg_dir(path, sizeof(path));
+	strncat(path, "cast.txt", sizeof(path) - strlen(path) - 1);
+	FILE *f = fopen(path, "r");
+	if (!f)
+		return;
+	char line[160];
+	while (fgets(line, sizeof(line), f)) {
+		line[strcspn(line, "\r\n")] = '\0';
+		if (!line[0] || line[0] == '#')
+			continue;
+		/* The address is the last word; the name may have spaces. */
+		char *sp = strrchr(line, ' ');
+		if (!sp)
+			continue;
+		*sp = '\0';
+		while (sp > line && sp[-1] == ' ')
+			*--sp = '\0';
+		snprintf(cast.name, sizeof(cast.name), "%s", line);
+		snprintf(cast.ip, sizeof(cast.ip), "%s", sp + 1 + strspn(sp + 1, " "));
+		cast.configured = cast.name[0] && cast.ip[0];
+		break;
+	}
+	fclose(f);
+	if (cast.configured)
+		nlog("CAST: speaker %s at %s\n", cast.name, cast.ip);
+}
+
+bool native_cast_configured(void)
+{
+	cast_load();
+	return cast.configured;
+}
+
+const char *native_cast_name(void) { return cast.name; }
+native_cast_status native_cast_state(void) { return cast.state; }
+const char *native_cast_error(void) { return cast.error; }
+
+/* Wakes the speaker and signs it in; on success it is a Connect device
+ * until Spotify forgets it. */
+static bool cast_do_wake(void)
+{
+	char err[160] = "";
+	float vol = -1.0f;
+	const u64 t0 = osGetTime();
+	if (cast_wake(cast.ip, cast.name, g.sp_host, l5_token(), g.access_token,
+	              cast.dev, &vol, err, sizeof(err)) != 0) {
+		nlog("CAST: waking %s failed: %s\n", cast.name, err);
+		snprintf(cast.error, sizeof(cast.error), "%s", err);
+		cast.awake = false;
+		return false;
+	}
+	cast.awake = true;
+	if (vol >= 0.0f)
+		cast.volume = vol;
+	nlog("CAST: %s signed in as %s in %llu ms\n", cast.name, cast.dev,
+	     (unsigned long long)(osGetTime() - t0));
+	return true;
+}
+
+/* A command that finds the speaker gone (Spotify signs idle ones out)
+ * wakes it again once and retries. */
+static int cast_send_cmd(int kind, const char *a, const char *b, long n)
+{
+	char err[160] = "";
+	for (int attempt = 0; attempt < 2; attempt++) {
+		int st;
+		if (kind == CR_PLAY) {
+			st = cast_play(g.sp_host, l5_token(), cast.dev, a, b, n, err,
+			               sizeof(err));
+		} else if (kind == CR_VOL) {
+			st = cast_set_volume(g.sp_host, l5_token(), cast.dev,
+			                     cast.volume, err, sizeof(err));
+		} else {
+			char cmd[64];
+			snprintf(cmd, sizeof(cmd), "{\"endpoint\":\"%s\"}", a);
+			st = cast_command(g.sp_host, l5_token(), cast.dev, cmd, err,
+			                  sizeof(err));
+		}
+		if (st == 200)
+			return 0;
+		nlog("CAST: %s: %s\n", kind == CR_PLAY ? "play" : a, err);
+		if (attempt == 0 && !cast_do_wake())
+			break;
+	}
+	snprintf(cast.error, sizeof(cast.error), "%s", err);
+	return -1;
+}
+
+static void cast_thread(void *arg)
+{
+	(void)arg;
+	while (!g.quit) {
+		LightEvent_WaitTimeout(&cast.wake, 500000000LL);   // 0.5 s
+		for (;;) {
+			int kind;
+			char a[192], b[64];
+			long n;
+			LightLock_Lock(&g.lock);
+			if (!cast.count) {
+				LightLock_Unlock(&g.lock);
+				break;
+			}
+			const int i = cast.head;
+			kind = cast.req[i].kind;
+			memcpy(a, cast.req[i].a, sizeof(a));
+			memcpy(b, cast.req[i].b, sizeof(b));
+			n = cast.req[i].n;
+			cast.head = (cast.head + 1) % CAST_REQS;
+			cast.count--;
+			LightLock_Unlock(&g.lock);
+			if (g.quit)
+				break;
+
+			if (kind == CR_PLAY) {
+				/* A "back to the console" posted while this starts must
+				 * not be undone by it turning ON afterwards. */
+				const int gen = cast.gen;
+				cast.error[0] = '\0';
+				if ((!cast.awake && !cast_do_wake()) ||
+				    cast_send_cmd(CR_PLAY, a, b, n) != 0) {
+					if (gen == cast.gen)
+						cast.state = NATIVE_CAST_FAILED;
+					continue;
+				}
+				nlog("CAST: playing %s on %s\n", a, cast.name);
+				if (gen == cast.gen)
+					cast.state = NATIVE_CAST_ON;
+			} else if (kind == CR_END) {
+				/* Back to the console: the speaker stops. */
+				if (cast.dev[0])
+					cast_send_cmd(CR_CMD, "pause", "", 0);
+				cast.state = NATIVE_CAST_OFF;
+			} else if (cast.state == NATIVE_CAST_ON) {
+				if (kind == CR_VOL) {
+					cast.volume += n * 0.05f;
+					if (cast.volume < 0.0f) cast.volume = 0.0f;
+					if (cast.volume > 1.0f) cast.volume = 1.0f;
+				}
+				cast_send_cmd(kind, a, b, n);
+			}
+		}
+	}
+}
+
+static void cast_post(int kind, const char *a, const char *b, long n)
+{
+	if (!g.ready || !native_cast_configured())
+		return;
+	LightLock_Lock(&g.lock);
+	if (!cast.th) {
+		LightEvent_Init(&cast.wake, RESET_ONESHOT);
+		cast.volume = 0.5f;
+		/* The TLS handshake runs on this stack, like the downloads'. */
+		cast.th = native_spawn_worker(cast_thread, NULL, 96 * 1024, 0x31);
+		if (!cast.th) {
+			LightLock_Unlock(&g.lock);
+			snprintf(cast.error, sizeof(cast.error), "no thread for casting");
+			cast.state = NATIVE_CAST_FAILED;
+			mem_note("no cast thread");
+			return;
+		}
+	}
+	if (cast.count == CAST_REQS) {   /* full: the oldest gives way */
+		cast.head = (cast.head + 1) % CAST_REQS;
+		cast.count--;
+	}
+	const int i = (cast.head + cast.count) % CAST_REQS;
+	cast.req[i].kind = kind;
+	snprintf(cast.req[i].a, sizeof(cast.req[i].a), "%s", a ? a : "");
+	snprintf(cast.req[i].b, sizeof(cast.req[i].b), "%s", b ? b : "");
+	cast.req[i].n = n;
+	cast.count++;
+	LightLock_Unlock(&g.lock);
+	LightEvent_Signal(&cast.wake);
+}
+
+void native_cast_play(const char *context_uri, const char *track_uri,
+                      long pos_ms)
+{
+	cast.state = NATIVE_CAST_STARTING;   /* the UI shows it at once */
+	cast_post(CR_PLAY, context_uri, track_uri, pos_ms);
+}
+
+void native_cast_command(const char *endpoint)
+{
+	cast_post(CR_CMD, endpoint, "", 0);
+}
+
+void native_cast_volume_step(int dir)
+{
+	cast_post(CR_VOL, "", "", dir);
+}
+
+void native_cast_end(void)
+{
+	cast.gen++;
+	cast_post(CR_END, "", "", 0);
+	cast.state = NATIVE_CAST_OFF;
+}
+
+int native_cast_volume(void)
+{
+	return (int)(cast.volume * 100.0f + 0.5f);
+}
+
 void native_exit(void)
 {
 	if (!g.ready)
@@ -1822,7 +2064,15 @@ void native_exit(void)
 		p->stop = true;
 	LightLock_Unlock(&g.lock);
 
-	bool player_done = true;
+	bool cast_done = true;
+	if (cast.th) {
+		LightEvent_Signal(&cast.wake);
+		cast_done = R_SUCCEEDED(threadJoin(cast.th, 3000000000ULL));
+		if (cast_done)
+			threadFree(cast.th);
+		cast.th = NULL;
+	}
+	bool player_done = cast_done;
 	if (g.player) {
 		player_done = R_SUCCEEDED(threadJoin(g.player, 6000000000ULL));
 		if (player_done)

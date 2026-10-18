@@ -192,6 +192,30 @@ bool native_dl_queue_entry(int i, char *title, size_t titlelen);
 /* The download the queue is running right now: 0-100, or -1 when idle.
  * title_out gets its name when active. */
 int  native_dl_active(char *title_out, size_t titlelen);
+/* Casting to the one speaker named in cast.txt. The calls only post a
+ * request; a worker does the network. Starting wakes the speaker and signs
+ * it in to Spotify, then plays `context_uri` from `track_uri` (may be "")
+ * at `pos_ms`; after that the console is a remote for it. */
+typedef enum {
+	NATIVE_CAST_OFF = 0,
+	NATIVE_CAST_STARTING,
+	NATIVE_CAST_ON,
+	NATIVE_CAST_FAILED,
+} native_cast_status;
+bool               native_cast_configured(void);
+const char        *native_cast_name(void);
+native_cast_status native_cast_state(void);
+const char        *native_cast_error(void);
+void native_cast_play(const char *context_uri, const char *track_uri,
+                      long pos_ms);
+/* "pause", "resume", "skip_next" or "skip_prev". */
+void native_cast_command(const char *endpoint);
+/* One 5 % step up (+1) or down (-1); native_cast_volume() is 0..100. */
+void native_cast_volume_step(int dir);
+int  native_cast_volume(void);
+/* Pauses the speaker and leaves cast mode. */
+void native_cast_end(void);
+
 /* Appends a line to the same native.log the backend writes; for UI-side
  * failures that would otherwise leave no trace (a stuck view, a dead tap). */
 void         native_log(const char *fmt, ...);

@@ -1310,9 +1310,11 @@ static int clamp_row(int sel, int total)
 	return sel < 0 ? 0 : sel;
 }
 
+static bool casting(void);
+
 /* START while a song plays: jump to its artist or album, or on to the
  * settings. Same modal pattern as the settings sheet, three rows. */
-#define ACT_ROWS 8
+#define ACT_ROWS 9
 #define ACT_ROW0 0x7200
 static bool actions_open = false;
 static int  actions_sel = 0;
@@ -1326,7 +1328,8 @@ static struct {
 } act;
 
 /* Rows: 0 play next, 1 add to playlist, 2 artist, 3 album, 4 radio,
- * 5 visualizer, 6 delete download, 7 settings. Delete takes two presses:
+ * 5 visualizer, 6 delete download, 7 play on the speaker (or back),
+ * 8 settings. Delete takes two presses:
  * the first only arms it. */
 static bool act_delete_armed = false;
 static bool unlink_armed = false;
@@ -1348,6 +1351,8 @@ static bool action_enabled(int row)
 	if (row == 4) return act_track_uri()[0] != '\0' && !native_offline();
 	if (row == 5) return vis_open || native_now_uri()[0] != '\0';
 	if (row == 6) return act.has_row && strncmp(act.row.uri, "file:", 5) == 0;
+	if (row == 7) return native_cast_configured() && !native_offline() &&
+	                     (casting() || native_now_uri()[0] != '\0');
 	return true;
 }
 
@@ -1390,17 +1395,25 @@ static void draw_actions(const Skin *sk)
 	C2D_DrawRectSolid(px + 1.0f, py + 1.0f, 0.6f, pw - 2.0f, ph - 2.0f, panel);
 
 	ui_depth(0.7f);
+	char cast_label[80];
+	if (casting())
+		snprintf(cast_label, sizeof(cast_label), "%s", tr(S_CAST_BACK));
+	else
+		snprintf(cast_label, sizeof(cast_label), tr(S_CAST_TO),
+		         native_cast_configured() ? native_cast_name() : "...");
 	const char *labels[ACT_ROWS] = { tr(S_PLAY_NEXT), tr(S_ADD_TO_PL),
 	                                 tr(S_GO_ARTIST), tr(S_GO_ALBUM),
 	                                 tr(S_GO_RADIO),
 	                                 tr(vis_open ? S_VIS_STOP : S_VIS_START),
 	                                 tr(act_delete_armed ? S_DELETE_CONFIRM
 	                                                     : S_DELETE_DL),
+	                                 cast_label,
 	                                 tr(S_SETTINGS) };
 	const char *subs[ACT_ROWS] = { act.has_row ? act.row.label : "", "",
-	                               act.artist, act.album, "", "", "", "" };
-	/* Eight rows of 28px fill the sheet; a sub line sits right under. */
-	const float rh = 28.0f, ry = py + 8.0f;
+	                               act.artist, act.album, "", "", "", "",
+	                               "" };
+	/* Nine rows of 25px fill the sheet; a sub line sits right under. */
+	const float rh = 25.0f, ry = py + 8.0f;
 	for (int i = 0; i < ACT_ROWS; i++) {
 		const float y = ry + i * rh;
 		const bool on = action_enabled(i);
@@ -2059,6 +2072,23 @@ static bool end_pending = false;
 static int  queued_after = 0;
 static bool play_edited = false;
 
+static void play_step(int idx);
+
+/* Casting: the speaker in cast.txt plays and the console is its remote.
+ * The console's own player stays paused where it was, so going back is
+ * seamless unless something else was picked meanwhile. */
+static bool cast_dirty = false;     /* a new pick to send to the speaker */
+static bool cast_changed = false;   /* the speaker moved off the paused song */
+static bool cast_paused = false;
+static long cast_pos_ms = 0;        /* where the first song starts */
+static char cast_uri[192] = "";     /* the song picked while casting */
+
+static bool casting(void)
+{
+	const native_cast_status st = native_cast_state();
+	return st == NATIVE_CAST_STARTING || st == NATIVE_CAST_ON;
+}
+
 // Starts a track by URI alone, for the shelf: no list context to remember,
 // so prev/next grey out until a list play gives them bounds again.
 static void play_uri(const char *uri)
@@ -2066,13 +2096,20 @@ static void play_uri(const char *uri)
 	end_pending = false;
 	queued_after = 0;
 	play_edited = false;
-	native_play(uri);
+	if (casting()) {
+		snprintf(cast_uri, sizeof(cast_uri), "%s", uri);
+		cast_dirty = true;
+		cast_changed = true;
+		cast_pos_ms = 0;
+	} else {
+		native_play(uri);
+	}
 	now_idx = -1;
 	play_count = 0;   /* off-list: no neighbours to step to */
 	play_idx = -1;
-	buffering = true;
-	paused = false;
-	ndspChnSetPaused(0, false);
+	buffering = !casting();
+	paused = casting();
+	ndspChnSetPaused(0, paused);
 	if (!auto_advance)
 		ring_clear();
 }
@@ -2115,6 +2152,64 @@ static void play_index(int idx)
 	         nat_view == NATIVE_SEARCH ? lib.query : nat_arg);
 }
 
+/* Sends what the console would play now to the speaker: the list it came
+ * from as the context (so the speaker goes on through it by itself), from
+ * that song. Saved files have no Spotify id to send. */
+static bool cast_start(void)
+{
+	const char *track = (play_idx >= 0 && play_idx < play_count)
+	                    ? play_uris[play_idx]
+	                    : (cast_uri[0] ? cast_uri : native_now_uri());
+	if (strncmp(track, "spotify:track:", 14) != 0) {
+		char msg[96];
+		snprintf(msg, sizeof(msg), tr(S_CAST_LOCAL), native_cast_name());
+		toast_show(msg);
+		if (casting())
+			native_cast_end();
+		return false;
+	}
+	char ctx[192];
+	if (play_idx >= 0 && (strncmp(now_arg, "spotify:playlist:", 17) == 0 ||
+	                      strncmp(now_arg, "spotify:album:", 14) == 0))
+		snprintf(ctx, sizeof(ctx), "%s", now_arg);
+	else if (play_idx >= 0 && now_view == NATIVE_LIKED)
+		snprintf(ctx, sizeof(ctx), "spotify:user:%s:collection",
+		         native_account());
+	else
+		snprintf(ctx, sizeof(ctx), "%s", track);
+	native_cast_play(ctx, strcmp(ctx, track) == 0 ? "" : track, cast_pos_ms);
+	cast_paused = false;
+	return true;
+}
+
+/* START -> "Play on <speaker>": the console pauses and the speaker takes
+ * over from the same spot. */
+static void cast_begin(void)
+{
+	cast_changed = false;
+	cast_uri[0] = '\0';
+	cast_pos_ms = (long)(now_pos * 1000.0f);
+	if (cast_start()) {
+		paused = true;
+		ndspChnSetPaused(0, true);
+	}
+}
+
+/* START -> "Play on this console": the speaker stops; the console carries
+ * on from its paused spot, or starts what was picked while casting. */
+static void cast_finish(void)
+{
+	native_cast_end();
+	if (!cast_changed && native_playback_state() == NATIVE_PLAYING) {
+		paused = false;
+		ndspChnSetPaused(0, false);
+	} else if (play_idx >= 0 && play_idx < play_count) {
+		play_step(play_idx);
+	} else if (cast_uri[0]) {
+		play_uri(cast_uri);
+	}
+}
+
 // Plays a snapshot row (a manual or automatic skip). The snapshot stays the
 // context; the on-screen highlight keeps pointing at the origin view, where
 // the row index still matches if that list is the one displayed.
@@ -2129,12 +2224,18 @@ static void play_step(int idx)
 		queued_after = 0;
 	if (strncmp(play_uris[idx], "file:", 5) != 0)
 		recents_push(play_uris[idx], play_art[idx]);
-	native_play(play_uris[idx]);
+	if (casting()) {
+		cast_dirty = true;
+		cast_changed = true;
+		cast_pos_ms = 0;
+	} else {
+		native_play(play_uris[idx]);
+	}
 	play_idx = idx;
 	now_idx = play_edited ? -1 : idx;
-	buffering = true;
-	paused = false;
-	ndspChnSetPaused(0, false);
+	buffering = !casting();
+	paused = casting();
+	ndspChnSetPaused(0, paused);
 	if (!auto_advance)
 		ring_clear();
 }
@@ -2791,6 +2892,11 @@ int main(int argc, char **argv)
 					lib_reload = true;   /* the Downloads list rereads the card */
 					nat_loaded_view = (native_view)-1;
 				} else if (row == 7) {
+					if (casting())
+						cast_finish();
+					else
+						cast_begin();
+				} else if (row == 8) {
 					settings_open = true;
 					settings_sel = 0;
 				} else {
@@ -2906,18 +3012,31 @@ int main(int argc, char **argv)
 		if (!lib.open && !lyr_open && g_touch.clicked >= 0) {
 			switch (g_touch.clicked) {
 			case BTN_P_PLAY:
-				if (native_playback_state() == NATIVE_PLAYING) {
+				if (casting()) {
+					cast_paused = !cast_paused;
+					native_cast_command(cast_paused ? "pause" : "resume");
+				} else if (native_playback_state() == NATIVE_PLAYING) {
 					paused = !paused;
 					ndspChnSetPaused(0, paused);
 				}
 				break;
 			case BTN_P_PREV: {
+				if (casting()) {
+					native_cast_command("skip_prev");
+					cast_changed = true;
+					break;
+				}
 				const int t = step_index(-1);
 				if (t >= 0)
 					play_step(t);
 				break;
 			}
 			case BTN_P_NEXT: {
+				if (casting()) {
+					native_cast_command("skip_next");
+					cast_changed = true;
+					break;
+				}
 				const int t = step_index(+1);
 				if (t >= 0)
 					play_step(t);
@@ -3166,7 +3285,10 @@ int main(int argc, char **argv)
 		if (!lib.open && (down & KEY_A)) {
 			// A mirrors the on-screen disc: pause, not stop. The decoder
 			// sleeps when the ring is full, so resume costs nothing.
-			if (native_playback_state() == NATIVE_PLAYING) {
+			if (casting()) {
+				cast_paused = !cast_paused;
+				native_cast_command(cast_paused ? "pause" : "resume");
+			} else if (native_playback_state() == NATIVE_PLAYING) {
 				paused = !paused;
 				ndspChnSetPaused(0, paused);
 			}
@@ -3179,6 +3301,27 @@ int main(int argc, char **argv)
 
 		// D-pad left/right are the physical prev/next; shuffle may reroute
 		// them to a random row.
+		// While casting the speaker walks its own copy of the list, so
+		// the skips go to it; up/down step its volume (the slider only
+		// reaches this console's speakers).
+		if (casting() && !lib.open && !lyr_open) {
+			if (down & (KEY_DLEFT | KEY_DRIGHT | KEY_L | KEY_R)) {
+				native_cast_command((down & (KEY_DRIGHT | KEY_R))
+				                    ? "skip_next" : "skip_prev");
+				cast_changed = true;
+			}
+			if (down & (KEY_DUP | KEY_DDOWN)) {
+				native_cast_volume_step((down & KEY_DUP) ? +1 : -1);
+				char msg[96];
+				int v = native_cast_volume() + ((down & KEY_DUP) ? 5 : -5);
+				v = v < 0 ? 0 : v > 100 ? 100 : v;
+				snprintf(msg, sizeof(msg), tr(S_CAST_VOL),
+				         native_cast_name(), v);
+				toast_show(msg);
+			}
+			down &= ~(KEY_DLEFT | KEY_DRIGHT | KEY_L | KEY_R |
+			          KEY_DUP | KEY_DDOWN);
+		}
 		if (!lib.open && !lyr_open && (down & (KEY_DLEFT | KEY_DRIGHT))) {
 			const int dir = (down & KEY_DRIGHT) ? +1 : -1;
 			const int t = step_index(dir);
@@ -3196,6 +3339,48 @@ int main(int argc, char **argv)
 				play_step(t);
 		}
 
+		{
+			/* A pick made while casting goes to the speaker; the state
+			 * shows in the title lines, where the song would be. */
+			static native_cast_status cast_seen = NATIVE_CAST_OFF;
+			if (cast_dirty) {
+				cast_dirty = false;
+				if (casting())
+					cast_start();
+			}
+			const native_cast_status cs = native_cast_state();
+			if (cs != cast_seen) {
+				char msg[160];
+				if (cs == NATIVE_CAST_ON)
+					snprintf(msg, sizeof(msg), tr(S_CAST_ON),
+					         native_cast_name());
+				else if (cs == NATIVE_CAST_FAILED)
+					snprintf(msg, sizeof(msg), tr(S_CAST_FAILED),
+					         native_cast_name());
+				else
+					msg[0] = '\0';
+				if (msg[0])
+					toast_show(msg);
+				if (cs == NATIVE_CAST_FAILED)
+					native_log("CAST: UI shows failure: %s\n",
+					           native_cast_error());
+				cast_seen = cs;
+			}
+			if (cs == NATIVE_CAST_STARTING || cs == NATIVE_CAST_ON) {
+				if (!cast_changed && play_idx >= 0 && play_idx < play_count) {
+					snprintf(now_title, sizeof(now_title), "%s",
+					         play_labels[play_idx]);
+				} else if (cast_changed) {
+					snprintf(now_title, sizeof(now_title), "%s",
+					         play_ctx_title[0] ? play_ctx_title
+					                           : native_cast_name());
+				}
+				snprintf(now_artist, sizeof(now_artist),
+				         tr(cs == NATIVE_CAST_ON ? S_CAST_ON
+				                                 : S_CAST_STARTING),
+				         native_cast_name());
+			}
+		}
 		{
 			static u64 batt_at = 0;
 			const u64 now_ms = osGetTime();

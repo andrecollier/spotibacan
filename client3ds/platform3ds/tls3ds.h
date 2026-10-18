@@ -53,6 +53,13 @@ int  tls_anchor_count(void);
 tls_conn *tls_connect(const char *host, u16 port, int timeout_ms,
                       tls_stats *stats, char *err, size_t errlen);
 
+/* For a device on the home network, by IP: Cast speakers present a
+ * certificate signed by their own device key, which no public anchor
+ * vouches for. No chain check, no SNI, no session ticket. Never for
+ * anything on the internet. */
+tls_conn *tls_connect_lan(const char *ip, u16 port, int timeout_ms,
+                          char *err, size_t errlen);
+
 int  tls_write(tls_conn *c, const void *buf, size_t len);   /* writes all of it */
 int  tls_read(tls_conn *c, void *buf, size_t len);          /* 0 = closed */
 void tls_close(tls_conn *c);

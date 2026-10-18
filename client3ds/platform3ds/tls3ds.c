@@ -276,8 +276,9 @@ static int dial(const char *host, u16 port, int timeout_ms,
 
 /* ---------------------------------------------------------------- handshake */
 
-tls_conn *tls_connect(const char *host, u16 port, int timeout_ms,
-                      tls_stats *stats, char *err, size_t errlen)
+static tls_conn *connect_impl(const char *host, u16 port, int timeout_ms,
+                              bool verify, tls_stats *stats, char *err,
+                              size_t errlen)
 {
 	tls_stats local = {0};
 	tls_stats *st = stats ? stats : &local;
@@ -316,7 +317,8 @@ tls_conn *tls_connect(const char *host, u16 port, int timeout_ms,
 
 	mbedtls_ssl_conf_min_tls_version(&c->conf, MBEDTLS_SSL_VERSION_TLS1_2);
 	mbedtls_ssl_conf_max_tls_version(&c->conf, MBEDTLS_SSL_VERSION_TLS1_2);
-	mbedtls_ssl_conf_authmode(&c->conf, MBEDTLS_SSL_VERIFY_REQUIRED);
+	mbedtls_ssl_conf_authmode(&c->conf, verify ? MBEDTLS_SSL_VERIFY_REQUIRED
+	                                           : MBEDTLS_SSL_VERIFY_NONE);
 	mbedtls_ssl_conf_ca_chain(&c->conf, &g.anchors, NULL);
 	mbedtls_ssl_conf_rng(&c->conf, locked_drbg, &g.drbg);
 	mbedtls_ssl_conf_ciphersuites(&c->conf, SUITES);
@@ -329,14 +331,17 @@ tls_conn *tls_connect(const char *host, u16 port, int timeout_ms,
 		goto fail;
 	/* Without SNI, Spotify's edge serves the wrong certificate; this call also
 	 * arms the hostname check against the leaf. */
-	if ((rc = mbedtls_ssl_set_hostname(&c->ssl, host)))
+	if (verify && (rc = mbedtls_ssl_set_hostname(&c->ssl, host)))
 		goto fail;
 	bool found = false;
-	LightLock_Lock(&g.lock);
-	const int slot = ticket_slot(host, &found);
-	if (found)
-		mbedtls_ssl_set_session(&c->ssl, &g.ticket[slot]);
-	LightLock_Unlock(&g.lock);
+	int slot = -1;
+	if (verify) {
+		LightLock_Lock(&g.lock);
+		slot = ticket_slot(host, &found);
+		if (found)
+			mbedtls_ssl_set_session(&c->ssl, &g.ticket[slot]);
+		LightLock_Unlock(&g.lock);
+	}
 
 	mbedtls_ssl_set_bio(&c->ssl, c, bio_send, bio_recv, NULL);
 
@@ -381,6 +386,8 @@ tls_conn *tls_connect(const char *host, u16 port, int timeout_ms,
 	/* Keep the ticket for the next connection to this host. The slot lookup
 	 * already ran before the handshake: a match is refreshed in place, a miss
 	 * lands on the ring's next victim. */
+	if (slot < 0)
+		return c;
 	LightLock_Lock(&g.lock);
 	/* Another thread may have handed this slot to a different host while
 	 * the handshake ran; storing still just overwrites one cache entry. */
@@ -458,4 +465,16 @@ void tls_close(tls_conn *c)
 	mbedtls_ssl_config_free(&c->conf);
 	close(c->fd);
 	free(c);
+}
+
+tls_conn *tls_connect(const char *host, u16 port, int timeout_ms,
+                      tls_stats *stats, char *err, size_t errlen)
+{
+	return connect_impl(host, port, timeout_ms, true, stats, err, errlen);
+}
+
+tls_conn *tls_connect_lan(const char *ip, u16 port, int timeout_ms,
+                          char *err, size_t errlen)
+{
+	return connect_impl(ip, port, timeout_ms, false, NULL, err, errlen);
 }
