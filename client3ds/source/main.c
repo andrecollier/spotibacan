@@ -1272,6 +1272,44 @@ static bool list_downloadable(void)
 	       nat_count > 0 && !native_offline();
 }
 
+/* Up/down for a long list: a press moves one row; held, it repeats after a
+ * beat and picks up speed (five rows a step after three seconds), so a
+ * 500-song list is not 500 presses. The circle pad scrolls too, faster the
+ * further it is pushed. Returns the signed number of rows to move. */
+typedef struct { u64 t0, next; } nav_hold;
+
+static int nav_repeat(nav_hold *h, u32 down)
+{
+	const u64 now = osGetTime();
+	const u32 held = hidKeysHeld();
+	const int dir = (held & KEY_DUP) ? -1 : (held & KEY_DDOWN) ? +1 : 0;
+	if (dir) {
+		if (down & (KEY_DUP | KEY_DDOWN)) {
+			h->t0 = now;
+			h->next = now + 350;
+			return dir;
+		}
+		if (now < h->next)
+			return 0;
+		const u64 held_ms = now - h->t0;
+		h->next = now + (held_ms > 1500 ? 35 : 80);
+		return dir * (held_ms > 3000 ? 5 : 1);
+	}
+	circlePosition cp;
+	hidCircleRead(&cp);
+	const int mag = cp.dy < 0 ? -cp.dy : cp.dy;   /* about 0..156 */
+	if (mag < 40 || now < h->next)
+		return 0;
+	h->next = now + (mag > 140 ? 25 : mag > 100 ? 60 : 120);
+	return (cp.dy > 0 ? -1 : +1) * (mag > 145 ? 3 : 1);
+}
+
+static int clamp_row(int sel, int total)
+{
+	if (sel >= total) sel = total - 1;
+	return sel < 0 ? 0 : sel;
+}
+
 /* START while a song plays: jump to its artist or album, or on to the
  * settings. Same modal pattern as the settings sheet, three rows. */
 #define ACT_ROWS 8
@@ -2663,10 +2701,10 @@ int main(int argc, char **argv)
 			g_touch.clicked = -1;
 			g_touch.long_pressed = -1;
 		} else if (pick_open) {
-			if ((down & KEY_DUP) && pick_sel > 0)
-				pick_sel--;
-			if ((down & KEY_DDOWN) && pick_sel + 1 < pick_n)
-				pick_sel++;
+			static nav_hold pick_hold;
+			const int step = nav_repeat(&pick_hold, down);
+			if (step && pick_n)
+				pick_sel = clamp_row(pick_sel + step, pick_n);
 			if (down & KEY_L)
 				pick_sel = pick_sel > PICK_VIS ? pick_sel - PICK_VIS : 0;
 			if (down & KEY_R)
@@ -3018,8 +3056,10 @@ int main(int argc, char **argv)
 		}
 
 		if (lib.open) {
-			if (down & KEY_DUP && lib.sel > 0) lib.sel--;
-			if (down & KEY_DDOWN && lib.sel + 1 < lib.total) lib.sel++;
+			static nav_hold lib_hold;
+			const int step = nav_repeat(&lib_hold, down);
+			if (step && lib.total)
+				lib.sel = clamp_row(lib.sel + step, lib.total);
 			if (down & KEY_L) lib.sel = lib.sel >= 25 ? lib.sel - 25 : 0;
 			if ((down & KEY_R) && lib.total)
 				lib.sel = lib.sel + 25 < lib.total ? lib.sel + 25

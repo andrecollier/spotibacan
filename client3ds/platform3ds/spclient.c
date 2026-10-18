@@ -76,7 +76,10 @@ static void read_cover_urls(const pbv *track, sp_track *out)
 		read_image_ids(&album, 9, ids);
 
 	const char *small = ids[1][0] ? ids[1] : ids[2][0] ? ids[2] : ids[0];
-	const char *large = ids[2][0] ? ids[2] : ids[0][0] ? ids[0] : ids[1];
+	/* The "large" cover is drawn at 128px at most, so the 300px image
+	 * (size 0) is plenty: the 640px one is ~4x the bytes to fetch over TLS
+	 * and the pixels to decode, and cost 3-8 s per saved song. */
+	const char *large = ids[0][0] ? ids[0] : ids[2][0] ? ids[2] : ids[1];
 	if (small[0])
 		snprintf(out->art_small, sizeof(out->art_small),
 		         "https://i.scdn.co/image/%s", small);
