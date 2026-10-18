@@ -1074,6 +1074,20 @@ static void play_stream(track_stream *ts)
 				svcSleepThread(20000000LL);   // 20 ms
 				continue;
 			}
+			/* Walking back toward the span a far seek skipped: it is zero
+			 * fill, and decoding it would end the song. Bring the download
+			 * there (unless it is already on its way) and wait. */
+			if (ts->has_hole && off + STREAM_MARGIN > ts->hole_lo &&
+			    off < ts->hole_hi) {
+				if (ts->dl_failed)
+					break;
+				if (ts->dl_restart_at < 0 && ts->downloaded > ts->hole_hi) {
+					ts->dl_restart_at = (long)(ts->hole_lo & ~(size_t)15);
+					nlog("SEEK: back into the gap, fetching it\n");
+				}
+				svcSleepThread(20000000LL);   // 20 ms
+				continue;
+			}
 		}
 		int got = stb_vorbis_get_samples_short_interleaved(v, 2, pcm, 4096 * 2);
 		if (got <= 0)

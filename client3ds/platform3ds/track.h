@@ -84,9 +84,17 @@ typedef struct {
 	char     dl_err[160];
 	/* A seek past the watermark writes an absolute byte offset here; the
 	 * download thread aborts the current request and resumes from there,
-	 * leaving a zero hole behind that the decoder never walks back into
-	 * without another seek. -1 = no reposition pending. */
+	 * leaving a zero hole behind (see has_hole). -1 = no reposition
+	 * pending. */
 	volatile long dl_restart_at;
+	/* The span a forward seek skipped, [hole_lo, hole_hi): still zero fill
+	 * while has_hole. The decoder must not walk into it, and the file is
+	 * not done (nor saved) until a fill pass has closed it. hole_lo moves
+	 * up as bytes land on it. Download thread writes, decoder reads. */
+	volatile bool   has_hole;
+	volatile size_t hole_lo, hole_hi;
+	bool            filling;     /* closing the hole after the tail landed:
+	                              * `downloaded` stays at the tail meanwhile */
 
 	sp_track   meta;
 	int        format;

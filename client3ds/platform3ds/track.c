@@ -218,8 +218,25 @@ static bool stream_cb(void *ctx, const char *data, size_t n)
 		ts->cb_fatal = true;
 		return false;
 	}
+	const size_t start = ts->write_pos;
 	ts->write_pos += n;
+	/* Bytes landing on the hole's low edge shrink it. */
+	if (ts->has_hole && start <= ts->hole_lo && ts->write_pos > ts->hole_lo) {
+		ts->hole_lo = ts->write_pos;
+		__sync_synchronize();
+		if (ts->hole_lo >= ts->hole_hi)
+			ts->has_hole = false;
+	}
 	__sync_synchronize();
+	if (ts->filling) {
+		if (!ts->has_hole) {
+			/* Closed: the tail beyond it is already here. */
+			ts->filling = false;
+			ts->write_pos = ts->len;
+			return false;
+		}
+		return true;   /* the tail is the watermark until then */
+	}
 	ts->downloaded = ts->write_pos;
 	return true;
 }
@@ -228,11 +245,8 @@ static bool stream_cb(void *ctx, const char *data, size_t n)
  * CTR mode is a keystream: the counter for byte N is the IV plus N/16 as a
  * 128-bit big-endian integer, so any offset is reachable without decrypting
  * what came before. */
-static void stream_rewind(track_stream *ts, size_t at)
+static void stream_keystream_at(track_stream *ts, size_t at)
 {
-	at &= ~(size_t)15;
-	if (ts->len && at >= ts->len)
-		at = ts->len & ~(size_t)15;
 	memcpy(ts->nonce, AUDIO_AESIV, sizeof(ts->nonce));
 	uint64_t add = at / 16;
 	for (int i = 15; i >= 0 && add; i--) {
@@ -242,8 +256,40 @@ static void stream_rewind(track_stream *ts, size_t at)
 	}
 	ts->nc_off = 0;
 	ts->write_pos = at;
+}
+
+/* A seek moving the download. Jumping forward leaves [write_pos, at) as
+ * zero fill: that is recorded as the hole (merged with any earlier one,
+ * conservatively) so the decoder cannot run into it and the file is not
+ * saved with it. Jumping into the hole leaves only [hole_lo, at) owing. */
+static void stream_rewind(track_stream *ts, size_t at)
+{
+	at &= ~(size_t)15;
+	if (ts->len && at >= ts->len)
+		at = ts->len & ~(size_t)15;
+	ts->filling = false;
+	if (at > ts->write_pos) {
+		size_t lo = ts->write_pos;
+		if (ts->has_hole && ts->hole_lo < lo)
+			lo = ts->hole_lo;
+		ts->hole_lo = lo;
+		ts->hole_hi = at;
+		__sync_synchronize();
+		ts->has_hole = true;
+	} else if (ts->has_hole && at > ts->hole_lo && at < ts->hole_hi) {
+		ts->hole_hi = at;
+	}
+	stream_keystream_at(ts, at);
 	__sync_synchronize();
 	ts->downloaded = at;
+}
+
+/* The tail reached the end with a hole still open: go back and fill it,
+ * leaving the published watermark at the tail for the decoder. */
+static void stream_fill_hole(track_stream *ts)
+{
+	ts->filling = true;
+	stream_keystream_at(ts, ts->hole_lo & ~(size_t)15);
 }
 
 int track_stream_download(track_stream *ts, volatile bool *stop)
@@ -284,8 +330,15 @@ int track_stream_download(track_stream *ts, volatile bool *stop)
 			http_get_url_stream(ts->storage.urls[i], ts->write_pos,
 			                    stream_cb, ts, &ts->total, &status,
 			                    ts->dl_err, sizeof(ts->dl_err));
-			if (ts->len && ts->write_pos >= ts->len)
-				ts->dl_done = true;
+			if (ts->len && ts->write_pos >= ts->len) {
+				if (!ts->has_hole) {
+					ts->dl_done = true;
+				} else if (!ts->filling) {
+					stream_fill_hole(ts);
+					i--;   /* same url, from the hole */
+					continue;
+				}
+			}
 			if (ts->dl_done || (stop && *stop))
 				break;
 		}
