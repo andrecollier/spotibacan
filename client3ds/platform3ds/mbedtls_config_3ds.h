@@ -31,6 +31,7 @@
 #define MBEDTLS_CIPHER_MODE_CBC          /* required by TLS 1.2 CBC suites */
 #define MBEDTLS_CIPHER_MODE_CTR          /* audio files are AES-128-CTR */
 #define MBEDTLS_GCM_C
+#define MBEDTLS_GCM_LARGE_TABLE          /* GHASH is the hot loop on CDN reads */
 #define MBEDTLS_CHACHA20_C
 #define MBEDTLS_CHACHAPOLY_C
 #define MBEDTLS_POLY1305_C

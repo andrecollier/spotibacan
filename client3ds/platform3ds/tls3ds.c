@@ -2,6 +2,7 @@
 #include "ca_bundle.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <poll.h>
@@ -57,6 +58,8 @@ struct tls_conn {
 	size_t                   bytes_in;
 };
 
+#define TLS_CONNECT_TIMEOUT_MS 8000
+
 static void (*s_logger)(const char *line);
 
 void tls_set_logger(void (*logger)(const char *line)) { s_logger = logger; }
@@ -70,8 +73,9 @@ static struct {
 	/* A small ring of session tickets, keyed by host. Spotify's client talks
 	 * to a handful of hosts in bursts; with a single slot the art fetches and
 	 * API calls kept evicting each other's ticket, forcing a full ECDHE on
-	 * every metadata chunk. Four slots cover the working set. */
-#define TLS_TICKET_SLOTS 4
+	 * every metadata chunk. Eight cover the working set: spclient, i.scdn.co,
+	 * two or three audio CDNs, api, login5, lrclib. */
+#define TLS_TICKET_SLOTS 8
 	mbedtls_ssl_session      ticket[TLS_TICKET_SLOTS];
 	char                     ticket_host[TLS_TICKET_SLOTS][128];
 	bool                     have_ticket[TLS_TICKET_SLOTS];
@@ -185,7 +189,10 @@ static int bio_send(void *ctx, const unsigned char *buf, size_t len)
 	tls_conn *c = ctx;
 	int rc = wait_io(c->fd, POLLOUT, c->timeout_ms);
 	if (rc)
-		return rc == MBEDTLS_ERR_SSL_TIMEOUT ? MBEDTLS_ERR_SSL_WANT_WRITE : rc;
+		/* Not WANT_WRITE: the write and handshake loops retry that
+		 * forever, and a dead link would spin there at one poll a turn. */
+		return rc == MBEDTLS_ERR_SSL_TIMEOUT ? MBEDTLS_ERR_SSL_TIMEOUT
+		                                     : MBEDTLS_ERR_NET_SEND_FAILED;
 	int n = send(c->fd, buf, len, 0);
 	if (n < 0)
 		return MBEDTLS_ERR_NET_SEND_FAILED;
@@ -208,6 +215,42 @@ static int bio_recv(void *ctx, unsigned char *buf, size_t len)
 	if (n < 0)
 		return MBEDTLS_ERR_NET_RECV_FAILED;
 	return n;
+}
+
+int tls_connect_timeout(int fd, const struct sockaddr *addr,
+                        unsigned addrlen, int timeout_ms)
+{
+	const int flags = fcntl(fd, F_GETFL, 0);
+	if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0)
+		return connect(fd, addr, addrlen);   /* the old blocking way */
+	int rc = connect(fd, addr, addrlen);
+	if (rc < 0 && (errno == EINPROGRESS || errno == EWOULDBLOCK ||
+	               errno == EALREADY)) {
+		struct pollfd p = { .fd = fd, .events = POLLOUT };
+		int n = poll(&p, 1, timeout_ms);
+		if (n == 0) {
+			errno = ETIMEDOUT;
+			rc = -1;
+		} else if (n < 0 || (p.revents & (POLLERR | POLLHUP))) {
+			int soerr = 0;
+			socklen_t sl = sizeof(soerr);
+			getsockopt(fd, SOL_SOCKET, SO_ERROR, &soerr, &sl);
+			errno = soerr ? soerr : ECONNREFUSED;
+			rc = -1;
+		} else {
+			int soerr = 0;
+			socklen_t sl = sizeof(soerr);
+			if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &soerr, &sl) == 0 &&
+			    soerr != 0) {
+				errno = soerr;
+				rc = -1;
+			} else {
+				rc = 0;
+			}
+		}
+	}
+	fcntl(fd, F_SETFL, flags);
+	return rc;
 }
 
 static int dial(const char *host, u16 port, int timeout_ms,
@@ -240,7 +283,8 @@ static int dial(const char *host, u16 port, int timeout_ms,
 	/* SOC's connect() has no timeout of its own; a wrong port therefore hangs
 	 * until the console's stack gives up. Spotify's access point on 443 does
 	 * exactly that from some networks, so this is not a hypothetical. */
-	if (connect(fd, res->ai_addr, res->ai_addrlen) < 0) {
+	if (tls_connect_timeout(fd, res->ai_addr, res->ai_addrlen,
+	                        TLS_CONNECT_TIMEOUT_MS) < 0) {
 		snprintf(err, errlen, "connect() to %s:%u failed, errno %d",
 		         host, port, errno);
 		close(fd);

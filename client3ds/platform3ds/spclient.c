@@ -767,17 +767,29 @@ int sp_search_tracks(const char *host, const char *token, const char *query,
                      char uris[][64], int max, char *err, size_t errlen)
 {
 	/* The context service takes the query inside the uri itself, with spaces
-	 * as '+'. Everything else still has to be percent-encoded, since this all
-	 * travels in a request line. */
+	 * as '+'. Everything else that is not plain ASCII alphanumerics is
+	 * percent-encoded: this travels in a request line, and "Snødronningen"
+	 * or "Bæ bæ" sent raw is UTF-8 the edge may refuse. A literal ':' or
+	 * '+' in the query must not read as uri structure either. */
+	static const char hexd[] = "0123456789ABCDEF";
 	char plus[192];
 	size_t n = 0;
-	for (const char *p = query; *p && n < sizeof(plus) - 1; p++)
-		plus[n++] = (*p == ' ') ? '+' : *p;
+	for (const unsigned char *p = (const unsigned char *)query;
+	     *p && n + 4 < sizeof(plus); p++) {
+		if (*p == ' ')
+			plus[n++] = '+';
+		else if ((*p >= '0' && *p <= '9') || (*p >= 'a' && *p <= 'z') ||
+		         (*p >= 'A' && *p <= 'Z') || *p == '-' || *p == '_' ||
+		         *p == '.' || *p == '~')
+			plus[n++] = (char)*p;
+		else {
+			plus[n++] = '%';
+			plus[n++] = hexd[*p >> 4];
+			plus[n++] = hexd[*p & 15];
+		}
+	}
 	plus[n] = '\0';
 
-	/* No percent-encoding here: '+' and ':' are structural in this uri, and a
-	 * query with anything stranger than letters, digits and spaces is not
-	 * something this console's keyboard is going to produce. */
 	char path[320];
 	snprintf(path, sizeof(path), "/context-resolve/v1/spotify:search:%s", plus);
 

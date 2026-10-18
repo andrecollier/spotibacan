@@ -60,4 +60,12 @@ void tls_close(tls_conn *c);
 /* Renders an mbedTLS error as text; in the shipping build, as a bare number. */
 void tls_strerror(int code, char *out, size_t outlen);
 
+/* connect() with a deadline. SOC's own connect has none and can sit for
+ * minutes on a dead link; this goes non-blocking, waits up to timeout_ms
+ * for the handshake, and leaves the socket blocking again. 0 or -1 with
+ * errno set (ETIMEDOUT when the deadline passed). */
+struct sockaddr;
+int  tls_connect_timeout(int fd, const struct sockaddr *addr,
+                         unsigned addrlen, int timeout_ms);
+
 #endif
