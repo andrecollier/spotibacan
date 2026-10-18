@@ -327,6 +327,7 @@ int track_stream_download(track_stream *ts, volatile bool *stop)
 			if ((stop && *stop) || ts->cb_fatal || ts->dl_restart_at >= 0)
 				break;
 			int status = 0;
+			ts->dl_err[0] = '\0';   /* this try's reason, not an old one */
 			http_get_url_stream(ts->storage.urls[i], ts->write_pos,
 			                    stream_cb, ts, &ts->total, &status,
 			                    ts->dl_err, sizeof(ts->dl_err));

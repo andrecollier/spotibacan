@@ -126,6 +126,7 @@ typedef struct dl_job {
 	char          uri[64];   /* the requested track, for the queue to
 	                          * re-ask for it */
 	volatile bool stop;
+	unsigned char tries;     /* the queue entry's failed tries so far */
 	volatile bool save;      /* write the .ogg (+ cover) when complete */
 	volatile bool saved;     /* CAS guard: exactly one save per job */
 	/* Ownership handoff between the player and the download thread:
@@ -166,6 +167,13 @@ static int dlq_count;                    /* guarded by g.lock */
 #define DLQ_PAR 2
 static struct dl_job *dlq_jobs[DLQ_PAR];
 static char dlq_active_title[DLQ_PAR][128];
+/* The entry each slot is working on. It stays in dlqueue.txt until its
+ * file is saved: quitting mid-song used to drop it from the card, so the
+ * next start never tried it again. */
+static dlq_entry dlq_live[DLQ_PAR];
+static bool dlq_live_on[DLQ_PAR];
+/* A worker changed the queue; the player thread writes it out. */
+static volatile bool dlq_save_pending;
 
 static int dlq_active(void)   /* g.lock held */
 {
@@ -192,6 +200,7 @@ void native_set_progress_cb(void (*cb)(native_row *, int, int))
 void native_fetch_cancel(void) { fetch_cancel = true; }
 
 static void save_download(const track_stream *ts);
+static bool dlq_retry(const dlq_entry *e, bool spend, u64 hold_ms);
 static void dlist_write(const char *title, const native_row *rows, int n);
 static void download_path(const char *artist, const char *title,
                           char *out, size_t outlen);
@@ -338,8 +347,13 @@ static void l5_publish(void)
 }
 
 /* Renews the library token ahead of its expiry (or right away when force is
- * set, after a 401). Player thread only. Without this, every metadata and
- * browse call started failing with HTTP 401 about an hour in. */
+ * set, after a 401). Without this, every metadata and browse call started
+ * failing with HTTP 401 about an hour in. Any thread may call it: the
+ * player only got to it when idle, and a song paused under a cast is never
+ * idle, so casting and the lists went 401 an hour in. The lock keeps it to
+ * one login5 at a time; whoever comes second finds the fresh token. */
+static LightLock l5_lock;
+
 static void l5_refresh(bool force)
 {
 	if (!g.l5_cred_len || g.offline)
@@ -348,18 +362,23 @@ static void l5_refresh(bool force)
 	time_t now = time(NULL);
 	if (!force && (g.l5.expires_at == 0 || now < g.l5.expires_at - 300))
 		return;
-	if (now < next_try)
+	LightLock_Lock(&l5_lock);
+	if (now < next_try) {
+		LightLock_Unlock(&l5_lock);
 		return;
+	}
 	next_try = now + 30;   /* a failing login5 is not retried in a tight loop */
 	login5_token fresh;
 	char err[192];
 	if (login5_from_credentials(g.username, g.l5_cred, g.l5_cred_len,
 	                            g.device_id, &fresh, err, sizeof(err)) != 0) {
+		LightLock_Unlock(&l5_lock);
 		nlog("L5: refresh failed: %s\n", err);
 		return;
 	}
 	g.l5 = fresh;
 	l5_publish();
+	LightLock_Unlock(&l5_lock);
 	nlog("L5: token refreshed\n");
 }
 
@@ -460,6 +479,10 @@ static void dlq_save(void)
 	if (!f)
 		return;
 	LightLock_Lock(&g.lock);
+	for (int i = 0; i < DLQ_PAR; i++)
+		if (dlq_live_on[i])
+			fprintf(f, "%s\t%s\t%s\n", dlq_live[i].uri,
+			        dlq_live[i].artist, dlq_live[i].title);
 	for (int i = 0; i < dlq_count; i++)
 		fprintf(f, "%s\t%s\t%s\n", dlq[i].uri, dlq[i].artist, dlq[i].title);
 	LightLock_Unlock(&g.lock);
@@ -967,15 +990,38 @@ static void download_thread(void *arg)
 		job->saving = false;
 	}
 	if (job->from_queue) {
+		const bool ok = job->ts.dl_done && !job->ts.dl_failed;
+		dlq_entry e;
+		bool have = false;
 		LightLock_Lock(&g.lock);
 		for (int i = 0; i < DLQ_PAR; i++)
-			if (dlq_jobs[i] == job)
+			if (dlq_jobs[i] == job) {
 				dlq_jobs[i] = NULL;
-		if (job->ts.dl_done && !job->ts.dl_failed)
+				/* Quitting keeps it on the card for the next start. */
+				if (!g.quit) {
+					e = dlq_live[i];
+					have = dlq_live_on[i];
+					dlq_live_on[i] = false;
+				}
+			}
+		if (ok)
 			dlq_done++;
-		else
-			dlq_failed++;
 		LightLock_Unlock(&g.lock);
+		/* A song that broke off (a lost link, a CDN error) goes to the
+		 * back of the line for another try, like a start that failed;
+		 * it used to just count as failed. */
+		if (!ok && !g.quit) {
+			e.tries = job->tries;
+			if (!have || !dlq_retry(&e, true, 20000)) {
+				LightLock_Lock(&g.lock);
+				dlq_failed++;
+				LightLock_Unlock(&g.lock);
+			} else {
+				nlog("DLQ: %s broke off, back in the queue\n", e.title);
+			}
+		}
+		if (!g.quit)
+			dlq_save_pending = true;
 	}
 	__sync_synchronize();
 	if (__sync_bool_compare_and_swap(&job->handoff, 0, 2))
@@ -1158,6 +1204,8 @@ static void dlq_pump(void)
 		e = dlq[0];
 		memmove(&dlq[0], &dlq[1], (size_t)(dlq_count - 1) * sizeof(dlq[0]));
 		dlq_count--;
+		dlq_live[slot] = e;
+		dlq_live_on[slot] = true;
 	} else if (dlq_active() == 0 && dlq_count == 0) {
 		dlq_done = dlq_failed = 0;   /* ran dry: the next batch counts anew */
 	}
@@ -1173,7 +1221,9 @@ static void dlq_pump(void)
 	if (stat(path, &st) == 0 && st.st_size > 0) {
 		LightLock_Lock(&g.lock);
 		dlq_done++;
+		dlq_live_on[slot] = false;
 		LightLock_Unlock(&g.lock);
+		dlq_save();
 		return;
 	}
 
@@ -1181,6 +1231,7 @@ static void dlq_pump(void)
 	if (!job) {
 		nlog("DLQ: no memory for %s\n", e.title);
 		mem_note("no job");
+		dlq_live_on[slot] = false;
 		dlq_retry(&e, false, 60000);
 		dlq_save();
 		return;
@@ -1196,6 +1247,7 @@ static void dlq_pump(void)
 		mem_note("no thread");
 		mem_largest();
 		free(job);
+		dlq_live_on[slot] = false;
 		dlq_retry(&e, false, 60000);
 		dlq_save();
 		return;
@@ -1219,6 +1271,7 @@ static void dlq_pump(void)
 	if (rc != 0) {
 		nlog("DLQ: could not start %s (%s)\n", e.title, err);
 		dl_release(worker);
+		dlq_live_on[slot] = false;
 		track_stream_free(&job->ts);
 		free(job);
 		const bool refused = strstr(err, "0x0002") != NULL;
@@ -1242,6 +1295,7 @@ static void dlq_pump(void)
 	dlq_refusals = 0;
 	job->save = true;
 	job->from_queue = true;
+	job->tries = e.tries;
 	LightLock_Lock(&g.lock);
 	job->next = g.jobs;
 	g.jobs = job;
@@ -1577,6 +1631,10 @@ static void player_thread(void *arg)
 	(void)arg;
 	while (!g.quit) {
 		log_tick(false);
+		if (dlq_save_pending) {
+			dlq_save_pending = false;
+			dlq_save();
+		}
 		if (g.want_new) {
 			char uri[192];
 			LightLock_Lock(&g.lock);
@@ -1925,6 +1983,7 @@ int native_init(const native_sink *sink, void (*progress)(const char *step),
 
 	LightLock_Init(&g.lock);
 	LightLock_Init(&ids_lock);
+	LightLock_Init(&l5_lock);
 	g.want_seek_frame = -1;
 	g.state = NATIVE_IDLE;
 	g.ready = true;
@@ -2049,8 +2108,14 @@ static bool cast_do_wake(void)
 	char err[160] = "";
 	float vol = -1.0f;
 	const u64 t0 = osGetTime();
-	if (cast_wake(cast.ip, cast.name, g.sp_host, l5_token(), g.access_token,
-	              cast.dev, &vol, err, sizeof(err)) != 0) {
+	int rc = cast_wake(cast.ip, cast.name, g.sp_host, l5_token(),
+	                   g.access_token, cast.dev, &vol, err, sizeof(err));
+	if (rc != 0 && strstr(err, "401")) {
+		l5_refresh(true);
+		rc = cast_wake(cast.ip, cast.name, g.sp_host, l5_token(),
+		               g.access_token, cast.dev, &vol, err, sizeof(err));
+	}
+	if (rc != 0) {
 		nlog("CAST: waking %s failed: %s\n", cast.name, err);
 		snprintf(cast.error, sizeof(cast.error), "%s", err);
 		cast.awake = false;
@@ -2139,6 +2204,10 @@ static int cast_send_cmd(int kind, const char *a, const char *b, long n)
 		if (st == 200)
 			return 0;
 		nlog("CAST: %s: %s\n", kind == CR_PLAY ? "play" : a, err);
+		if (attempt == 0 && st == 401) {
+			l5_refresh(true);   /* our token, not the speaker */
+			continue;
+		}
 		if (attempt == 0 && !cast_do_wake())
 			break;
 	}
@@ -2155,6 +2224,10 @@ static void cast_thread(void *arg)
 	cast_use_session(sess);
 	while (!g.quit) {
 		LightEvent_WaitTimeout(&cast.wake, 500000000LL);   // 0.5 s
+		/* The speaker is driven with the console's token: keep it fresh
+		 * here, the player may sit paused for hours under a cast. */
+		if (cast.state != NATIVE_CAST_OFF)
+			l5_refresh(false);
 		if (cast.relink) {
 			cast.relink = false;
 			cast_use_session(NULL);
@@ -2255,7 +2328,9 @@ static void cast_post(int kind, const char *a, const char *b, long n)
 		LightEvent_Init(&cast.wake, RESET_ONESHOT);
 		cast.volume = 0.5f;
 		/* The TLS handshake runs on this stack, like the downloads'. */
-		cast.th = native_spawn_worker(cast_thread, NULL, 96 * 1024, 0x31);
+		/* Above the download workers: a pause should not queue behind
+		 * a song's decryption. */
+		cast.th = native_spawn_worker(cast_thread, NULL, 96 * 1024, 0x30);
 		if (!cast.th) {
 			LightLock_Unlock(&g.lock);
 			snprintf(cast.error, sizeof(cast.error), "no thread for casting");
@@ -2831,8 +2906,27 @@ static int search_add_artists(native_row *rows, int n, int max)
 	return n + k;
 }
 
+static int fetch_view(native_view view, const char *arg, native_row *rows,
+                      int max, char *err, size_t errlen);
+
+/* A list: with a token renewed ahead of time, and once more after a 401
+ * (a long sleep can outlast the margin). */
 int native_fetch(native_view view, const char *arg, native_row *rows, int max,
                  char *err, size_t errlen)
+{
+	if (view != NATIVE_DOWNLOADS)
+		l5_refresh(false);
+	int n = fetch_view(view, arg, rows, max, err, errlen);
+	if (n < 0 && view != NATIVE_DOWNLOADS && strstr(err, "HTTP 401")) {
+		nlog("FETCH: 401, renewing the token\n");
+		l5_refresh(true);
+		n = fetch_view(view, arg, rows, max, err, errlen);
+	}
+	return n;
+}
+
+static int fetch_view(native_view view, const char *arg, native_row *rows,
+                      int max, char *err, size_t errlen)
 {
 	if (max > NATIVE_ROWS)
 		max = NATIVE_ROWS;

@@ -444,8 +444,10 @@ int http_get_url_stream(const char *url, size_t offset,
 	/* Body: first the piece the header reads overshot, then straight reads. */
 	const char *body = sep + 4;
 	size_t blen = have - (size_t)(body - hbuf);
+	/* The callback may have said why it stopped; keep that. */
 	if (blen && !cb(ctx, body, blen)) {
-		snprintf(err, errlen, "cancelled");
+		if (!err[0])
+			snprintf(err, errlen, "cancelled");
 		tls_close(c);
 		return -1;
 	}
@@ -472,7 +474,8 @@ int http_get_url_stream(const char *url, size_t offset,
 			break;
 		}
 		if (!cb(ctx, piece, (size_t)r)) {
-			snprintf(err, errlen, "cancelled");
+			if (!err[0])
+				snprintf(err, errlen, "cancelled");
 			rc = -1;
 			break;
 		}

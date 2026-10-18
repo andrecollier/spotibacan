@@ -2740,10 +2740,13 @@ int main(int argc, char **argv)
 	// need real headroom (chunked metadata names a 500-song list as a
 	// dozen sequential handshakes); the audio thread only copies bytes.
 	/* Lists and covers are network work: off the app core with the
-	 * downloads, so drawing and decoding keep it to themselves. */
-	Thread lister = native_spawn_worker(native_library_thread, NULL, 96 * 1024, 0x3F);
+	 * downloads, so drawing and decoding keep it to themselves. They rank
+	 * above the download workers (0x31), though: someone is waiting on a
+	 * list, nobody on the queue, and at the bottom a list starved behind
+	 * a queued song (a search named 20 songs in 6.4 s, 0.3 s idle). */
+	Thread lister = native_spawn_worker(native_library_thread, NULL, 96 * 1024, 0x30);
 	Thread snd = threadCreate(audio_thread, NULL, 16 * 1024, 0x18, -2, false);
-	Thread art = native_spawn_worker(art_thread, NULL, 96 * 1024, 0x32);
+	Thread art = native_spawn_worker(art_thread, NULL, 96 * 1024, 0x30);
 	buffering = false;
 	lib.open = true;
 	lib_reload = true;
