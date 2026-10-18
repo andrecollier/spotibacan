@@ -1930,10 +1930,7 @@ static void dlist_write(const char *title, const native_row *rows, int n)
 	dlist_dir(dir, sizeof(dir));
 	mkdir(dir, 0777);
 	char safe[64];
-	int k = 0;
-	for (const char *p = title && title[0] ? title : "Playlist"; *p && k < 60; p++)
-		if (!strchr("/\\:\"?*<>|", *p))
-			safe[k++] = *p;
+	int k = name_part(safe, 0, title && title[0] ? title : "Playlist", 60);
 	safe[k] = '\0';
 	char path[440];
 	snprintf(path, sizeof(path), "%s/%s.txt", dir, safe);
@@ -1949,6 +1946,16 @@ static void dlist_write(const char *title, const native_row *rows, int n)
 		fprintf(f, "%s\n", name);
 	}
 	fclose(f);
+}
+
+/* 64-bit FNV-1a of a file name: the top of Downloads remembers which songs
+ * a saved list already shows, without keeping every name around. */
+static uint64_t name_hash(const char *s)
+{
+	uint64_t h = 1469598103934665603ULL;
+	for (; *s; s++)
+		h = (h ^ (unsigned char)*s) * 1099511628211ULL;
+	return h;
 }
 
 static int fetch_downloads(const char *arg, native_row *rows, int max)
@@ -1980,7 +1987,12 @@ static int fetch_downloads(const char *arg, native_row *rows, int max)
 		return n;
 	}
 
-	/* The top: one folder per saved playlist, then every song. */
+	/* The top: one folder per saved playlist or album, then the songs saved
+	 * on their own. A song that belongs to a saved list shows inside that
+	 * list only (the file itself stays in music/, once, however many lists
+	 * hold it), so a downloaded album does not spill over the top. */
+	uint64_t *in_list = NULL;
+	int in_n = 0, in_cap = 0;
 	DIR *ld = opendir(ldir);
 	if (ld) {
 		struct dirent *e;
@@ -2003,6 +2015,17 @@ static int fetch_downloads(const char *arg, native_row *rows, int max)
 					if (!have)
 						snprintf(first, sizeof(first), "%s", line);
 					have++;
+					if (in_n == in_cap) {
+						int cap = in_cap ? in_cap * 2 : 256;
+						uint64_t *grown = realloc(in_list,
+						                          (size_t)cap * sizeof(*grown));
+						if (grown) {
+							in_list = grown;
+							in_cap = cap;
+						}
+					}
+					if (in_n < in_cap)
+						in_list[in_n++] = name_hash(line);
 				}
 			}
 			fclose(f);
@@ -2022,17 +2045,29 @@ static int fetch_downloads(const char *arg, native_row *rows, int max)
 	}
 
 	DIR *d = opendir(dir);
-	if (!d)
+	if (!d) {
+		free(in_list);
 		return n;   /* nothing saved yet: an empty list, not an error */
+	}
 	struct dirent *e;
+	int hidden = 0;
 	while (n < max && (e = readdir(d))) {
 		size_t len = strlen(e->d_name);
 		if (len < 5 || strcasecmp(e->d_name + len - 4, ".ogg") != 0)
 			continue;
+		const uint64_t h = name_hash(e->d_name);
+		bool listed = false;
+		for (int i = 0; i < in_n && !listed; i++)
+			listed = in_list[i] == h;
+		if (listed) {
+			hidden++;
+			continue;
+		}
 		download_row(dir, e->d_name, &rows[n++]);
 	}
 	closedir(d);
-	nlog("FETCH downloads -> %d\n", n);
+	free(in_list);
+	nlog("FETCH downloads -> %d (%d inside saved lists)\n", n, hidden);
 	return n;
 }
 
