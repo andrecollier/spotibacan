@@ -109,6 +109,7 @@ typedef struct dl_job {
 	 * (player joins and frees). The CAS makes the handoff race-free. */
 	volatile int  handoff;
 	bool          from_queue;   /* started by the download queue */
+	int           core;         /* queue jobs: the core it was put on */
 	volatile bool saving;       /* writing the file and its cover to SD */
 	struct dl_job *next;
 } dl_job;
@@ -132,11 +133,23 @@ static u64 play_ended_at;
 
 static dlq_entry dlq[NATIVE_DLQ_MAX];
 static int dlq_count;                    /* guarded by g.lock */
-static char dlq_active_title[128];
-/* The queue's one in-flight download (guarded by g.lock). The job is
- * detached the moment it starts, so its thread clears this before it frees
- * the job; anyone holding the lock may read through it. */
-static struct dl_job *dlq_job;
+/* The queue's in-flight downloads (guarded by g.lock), two at once: one on
+ * the system core, one at low priority on the app core. A single download
+ * left the link idle through every save, cover fetch and next start, and
+ * ran on half a shared core. Each job is detached the moment it starts, so
+ * its thread clears its slot before it frees the job; anyone holding the
+ * lock may read through them. */
+#define DLQ_PAR 2
+static struct dl_job *dlq_jobs[DLQ_PAR];
+static char dlq_active_title[DLQ_PAR][128];
+
+static int dlq_active(void)   /* g.lock held */
+{
+	int n = 0;
+	for (int i = 0; i < DLQ_PAR; i++)
+		n += dlq_jobs[i] != NULL;
+	return n;
+}
 /* Progress for the "12 / 87" readout, reset whenever the queue runs dry. */
 static int dlq_done, dlq_failed;
 
@@ -328,16 +341,23 @@ bool native_dl_queue_entry(int i, char *title, size_t titlelen)
 
 int native_dl_active(char *title_out, size_t titlelen)
 {
+	/* With two running, the one further behind is the one worth showing. */
 	int pct = -1;
 	LightLock_Lock(&g.lock);
-	if (dlq_job) {
-		const track_stream *ts = &dlq_job->ts;
-		pct = ts->len ? (int)((uint64_t)ts->downloaded * 100 / ts->len) : 0;
-		if (pct > 100)
-			pct = 100;
-		if (dlq_job->saving)
-			pct = NATIVE_DL_SAVING;
-		snprintf(title_out, titlelen, "%s", dlq_active_title);
+	for (int i = 0; i < DLQ_PAR; i++) {
+		const struct dl_job *j = dlq_jobs[i];
+		if (!j)
+			continue;
+		const track_stream *ts = &j->ts;
+		int p = ts->len ? (int)((uint64_t)ts->downloaded * 100 / ts->len) : 0;
+		if (p > 100)
+			p = 100;
+		if (j->saving)
+			p = NATIVE_DL_SAVING;
+		if (pct < 0 || p < pct) {
+			pct = p;
+			snprintf(title_out, titlelen, "%s", dlq_active_title[i]);
+		}
 	}
 	LightLock_Unlock(&g.lock);
 	return pct;
@@ -347,7 +367,7 @@ void native_dl_progress(int *done, int *total)
 {
 	LightLock_Lock(&g.lock);
 	*done = dlq_done + dlq_failed;
-	*total = *done + dlq_count + (dlq_job ? 1 : 0);
+	*total = *done + dlq_count + dlq_active();
 	LightLock_Unlock(&g.lock);
 }
 
@@ -792,9 +812,11 @@ static void download_thread(void *arg)
 	{
 		const u64 ms = osGetTime() - t0;
 		const unsigned kb = (unsigned)(job->ts.downloaded / 1024);
-		nlog("DL: %s %u KB in %llu ms (%u KB/s)%s%s\n",
+		nlog("DL: %s %u KB in %llu ms (%u KB/s)%s%s%s\n",
 		     job->ts.dl_done ? "done" : (job->stop ? "stopped" : "FAILED"),
 		     kb, (unsigned long long)ms, ms ? (unsigned)(kb * 1000ull / ms) : 0,
+		     job->from_queue ? (job->core ? " [queue, sys core]"
+		                                  : " [queue, app core]") : "",
 		     job->ts.dl_err[0] ? ": " : "", job->ts.dl_err);
 	}
 	/* Saving on the way out would hold HOME hostage behind an SD write
@@ -808,8 +830,9 @@ static void download_thread(void *arg)
 	}
 	if (job->from_queue) {
 		LightLock_Lock(&g.lock);
-		if (dlq_job == job)
-			dlq_job = NULL;
+		for (int i = 0; i < DLQ_PAR; i++)
+			if (dlq_jobs[i] == job)
+				dlq_jobs[i] = NULL;
 		if (job->ts.dl_done && !job->ts.dl_failed)
 			dlq_done++;
 		else
@@ -893,17 +916,25 @@ static void dlq_pump(void)
 	dlq_entry e;
 	bool take = false;
 	LightLock_Lock(&g.lock);
-	if (!dlq_job && dlq_count > 0) {
+	int slot = -1;
+	for (int i = 0; i < DLQ_PAR && slot < 0; i++)
+		if (!dlq_jobs[i])
+			slot = i;
+	/* The second slot only for 160 kbps files: two 320 ones next to a
+	 * stream could pass what this console's RAM holds. */
+	if (slot > 0 && sp_high_quality())
+		slot = -1;
+	if (slot >= 0 && dlq_count > 0) {
 		take = true;
 		for (dl_job *p = g.jobs; p; p = p->next)
-			if (!p->ts.dl_done && !p->ts.dl_failed)
-				take = false;   /* the link is busy: let it finish */
+			if (!p->from_queue && !p->ts.dl_done && !p->ts.dl_failed)
+				take = false;   /* the song playing is still loading */
 	}
 	if (take) {
 		e = dlq[0];
 		memmove(&dlq[0], &dlq[1], (size_t)(dlq_count - 1) * sizeof(dlq[0]));
 		dlq_count--;
-	} else if (!dlq_job && dlq_count == 0) {
+	} else if (dlq_active() == 0 && dlq_count == 0) {
 		dlq_done = dlq_failed = 0;   /* ran dry: the next batch counts anew */
 	}
 	LightLock_Unlock(&g.lock);
@@ -960,11 +991,17 @@ static void dlq_pump(void)
 	LightLock_Lock(&g.lock);
 	job->next = g.jobs;
 	g.jobs = job;
-	dlq_job = job;
-	snprintf(dlq_active_title, sizeof(dlq_active_title), "%s - %s",
-	         e.artist, e.title);
+	dlq_jobs[slot] = job;
+	snprintf(dlq_active_title[slot], sizeof(dlq_active_title[slot]),
+	         "%s - %s", e.artist, e.title);
 	LightLock_Unlock(&g.lock);
-	Thread dl = native_spawn_worker(download_thread, job, 96 * 1024, 0x31);
+	/* Slot 0 on the system core like every network worker; slot 1 on the
+	 * app core below the UI and the player (0x30), which idle most of a
+	 * frame, so it soaks up what they leave. */
+	job->core = slot == 0 ? 1 : 0;
+	Thread dl = slot == 0
+	    ? native_spawn_worker(download_thread, job, 96 * 1024, 0x31)
+	    : threadCreate(download_thread, job, 96 * 1024, 0x38, 0, false);
 	if (!dl) {
 		nlog("DLQ: no thread for %s\n", e.title);
 		LightLock_Lock(&g.lock);
@@ -973,7 +1010,7 @@ static void dlq_pump(void)
 			pp = &(*pp)->next;
 		if (*pp)
 			*pp = job->next;
-		dlq_job = NULL;
+		dlq_jobs[slot] = NULL;
 		LightLock_Unlock(&g.lock);
 		track_stream_free(&job->ts);
 		free(job);
@@ -986,7 +1023,7 @@ static void dlq_pump(void)
 		return;
 	}
 	job->th = dl;
-	nlog("DLQ: downloading %s\n", e.title);
+	nlog("DLQ: downloading %s (slot %d)\n", e.title, slot);
 	job_detach(job);   /* the thread frees the job when it is done */
 }
 
@@ -1075,7 +1112,7 @@ static void play_stream(track_stream *ts)
 		/* With this track's file complete and seconds of audio queued in
 		 * the ring, the link is idle: let the download queue use it. The
 		 * start blocks a few seconds, which the full ring covers. */
-		if (ts->dl_done && dlq_count > 0 && !dlq_job &&
+		if (ts->dl_done && dlq_count > 0 && dlq_active() < DLQ_PAR &&
 		    g.sink.free_space() < NATIVE_PUMP_FREE_MAX &&
 		    g.total_frames > g.frames_out + NATIVE_PUMP_MIN_LEFT_S * NATIVE_RATE)
 			dlq_pump();

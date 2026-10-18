@@ -449,26 +449,37 @@ int http_get_url_stream(const char *url, size_t offset,
 		tls_close(c);
 		return -1;
 	}
-	char piece[RECV_CHUNK];
+	/* A whole TLS record per read on the long CDN body: a quarter of the
+	 * calls (and callbacks) of RECV_CHUNK pieces. Heap, not stack: this
+	 * runs on worker threads with modest stacks. */
+	enum { STREAM_PIECE = 16 * 1024 };
+	char *piece = malloc(STREAM_PIECE);
+	if (!piece) {
+		snprintf(err, errlen, "out of memory");
+		tls_close(c);
+		return -1;
+	}
+	int rc = 0;
 	for (;;) {
-		int r = tls_read(c, piece, sizeof(piece));
+		int r = tls_read(c, piece, STREAM_PIECE);
 		if (r == 0)
 			break;
 		if (r < 0) {
 			char reason[128];
 			tls_strerror(r, reason, sizeof(reason));
 			snprintf(err, errlen, "read: %s", reason);
-			tls_close(c);
-			return -1;
+			rc = -1;
+			break;
 		}
 		if (!cb(ctx, piece, (size_t)r)) {
 			snprintf(err, errlen, "cancelled");
-			tls_close(c);
-			return -1;
+			rc = -1;
+			break;
 		}
 	}
+	free(piece);
 	tls_close(c);
-	return 0;
+	return rc;
 }
 
 /* ---------------- keep-alive sessions ---------------- */
