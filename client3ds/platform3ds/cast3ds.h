@@ -27,7 +27,8 @@ typedef struct {
 
 /* Asks the local network for Google Cast speakers for `wait_ms` and fills
  * `out` with up to `max` of them (groups left out). Returns how many, or
- * -1 with `err` set. Blocks for the whole wait. */
+ * -1; `err` says what failed, or on success what was sent. Blocks for the
+ * whole wait. */
 int cast_discover(cast_found *out, int max, int wait_ms, char *err,
                   size_t errlen);
 

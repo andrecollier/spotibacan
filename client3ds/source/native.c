@@ -2259,8 +2259,8 @@ static void cast_find(void)
 	for (int i = 0; i < n; i++)
 		nlog("CAST: found %s (%s) at %s\n", hits[i].name, hits[i].model,
 		     hits[i].ip);
-	nlog("CAST: %d speakers answered in %llu ms\n", n,
-	     (unsigned long long)(osGetTime() - t0));
+	nlog("CAST: %d speakers answered in %llu ms (%s)\n", n,
+	     (unsigned long long)(osGetTime() - t0), err);
 	if (n > 0)
 		cast_save_list();
 	cast.found = n;

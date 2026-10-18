@@ -9,6 +9,7 @@
 
 #include <3ds.h>
 #include <arpa/inet.h>
+#include <errno.h>
 #include <netinet/in.h>
 #include <poll.h>
 #include <stdio.h>
@@ -32,7 +33,12 @@
  * that makes it a "legacy unicast" query (RFC 6762 6.7), which responders
  * answer straight back to that port, so no multicast membership is needed.
  * Each answer carries the friendly name in TXT fn= and the model in md=;
- * the address is simply where the answer came from. */
+ * the address is simply where the answer came from.
+ *
+ * The question goes out three ways, since the console found nothing with
+ * multicast alone: to the mDNS group, to the subnet's broadcast address
+ * (on a test network every speaker answered that), and to each host of
+ * the /24 in turn (some answer only that). */
 
 /* Skips a DNS name at `at` (labels or a compression pointer); the offset
  * after it, or -1 when it runs off the packet. */
@@ -113,13 +119,21 @@ int cast_discover(cast_found *out, int max, int wait_ms, char *err,
 	struct sockaddr_in me;
 	memset(&me, 0, sizeof(me));
 	me.sin_family = AF_INET;
-	me.sin_port = 0;              /* any port but 5353: legacy unicast */
+	/* A port of our own choosing, not 0 (whether the console's sockets
+	 * pick one for 0 is not something to bet the replies on), and not
+	 * 5353: that is what makes the speakers answer us directly. */
 	me.sin_addr.s_addr = INADDR_ANY;
-	if (bind(s, (struct sockaddr *)&me, sizeof(me)) != 0) {
-		close(s);
-		snprintf(err, errlen, "bind failed");
-		return -1;
+	int bound = -1, bind_errno = 0;
+	for (int k = 0; k < 4 && bound != 0; k++) {
+		me.sin_port = htons(49152 + (uint16_t)((osGetTime() + k * 977) % 16000));
+		bound = bind(s, (struct sockaddr *)&me, sizeof(me));
+		if (bound != 0)
+			bind_errno = errno;
 	}
+	/* Unbound, a send still picks a port on most stacks: try that rather
+	 * than give up, and say so in the log. */
+	if (bound != 0)
+		me.sin_port = 0;
 
 	static const uint8_t query[] = {
 		0x12, 0x34, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0,   /* one question */
@@ -131,7 +145,14 @@ int cast_discover(cast_found *out, int max, int wait_ms, char *err,
 	memset(&to, 0, sizeof(to));
 	to.sin_family = AF_INET;
 	to.sin_port = htons(5353);
-	to.sin_addr.s_addr = inet_addr("224.0.0.251");
+
+	/* Our address and subnet, for the broadcast and the sweep. */
+	struct in_addr ip = { 0 }, mask = { 0 }, bcast = { 0 };
+	if (SOCU_GetIPInfo(&ip, &mask, &bcast) != 0 || !ip.s_addr)
+		ip.s_addr = (in_addr_t)gethostid();
+	if (!bcast.s_addr)
+		bcast.s_addr = ip.s_addr | htonl(0xFF);
+	int sent_mc = 0, sent_bc = 0, sent_uc = 0, replies = 0;
 
 	int n = 0;
 	static uint8_t buf[2048];
@@ -143,8 +164,26 @@ int cast_discover(cast_found *out, int max, int wait_ms, char *err,
 			break;
 		/* Asked twice, a beat apart: a dropped packet is likely on wifi. */
 		if (asked < 2 && now >= next_ask) {
-			sendto(s, query, sizeof(query), 0, (struct sockaddr *)&to,
-			       sizeof(to));
+			to.sin_addr.s_addr = inet_addr("224.0.0.251");
+			sent_mc += sendto(s, query, sizeof(query), 0,
+			                  (struct sockaddr *)&to, sizeof(to)) > 0;
+			to.sin_addr.s_addr = bcast.s_addr;
+			sent_bc += sendto(s, query, sizeof(query), 0,
+			                  (struct sockaddr *)&to, sizeof(to)) > 0;
+			to.sin_addr.s_addr = INADDR_BROADCAST;
+			sent_bc += sendto(s, query, sizeof(query), 0,
+			                  (struct sockaddr *)&to, sizeof(to)) > 0;
+			if (asked == 0 && ip.s_addr) {
+				const uint32_t net = ntohl(ip.s_addr) & 0xFFFFFF00u;
+				for (uint32_t h = 1; h < 255; h++) {
+					if ((net | h) == ntohl(ip.s_addr))
+						continue;
+					to.sin_addr.s_addr = htonl(net | h);
+					sent_uc += sendto(s, query, sizeof(query), 0,
+					                  (struct sockaddr *)&to,
+					                  sizeof(to)) > 0;
+				}
+			}
 			asked++;
 			next_ask = now + 700;
 		}
@@ -158,6 +197,7 @@ int cast_discover(cast_found *out, int max, int wait_ms, char *err,
 		                         (struct sockaddr *)&from, &fl);
 		if (got <= 0)
 			continue;
+		replies++;
 		char fn[64] = "", md[64] = "";
 		int port = 8009;
 		dns_parse(buf, got, fn, sizeof(fn), md, sizeof(md), &port);
@@ -177,6 +217,16 @@ int cast_discover(cast_found *out, int max, int wait_ms, char *err,
 		n++;
 	}
 	close(s);
+	/* What went out, for the log: tells a blocked send from silence. */
+	char me_s[16] = "?";
+	inet_ntop(AF_INET, &ip, me_s, sizeof(me_s));
+	snprintf(err, errlen, "from %s:%u%s: multicast %d, broadcast %d, hosts "
+	         "%d sent, %d replies", me_s, (unsigned)ntohs(me.sin_port),
+	         bound != 0 ? " (not bound)" : "",
+	         sent_mc, sent_bc, sent_uc, replies);
+	if (bound != 0)
+		snprintf(err + strlen(err), errlen - strlen(err), ", bind errno %d",
+		         bind_errno);
 	return n;
 }
 
