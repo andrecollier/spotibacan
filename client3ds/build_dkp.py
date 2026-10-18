@@ -28,7 +28,7 @@ AR = DKP / "devkitARM/bin/arm-none-eabi-gcc-ar"
 TOOL_3DSX = DKP / "tools/bin/3dsxtool"
 MAKEROM = Path(os.environ.get("MAKEROM", ROOT.parent / "tools/makerom/makerom"))
 
-VERSION = (1, 8, 1)   # shown in Settings and stamped into the CIA
+VERSION = (1, 8, 2)   # shown in Settings and stamped into the CIA
 
 ARCH = ["-march=armv6k", "-mtune=mpcore", "-mfloat-abi=hard", "-mtp=soft"]
 
