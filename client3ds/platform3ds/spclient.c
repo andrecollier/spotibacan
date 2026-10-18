@@ -209,6 +209,7 @@ int sp_track_metadata_s(http_session *sess, const char *host, const char *token,
                         size_t errlen)
 {
 	memset(out, 0, sizeof(*out));
+	snprintf(out->uri, sizeof(out->uri), "%s", track_uri);
 
 	uint8_t q_store[16], er_store[256], req_store[320];
 	pb q, er, req;

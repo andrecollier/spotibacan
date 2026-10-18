@@ -2154,13 +2154,14 @@ static void play_index(int idx)
 
 /* Sends what the console would play now to the speaker: the list it came
  * from as the context (so the speaker goes on through it by itself), from
- * that song. Saved files have no Spotify id to send. */
+ * that song. A saved file goes alone; the cast thread looks up its id. */
 static bool cast_start(void)
 {
 	const char *track = (play_idx >= 0 && play_idx < play_count)
 	                    ? play_uris[play_idx]
 	                    : (cast_uri[0] ? cast_uri : native_now_uri());
-	if (strncmp(track, "spotify:track:", 14) != 0) {
+	if (strncmp(track, "spotify:track:", 14) != 0 &&
+	    strncmp(track, "file:", 5) != 0) {
 		char msg[96];
 		snprintf(msg, sizeof(msg), tr(S_CAST_LOCAL), native_cast_name());
 		toast_show(msg);
@@ -2190,6 +2191,12 @@ static void cast_begin(void)
 	cast_uri[0] = '\0';
 	cast_pos_ms = (long)(now_pos * 1000.0f);
 	if (cast_start()) {
+		/* A song still loading would start under the speaker: drop it,
+		 * coming back replays it from the list. */
+		if (native_playback_state() != NATIVE_PLAYING) {
+			native_stop();
+			cast_changed = true;
+		}
 		paused = true;
 		ndspChnSetPaused(0, true);
 	}
@@ -3140,7 +3147,8 @@ int main(int argc, char **argv)
 					lid_mode_set(false);
 				}
 			}
-			if (end_pending &&
+			/* The speaker walks its own list while casting. */
+			if (end_pending && !casting() &&
 			    ring_used() < (u32)SAMPLE_RATE * 4 * END_LEAD_S) {
 				end_pending = false;
 				track_ended();
@@ -3169,9 +3177,10 @@ int main(int argc, char **argv)
 					art_present = false;
 					tint_target = 0;   // back to the skin until the cover lands
 				}
-			} else if (paused) {
+			} else if (paused && !casting()) {
 				// The track ended or failed under a paused channel; do not
-				// carry the pause into whatever plays next.
+				// carry the pause into whatever plays next. While casting
+				// the pause is what keeps the console quiet.
 				paused = false;
 				ndspChnSetPaused(0, false);
 			}
@@ -3347,6 +3356,10 @@ int main(int argc, char **argv)
 				cast_dirty = false;
 				if (casting())
 					cast_start();
+			}
+			if (casting() && !paused) {   /* never both at once */
+				paused = true;
+				ndspChnSetPaused(0, true);
 			}
 			const native_cast_status cs = native_cast_state();
 			if (cs != cast_seen) {

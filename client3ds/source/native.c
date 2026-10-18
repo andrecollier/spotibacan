@@ -99,9 +99,8 @@ static const char *view_name(native_view v)
  * is already on the next track: the skip no longer waits for the file. */
 typedef struct dl_job {
 	track_stream  ts;
-	char          uri[64];   /* the requested track: meta.uri is not
-	                          * filled by single-track metadata, so the
-	                          * queue could not re-ask for it otherwise */
+	char          uri[64];   /* the requested track, for the queue to
+	                          * re-ask for it */
 	volatile bool stop;
 	volatile bool save;      /* write the .ogg (+ cover) when complete */
 	volatile bool saved;     /* CAS guard: exactly one save per job */
@@ -721,6 +720,58 @@ static void download_path(const char *artist, const char *title,
 	snprintf(out, outlen, "%s/%s", dir, name);
 }
 
+/* A saved song is only "Artist - Title.ogg"; casting it needs its Spotify
+ * id back. Every save notes the pair in music/ids.txt, one tab-separated
+ * line per file. Workers save side by side, hence the lock. */
+static LightLock ids_lock;
+
+static void file_id_path(char *out, size_t n)
+{
+	cfg_dir(out, n);
+	strncat(out, "music/ids.txt", n - strlen(out) - 1);
+}
+
+static void file_id_note(const char *name, const char *uri)
+{
+	if (!name[0] || strncmp(uri, "spotify:track:", 14) != 0)
+		return;
+	char path[360];
+	file_id_path(path, sizeof(path));
+	LightLock_Lock(&ids_lock);
+	FILE *f = fopen(path, "a");
+	if (f) {
+		fprintf(f, "%s\t%s\n", name, uri);
+		fclose(f);
+	}
+	LightLock_Unlock(&ids_lock);
+}
+
+static bool file_id_find(const char *name, char *uri, size_t urilen)
+{
+	char path[360];
+	file_id_path(path, sizeof(path));
+	bool found = false;
+	LightLock_Lock(&ids_lock);
+	FILE *f = fopen(path, "r");
+	if (f) {
+		char line[320];
+		while (fgets(line, sizeof(line), f)) {
+			line[strcspn(line, "\r\n")] = '\0';
+			char *tab = strchr(line, '\t');
+			if (!tab)
+				continue;
+			*tab = '\0';
+			if (strcmp(line, name) == 0) {
+				snprintf(uri, urilen, "%s", tab + 1);
+				found = true;   /* read on: a later line is a newer save */
+			}
+		}
+		fclose(f);
+	}
+	LightLock_Unlock(&ids_lock);
+	return found;
+}
+
 /* Whether the playing track already sits on the card. One stat per track:
  * the answer is cached against the URI, because the UI asks every frame. */
 static char saved_checked_uri[192];
@@ -788,6 +839,11 @@ static void save_download(const track_stream *ts)
 	saved_checked_uri[0] = '\0';
 	nlog("DL: guardada %s (%.1f MB)\n", path,
 	     (double)(ts->len - SPOTIFY_OGG_HEADER) / (1024.0 * 1024.0));
+	{
+		char name[160];
+		download_name(ts->meta.artist, ts->meta.name, name, sizeof(name));
+		file_id_note(name, ts->meta.uri);
+	}
 
 	/* The cover goes beside the audio as <same name>.jpg, so the offline
 	 * shelf can show it without any network. A failure here only costs the
@@ -1825,6 +1881,7 @@ int native_init(const native_sink *sink, void (*progress)(const char *step),
 	g.sp_sess = http_session_open(g.sp_host);   /* connects lazily */
 
 	LightLock_Init(&g.lock);
+	LightLock_Init(&ids_lock);
 	g.want_seek_frame = -1;
 	g.state = NATIVE_IDLE;
 	g.ready = true;
@@ -1852,6 +1909,7 @@ int native_init_offline(const native_sink *sink)
 	g.offline = true;
 	snprintf(g.username, sizeof(g.username), "Offline");
 	LightLock_Init(&g.lock);
+	LightLock_Init(&ids_lock);
 	g.want_seek_frame = -1;
 	g.state = NATIVE_IDLE;
 	g.ready = true;
@@ -1961,6 +2019,59 @@ static bool cast_do_wake(void)
 	return true;
 }
 
+/* The Spotify id of a saved song, for casting it: from ids.txt, or, for a
+ * file saved before that list existed, from a search for its name. A hit
+ * counts only when it would save under the very same file name. */
+static bool cast_file_uri(const char *file, char *uri, size_t urilen)
+{
+	const char *name = file + 5;
+	if (file_id_find(name, uri, urilen))
+		return true;
+	char q[200];
+	snprintf(q, sizeof(q), "%s", name);
+	char *dot = strrchr(q, '.');
+	if (dot)
+		*dot = '\0';
+	char *dash = strstr(q, " - ");
+	if (dash)
+		memmove(dash + 1, dash + 3, strlen(dash + 3) + 1);
+	static char hits[5][64];
+	static sp_track meta[5];
+	char err[160] = "";
+	int n = sp_search_tracks(g.sp_host, l5_token(), q, hits, 5, err,
+	                         sizeof(err));
+	if (n <= 0) {
+		nlog("CAST: search for %s: %s\n", q, n < 0 ? err : "nothing");
+		return false;
+	}
+	const char *ptrs[5];
+	for (int i = 0; i < n; i++)
+		ptrs[i] = hits[i];
+	memset(meta, 0, sizeof(meta));
+	if (sp_track_metadata_batch(g.sp_host, l5_token(), ptrs, n, meta, err,
+	                            sizeof(err)) < 0) {
+		nlog("CAST: naming the hits for %s: %s\n", q, err);
+		return false;
+	}
+	for (int pass = 0; pass < 2; pass++) {
+		for (int i = 0; i < n; i++) {
+			if (!meta[i].name[0] || !meta[i].uri[0])
+				continue;
+			char got[160];
+			download_name(meta[i].artist, meta[i].name, got, sizeof(got));
+			if (pass == 0 ? strcmp(got, name) != 0
+			              : strcasecmp(got, name) != 0)
+				continue;
+			snprintf(uri, urilen, "%s", meta[i].uri);
+			file_id_note(name, uri);
+			nlog("CAST: %s is %s\n", name, uri);
+			return true;
+		}
+	}
+	nlog("CAST: no search hit saves as %s\n", name);
+	return false;
+}
+
 /* A command that finds the speaker gone (Spotify signs idle ones out)
  * wakes it again once and retries. */
 static int cast_send_cmd(int kind, const char *a, const char *b, long n)
@@ -2020,6 +2131,17 @@ static void cast_thread(void *arg)
 				 * not be undone by it turning ON afterwards. */
 				const int gen = cast.gen;
 				cast.error[0] = '\0';
+				if (strncmp(a, "file:", 5) == 0) {
+					char uri[64];
+					if (!cast_file_uri(a, uri, sizeof(uri))) {
+						snprintf(cast.error, sizeof(cast.error),
+						         "no Spotify id for %s", a + 5);
+						if (gen == cast.gen)
+							cast.state = NATIVE_CAST_FAILED;
+						continue;
+					}
+					snprintf(a, sizeof(a), "%s", uri);
+				}
 				if ((!cast.awake && !cast_do_wake()) ||
 				    cast_send_cmd(CR_PLAY, a, b, n) != 0) {
 					if (gen == cast.gen)
