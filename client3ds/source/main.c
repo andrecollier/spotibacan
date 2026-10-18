@@ -1052,7 +1052,7 @@ static void draw_top(const Skin *sk, bool buffering, bool muted, float par)
 	text_fit(now_title[0] ? now_title : tr(S_NOTHING_PLAYING), TX + par * 2.0f, AY,
 	         0.70f, sk->text, TW);
 	text_fit(now_artist, TX + par * 1.4f, AY + 30, 0.54f, sk->dim, TW);
-	text_fit(now_album, TX + par * 1.0f, AY + 52, 0.46f, sk->meter, TW);
+	text_fit(now_album, TX + par * 1.0f, AY + 52, 0.46f, sk->dim, TW);
 
 	const char *state = buffering ? tr(S_STATE_LOADING) :
 	                    paused    ? tr(S_STATE_PAUSED) :
@@ -1098,7 +1098,7 @@ static void draw_top(const Skin *sk, bool buffering, bool muted, float par)
 				snprintf(line, sizeof(line), "%s - %s",
 				         play_labels[n2], play_subs[n2]);
 				text_fit(line, AX + 86.0f + par * 1.0f, uy + 8.0f,
-				         0.40f, sk->meter,
+				         0.40f, sk->dim,
 				         TOP_W - AX - 86.0f - 12.0f);
 			}
 		}
