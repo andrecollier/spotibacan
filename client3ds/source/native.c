@@ -120,7 +120,15 @@ typedef struct {
 	char uri[64];
 	char artist[128];
 	char title[128];
+	unsigned char tries;   /* failed starts so far; not kept on the card */
 } dlq_entry;
+
+/* The pump waits until this time after a failed start, so an outage costs
+ * a retry every so often rather than the queue one entry per loop. */
+static u64 dlq_hold_until;
+/* When the last song stopped decoding: the idle loop leaves the queue
+ * alone right after, while the UI is about to start the next one. */
+static u64 play_ended_at;
 
 static dlq_entry dlq[NATIVE_DLQ_MAX];
 static int dlq_count;                    /* guarded by g.lock */
@@ -587,19 +595,35 @@ int native_like(const char *uri, bool like, char *err, size_t errlen,
  * saved?" check can never disagree on the name. */
 /* The file name a song is saved under: "<artist> - <title>.ogg", minus
  * the characters FAT refuses. */
+/* Copies src into name from n on, dropping characters FAT refuses, up to
+ * cap bytes; a cut never splits a UTF-8 sequence (a stray lead byte made
+ * an unopenable name). Returns the new length. */
+static int name_part(char *name, int n, const char *src, int cap)
+{
+	for (const char *p = src; *p; p++) {
+		if (*p == '/' || *p == '\\' || *p == ':' || *p == '"' ||
+		    *p == '?' || *p == '*' || *p == '<' || *p == '>' || *p == '|')
+			continue;
+		int len = 1;
+		const unsigned char c = (unsigned char)*p;
+		if (c >= 0xF0) len = 4;
+		else if (c >= 0xE0) len = 3;
+		else if (c >= 0xC0) len = 2;
+		if (n + len > cap)
+			break;
+		for (int k = 0; k < len && p[k]; k++)
+			name[n++] = p[k];
+		p += len - 1;
+	}
+	return n;
+}
+
 static void download_name(const char *artist, const char *title,
                           char *name, size_t namelen)
 {
-	int n = 0;
-	for (const char *p = artist; *p && n < 60; p++)
-		if (*p != '/' && *p != '\\' && *p != ':' && *p != '"' &&
-		    *p != '?' && *p != '*' && *p != '<' && *p != '>' && *p != '|')
-			name[n++] = *p;
+	int n = name_part(name, 0, artist, 60);
 	n += snprintf(name + n, namelen - n, " - ");
-	for (const char *p = title; *p && n < 130; p++)
-		if (*p != '/' && *p != '\\' && *p != ':' && *p != '"' &&
-		    *p != '?' && *p != '*' && *p != '<' && *p != '>' && *p != '|')
-			name[n++] = *p;
+	n = name_part(name, n, title, 130);
 	snprintf(name + n, namelen - n, ".ogg");
 }
 
@@ -618,6 +642,7 @@ static void download_path(const char *artist, const char *title,
 /* Whether the playing track already sits on the card. One stat per track:
  * the answer is cached against the URI, because the UI asks every frame. */
 static char saved_checked_uri[192];
+static char saved_checked_title[128];
 static bool saved_flag;
 
 bool native_current_saved(void)
@@ -626,8 +651,13 @@ bool native_current_saved(void)
 		return true;   /* a local file is on the card by definition */
 	if (!g.title[0])
 		return false;
-	if (strcmp(saved_checked_uri, g.want) != 0) {
+	/* Keyed on the title too: while a new song loads, g.want is already
+	 * the new uri but g.title still names the old one. */
+	if (strcmp(saved_checked_uri, g.want) != 0 ||
+	    strcmp(saved_checked_title, g.title) != 0) {
 		snprintf(saved_checked_uri, sizeof(saved_checked_uri), "%s", g.want);
+		snprintf(saved_checked_title, sizeof(saved_checked_title), "%s",
+		         g.title);
 		char path[520];
 		download_path(g.artist, g.title, path, sizeof(path));
 		struct stat st;
@@ -822,6 +852,25 @@ static void job_detach(dl_job *job)
 	free(job);
 }
 
+/* Puts a failed entry back at the end of the queue for another go,
+ * up to a few tries; false when it is spent. */
+static bool dlq_retry(const dlq_entry *e)
+{
+	if (e->tries >= 2)
+		return false;
+	bool ok = false;
+	LightLock_Lock(&g.lock);
+	if (dlq_count < NATIVE_DLQ_MAX) {
+		dlq[dlq_count] = *e;
+		dlq[dlq_count].tries++;
+		dlq_count++;
+		ok = true;
+	}
+	LightLock_Unlock(&g.lock);
+	dlq_hold_until = osGetTime() + 20000;
+	return ok;
+}
+
 /* Starts the next queued download when nothing else is downloading. Only
  * ever called on the player thread, the owner of g.ap: the audio key rides
  * the access point session. Returns at once when there is nothing to do;
@@ -831,6 +880,8 @@ static void job_detach(dl_job *job)
 static void dlq_pump(void)
 {
 	if (!g.ready || g.offline || !g.ap || g.quit)
+		return;
+	if (osGetTime() < dlq_hold_until)
 		return;
 	dlq_entry e;
 	bool take = false;
@@ -885,11 +936,17 @@ static void dlq_pump(void)
 	}
 	if (rc != 0) {
 		nlog("DLQ: could not start %s (%s)\n", e.title, err);
+		if (job)
+			track_stream_free(&job->ts);
 		free(job);
-		LightLock_Lock(&g.lock);
-		dlq_failed++;
-		LightLock_Unlock(&g.lock);
-		return;   /* one bad entry loses its turn only */
+		/* A dropped link or a 5xx passes: back of the line, after a pause. */
+		if (!dlq_retry(&e)) {
+			LightLock_Lock(&g.lock);
+			dlq_failed++;
+			LightLock_Unlock(&g.lock);
+		}
+		dlq_save();
+		return;
 	}
 	job->save = true;
 	job->from_queue = true;
@@ -910,10 +967,15 @@ static void dlq_pump(void)
 		if (*pp)
 			*pp = job->next;
 		dlq_job = NULL;
-		dlq_failed++;
 		LightLock_Unlock(&g.lock);
 		track_stream_free(&job->ts);
 		free(job);
+		if (!dlq_retry(&e)) {
+			LightLock_Lock(&g.lock);
+			dlq_failed++;
+			LightLock_Unlock(&g.lock);
+		}
+		dlq_save();
 		return;
 	}
 	job->th = dl;
@@ -1275,6 +1337,7 @@ static void player_thread(void *arg)
 				g.art[0] = '\0';
 				g.album_uri[0] = g.artist_uri[0] = '\0';
 				play_local(uri + 5);
+				play_ended_at = osGetTime();
 				if (g.state == NATIVE_PLAYING)
 					g.state = NATIVE_IDLE;
 				continue;
@@ -1385,6 +1448,7 @@ static void player_thread(void *arg)
 			}
 			job->th = dl;
 			play_stream(&job->ts);
+			play_ended_at = osGetTime();
 			if (g.quit) {
 				/* Shutting down: nothing outlives the player. */
 				job->stop = true;
@@ -1460,9 +1524,13 @@ static void player_thread(void *arg)
 		}
 
 		/* The queue starts its next download whenever the link is free;
-		 * the download itself runs on its own thread. */
+		 * the download itself runs on its own thread. Not in the seconds
+		 * after a song ends: starting one blocks this thread for a few
+		 * seconds, and the UI is about to ask for the next song, which
+		 * would then wait behind it (an audible gap at every handover). */
 		l5_refresh(false);
-		dlq_pump();
+		if (osGetTime() - play_ended_at > 10000)
+			dlq_pump();
 
 		/* Idle: keep the access point session alive. It only speaks to say
 		 * ping, but a session that stops answering is dropped, and then the

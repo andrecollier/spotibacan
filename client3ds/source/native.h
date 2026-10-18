@@ -28,8 +28,11 @@ typedef enum {
 } native_view;
 
 typedef struct {
-	char label[64];             /* what the row shows */
-	char sub[40];               /* artist, or the track count */
+	/* Wide enough for the whole names a saved file is named after
+	 * (download_name keeps up to 60 bytes of artist, 127 of title): cut
+	 * shorter, a row no longer finds its own file on the card. */
+	char label[128];            /* what the row shows */
+	char sub[64];               /* artist, or the track count */
 	char uri[192];              /* spotify:track:... or file:<name>.ogg */
 	char art[200];               /* 64px cover URL, empty when there is none */
 	/* For "go to artist / album" on a selected row; empty when unknown. */
