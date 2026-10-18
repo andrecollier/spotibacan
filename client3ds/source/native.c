@@ -798,8 +798,17 @@ static void download_thread(void *arg)
 static void job_detach(dl_job *job)
 {
 	__sync_synchronize();
-	if (__sync_bool_compare_and_swap(&job->handoff, 0, 1))
-		return;   /* the thread will free itself when it finishes */
+	/* Read before the CAS: once it lands, the thread may free the job. */
+	Thread th = job->th;
+	if (__sync_bool_compare_and_swap(&job->handoff, 0, 1)) {
+		/* The thread frees the job when it finishes; libctru frees the
+		 * thread itself only when it is detached. Without this every
+		 * queue download and every skip mid-download leaked a kernel
+		 * thread and its stack, until "DLQ: no thread for" ended the
+		 * queue a handful of songs into a playlist. */
+		threadDetach(th);
+		return;
+	}
 	threadJoin(job->th, U64_MAX);
 	threadFree(job->th);
 	LightLock_Lock(&g.lock);

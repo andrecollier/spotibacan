@@ -158,9 +158,13 @@ static bool downloads_on = false;
 // awake it flips the wifi from infrastructure to StreetPass; either one kills
 // the stream. While a track is playing or paused, sleep is refused and the
 // ndm:u daemon is locked into infrastructure mode (the same recipe
-// Universal-Updater uses for its downloads). Released the moment playback
-// ends, so a closed lid sleeps normally again when nothing is playing.
+// Universal-Updater uses for its downloads). The download queue holds it
+// too: outside it the wifi sits in power save, and a queued list crawled at
+// ~26 KB/s against ~100 while a song played. Released only after a few
+// seconds with nothing going on, so the IDLE blip at each track handover
+// does not let a closed lid sleep between songs.
 static bool lid_mode = false;
+#define LID_RELEASE_MS 15000
 
 static void lid_mode_set(bool on)
 {
@@ -2867,10 +2871,6 @@ int main(int argc, char **argv)
 			if (st != nat_state_seen) {
 				const int prev_state = nat_state_seen;
 				nat_state_seen = (int)st;
-				if (st == NATIVE_PLAYING)
-					lid_mode_set(true);
-				else if (st == NATIVE_IDLE || st == NATIVE_FAILED)
-					lid_mode_set(false);
 				/* The decoder is done, the speaker is not: wait until
 				 * about as much audio is left as the next track takes to
 				 * start, then fetch it, so neither end gets cut. */
@@ -2889,6 +2889,22 @@ int main(int argc, char **argv)
 					break;
 				default:
 					break;
+				}
+			}
+			{
+				static u64 busy_at;
+				char dl_title[8];
+				const bool busy = st == NATIVE_PLAYING ||
+				                  st == NATIVE_LOADING || end_pending ||
+				                  ring_used() > 0 ||
+				                  native_dl_queue_count() > 0 ||
+				                  native_dl_active(dl_title, sizeof(dl_title)) >= 0;
+				const u64 now_ms = osGetTime();
+				if (busy) {
+					busy_at = now_ms;
+					lid_mode_set(true);
+				} else if (now_ms - busy_at > LID_RELEASE_MS) {
+					lid_mode_set(false);
 				}
 			}
 			if (end_pending &&
