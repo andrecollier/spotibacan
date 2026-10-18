@@ -41,6 +41,11 @@ int cast_play(const char *sp_host, const char *bearer, const char *dev,
               const char *context, const char *track, long pos_ms,
               char *err, size_t errlen);
 
+/* Sends the connect-state calls below over `s`, an open keep-alive link to
+ * spclient (NULL: a fresh connection each). Only the cast worker uses it. */
+typedef struct http_session http_session;
+void cast_use_session(http_session *s);
+
 /* Sets the speaker's volume, 0..1. Returns the HTTP status or -1. */
 int cast_set_volume(const char *sp_host, const char *bearer, const char *dev,
                     float level, char *err, size_t errlen);

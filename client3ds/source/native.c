@@ -27,7 +27,13 @@
  * a failed fetch would show as an empty list and nothing else. Same approach
  * the probes use, and the same reason. */
 static FILE *logf;
+static u64 log_t0, log_flushed;
+static volatile bool log_dirty;
 
+/* Lines carry seconds since start, so a slow spot shows as a gap. They go
+ * to a big buffer that the player thread flushes about once a second:
+ * flushing every line made whichever thread logged, the UI too, wait on
+ * an SD write, and a busy download queue logs a lot. */
 static void write_log_line(const char *line)
 {
 	fputs(line, stderr);
@@ -44,11 +50,29 @@ static void write_log_line(const char *line)
 			path[0] = '\0';
 		strncat(path, "native.log", sizeof(path) - strlen(path) - 1);
 		logf = fopen(path, "a");
+		if (logf)
+			setvbuf(logf, NULL, _IOFBF, 16 * 1024);
+		log_t0 = log_flushed = osGetTime();
 	}
 	if (logf) {
-		fputs(line, logf);
-		fflush(logf);
+		const u64 ms = osGetTime() - log_t0;
+		fprintf(logf, "[%5llu.%02llu] %s", ms / 1000, (ms % 1000) / 10,
+		        line);
+		log_dirty = true;
 	}
+}
+
+/* Player thread: writes out what the last second logged. */
+static void log_tick(bool now)
+{
+	if (!logf || !log_dirty)
+		return;
+	const u64 t = osGetTime();
+	if (!now && t - log_flushed < 1000)
+		return;
+	log_dirty = false;
+	log_flushed = t;
+	fflush(logf);
 }
 
 static void nlog(const char *fmt, ...)
@@ -207,6 +231,9 @@ static struct {
 	char           want[192];
 	volatile bool  want_new;
 	volatile bool  want_stop;
+	/* Set when the console wakes from sleep: the wifi went down under
+	 * every open link, which would otherwise each sit out a timeout. */
+	volatile bool  woke;
 	/* Seek request in samples, -1 = none. Set by the UI, consumed by the
 	 * decoder, which may reject it when the target is not downloaded yet. */
 	volatile long  want_seek_frame;
@@ -1281,6 +1308,7 @@ static void play_stream(track_stream *ts)
 	unsigned pending_prev = 0;    /* where the stream was when it started */
 	unsigned long long ka = 0;    /* last AP keepalive check */
 	while (!g.quit && !g.want_stop && !g.want_new) {
+		log_tick(false);
 		/* Nobody else answers the access point while a song plays, and a
 		 * session that misses pings for minutes is dead by the next track:
 		 * that was the stuck "cargando" after a download, only visible when
@@ -1479,6 +1507,7 @@ static void play_local(const char *name)
 
 	static s16 pcm[4096 * 2];
 	while (!g.quit && !g.want_stop && !g.want_new) {
+		log_tick(false);
 		long want = g.want_seek_frame;
 		if (want >= 0) {
 			g.want_seek_frame = -1;
@@ -1547,6 +1576,7 @@ static void player_thread(void *arg)
 {
 	(void)arg;
 	while (!g.quit) {
+		log_tick(false);
 		if (g.want_new) {
 			char uri[192];
 			LightLock_Lock(&g.lock);
@@ -1750,6 +1780,19 @@ static void player_thread(void *arg)
 			continue;
 		}
 
+		/* Back from sleep: drop the dead links now, so the next song or
+		 * list reconnects at once instead of waiting out a timeout. */
+		if (g.woke) {
+			g.woke = false;
+			nlog("APT: woke up, reconnecting\n");
+			if (g.ap) {
+				ap_close(g.ap);
+				g.ap = NULL;
+			}
+			http_session_close(g.sp_sess);
+			g.sp_sess = http_session_open(g.sp_host);
+		}
+
 		/* The access point session is rebuilt in the background with a 5 s
 		 * backoff: a dropped session used to end listening until the app
 		 * restarted, and the console's wifi hiccups often enough for that
@@ -1943,6 +1986,7 @@ static struct {
 	volatile native_cast_status state;
 	char       dev[CAST_DEV_LEN];
 	bool       awake;             /* signed in; a failed command re-wakes */
+	volatile bool relink;         /* the console slept: reopen the link */
 	volatile int gen;             /* bumped by every "back to the console" */
 	float      volume;            /* the speaker's level, 0..1 */
 	char       error[160];
@@ -2105,8 +2149,19 @@ static int cast_send_cmd(int kind, const char *a, const char *b, long n)
 static void cast_thread(void *arg)
 {
 	(void)arg;
+	/* One link to spclient for every command: pause should feel like a
+	 * button, not a handshake. It connects on first use. */
+	http_session *sess = http_session_open(g.sp_host);
+	cast_use_session(sess);
 	while (!g.quit) {
 		LightEvent_WaitTimeout(&cast.wake, 500000000LL);   // 0.5 s
+		if (cast.relink) {
+			cast.relink = false;
+			cast_use_session(NULL);
+			http_session_close(sess);
+			sess = http_session_open(g.sp_host);
+			cast_use_session(sess);
+		}
 		for (;;) {
 			int kind;
 			char a[192], b[64];
@@ -2187,6 +2242,8 @@ static void cast_thread(void *arg)
 			}
 		}
 	}
+	cast_use_session(NULL);
+	http_session_close(sess);
 }
 
 static void cast_post(int kind, const char *a, const char *b, long n)
@@ -2236,6 +2293,12 @@ void native_cast_command(const char *endpoint)
 void native_cast_volume_step(int dir)
 {
 	cast_post(CR_VOL, "", "", dir);
+}
+
+void native_on_wake(void)
+{
+	g.woke = true;
+	cast.relink = true;
 }
 
 void native_cast_reconnect(void)
@@ -2306,8 +2369,10 @@ void native_exit(void)
 		 * uses is what crashed on quit; leaving it alone costs nothing,
 		 * the process is about to end and the kernel reclaims it all. */
 		nlog("EXIT: workers still running, skipping teardown\n");
+		log_tick(true);
 		return;
 	}
+	log_tick(true);
 	if (g.ap)
 		ap_close(g.ap);
 	http_session_close(g.sp_sess);

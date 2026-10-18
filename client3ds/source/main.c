@@ -149,6 +149,10 @@ static u64  settings_busy_until = 0;
 // File scope because both the input loop and the drawers consult them.
 static bool muted = false;
 static bool paused = false;
+/* While casting the console stays paused; the speaker's own state is
+ * cast_paused, which is what the play button and status show. */
+static bool casting(void);
+static bool cast_paused;
 
 // Playback modes and the downloads preference; the settings drawer and the
 // transport both read them. The like queue lives with the files below.
@@ -1084,8 +1088,9 @@ static void draw_top(const Skin *sk, bool buffering, bool muted, float par)
 	text_fit(now_artist, TX + par * 1.4f, AY + 30, 0.54f, sk->dim, TW);
 	text_fit(now_album, TX + par * 1.0f, AY + 52, 0.46f, sk->dim, TW);
 
+	const bool shown_paused = casting() ? cast_paused : paused;
 	const char *state = buffering ? tr(S_STATE_LOADING) :
-	                    paused    ? tr(S_STATE_PAUSED) :
+	                    shown_paused ? tr(S_STATE_PAUSED) :
 	                    muted     ? tr(S_STATE_MUTED) : tr(S_STATE_PLAYING);
 	C2D_DrawCircleSolid(TX + 5 + par * 0.8f, AY + 106, 0.1f, 4,
 	                    buffering ? sk->warm : sk->accent);
@@ -1990,8 +1995,13 @@ static void draw_bottom(const Skin *sk)
 		a.track = now_title[0] ? now_title : tr(S_NOTHING_PLAYING);
 		a.artist = now_artist;
 		a.album = now_album;
-		a.playing = st == NATIVE_PLAYING && !paused;
-		a.loading = st == NATIVE_LOADING;
+		if (casting()) {   /* the button flips at the press, not the reply */
+			a.playing = !cast_paused;
+			a.loading = native_cast_state() == NATIVE_CAST_STARTING;
+		} else {
+			a.playing = st == NATIVE_PLAYING && !paused;
+			a.loading = st == NATIVE_LOADING;
+		}
 		a.muted = muted;
 		a.shuffle = shuffle_on;
 		a.repeat = repeat_mode;
@@ -2577,6 +2587,22 @@ static bool pair_poll_frame(int attempt)
 	return aptMainLoop();
 }
 
+/* Sleep and HOME land in the log with their time, for "slow after the
+ * lid opened"; waking also tells the backend its links are gone. */
+static aptHookCookie apt_cookie;
+
+static void apt_event(APT_HookType hook, void *param)
+{
+	(void)param;
+	switch (hook) {
+	case APTHOOK_ONSLEEP:   native_log("APT: sleep\n"); break;
+	case APTHOOK_ONWAKEUP:  native_log("APT: wake\n"); native_on_wake(); break;
+	case APTHOOK_ONSUSPEND: native_log("APT: HOME\n"); break;
+	case APTHOOK_ONRESTORE: native_log("APT: back from HOME\n"); break;
+	default: break;
+	}
+}
+
 int main(int argc, char **argv)
 {
 	(void)argc;
@@ -2585,6 +2611,7 @@ int main(int argc, char **argv)
 	 * console's own network services run there too, and starving them
 	 * would slow the very downloads this is meant to speed up. */
 	APT_SetAppCpuTimeLimit(50);
+	aptHook(&apt_cookie, apt_event, NULL);
 	skin_init();
 	// The token belongs beside the .3dsx, like every other app here; without
 	// this it would land at the card root and not match the probes.
@@ -3590,6 +3617,7 @@ quit:
 	mcuHwcExit();
 	ptmuExit();
 	socExit();
+	aptUnhook(&apt_cookie);
 	gfxExit();
 	return 0;
 }

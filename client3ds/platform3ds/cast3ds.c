@@ -287,14 +287,28 @@ out:
 	return rc;
 }
 
+/* Commands go over one kept-open link when the caller set one: a fresh
+ * TLS handshake per pause costs this console a second or more. */
+static http_session *cmd_sess;
+
+void cast_use_session(http_session *s)
+{
+	cmd_sess = s;
+}
+
 static int connect_state(const char *sp_host, const char *method,
                          const char *path, const char *bearer,
                          const char *body, char *err, size_t errlen)
 {
 	http_reply r;
 	memset(&r, 0, sizeof(r));
-	if (http_request(sp_host, path, method, bearer, "application/json",
-	                 "application/json", body, strlen(body), 0, &r) != 0) {
+	const int rc = cmd_sess
+	    ? http_session_request(cmd_sess, path, method, bearer,
+	                           "application/json", "application/json",
+	                           body, strlen(body), 0, &r)
+	    : http_request(sp_host, path, method, bearer, "application/json",
+	                   "application/json", body, strlen(body), 0, &r);
+	if (rc != 0) {
 		snprintf(err, errlen, "%s", r.err);
 		return -1;
 	}

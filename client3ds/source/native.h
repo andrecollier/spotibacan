@@ -213,6 +213,8 @@ void native_cast_command(const char *endpoint);
 /* One 5 % step up (+1) or down (-1); native_cast_volume() is 0..100. */
 void native_cast_volume_step(int dir);
 int  native_cast_volume(void);
+/* The console woke from sleep: open links are dead, rebuild them. */
+void native_on_wake(void);
 /* After a failure: resumes the speaker, or replays the last list on it. */
 void native_cast_reconnect(void);
 /* Pauses the speaker and leaves cast mode. */
