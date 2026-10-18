@@ -204,6 +204,11 @@ typedef enum {
 } native_cast_status;
 bool               native_cast_configured(void);
 const char        *native_cast_name(void);
+/* How many speakers cast.txt lists; native_cast_pick(+1/-1) moves to the
+ * next or previous one (remembered), only while not casting. */
+int                native_cast_count(void);
+int                native_cast_current(void);   /* 0-based */
+void               native_cast_pick(int dir);
 native_cast_status native_cast_state(void);
 const char        *native_cast_error(void);
 void native_cast_play(const char *context_uri, const char *track_uri,

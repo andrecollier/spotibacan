@@ -1414,9 +1414,14 @@ static void draw_actions(const Skin *sk)
 	                                                     : S_DELETE_DL),
 	                                 cast_label,
 	                                 tr(S_SETTINGS) };
+	/* With more than one speaker, left/right on the row picks another. */
+	char cast_sub[64] = "";
+	if (!casting() && native_cast_count() > 1)
+		snprintf(cast_sub, sizeof(cast_sub), tr(S_CAST_PICK),
+		         native_cast_current() + 1, native_cast_count());
 	const char *subs[ACT_ROWS] = { act.has_row ? act.row.label : "", "",
-	                               act.artist, act.album, "", "", "", "",
-	                               "" };
+	                               act.artist, act.album, "", "", "",
+	                               cast_sub, "" };
 	/* Nine rows of 25px fill the sheet; a sub line sits right under. */
 	const float rh = 25.0f, ry = py + 8.0f;
 	for (int i = 0; i < ACT_ROWS; i++) {
@@ -2911,6 +2916,9 @@ int main(int argc, char **argv)
 				actions_sel = actions_sel > 0 ? actions_sel - 1 : ACT_ROWS - 1;
 			if (down & KEY_DDOWN)
 				actions_sel = actions_sel + 1 < ACT_ROWS ? actions_sel + 1 : 0;
+			if (actions_sel == 7 && !casting() &&
+			    (down & (KEY_DLEFT | KEY_DRIGHT)))
+				native_cast_pick((down & KEY_DRIGHT) ? +1 : -1);
 			int row = -1;
 			if (down & KEY_A)
 				row = actions_sel;

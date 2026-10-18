@@ -1504,29 +1504,21 @@ static void play_local(const char *name)
 	snprintf(path + strlen(path), sizeof(path) - strlen(path),
 	         "music/%s", name);
 
+	/* The decoder pulls from the card as it plays. Reading the whole file
+	 * first held every saved song back for seconds, and the 8 MB block it
+	 * needed was often not there beside a stream or a download: "could
+	 * not read the file". */
 	FILE *f = fopen(path, "rb");
 	if (!f) {
 		snprintf(g.error, sizeof(g.error), "file not found");
 		g.state = NATIVE_FAILED;
 		return;
 	}
-	fseek(f, 0, SEEK_END);
-	long len = ftell(f);
-	fseek(f, 0, SEEK_SET);
-	u8 *data = malloc((size_t)len);
-	if (!data || fread(data, 1, (size_t)len, f) != (size_t)len) {
-		fclose(f);
-		free(data);
-		snprintf(g.error, sizeof(g.error), "could not read the file");
-		g.state = NATIVE_FAILED;
-		return;
-	}
-	fclose(f);
+	setvbuf(f, NULL, _IOFBF, 32 * 1024);   /* few, large SD reads */
 
 	int verr = 0;
-	stb_vorbis *v = stb_vorbis_open_memory(data, (int)len, &verr, NULL);
+	stb_vorbis *v = stb_vorbis_open_file(f, 1, &verr, NULL);   /* owns f */
 	if (!v) {
-		free(data);
 		snprintf(g.error, sizeof(g.error),
 		         "the decoder rejected the file (%d)", verr);
 		g.state = NATIVE_FAILED;
@@ -1586,7 +1578,6 @@ static void play_local(const char *name)
 	}
 
 	stb_vorbis_close(v);
-	free(data);
 	nlog("PLAY local fin: %u frames\n", g.frames_out);
 }
 
@@ -2037,9 +2028,13 @@ int native_init_offline(const native_sink *sink)
 enum { CR_PLAY = 1, CR_CMD, CR_VOL, CR_END, CR_RESUME };
 #define CAST_REQS 8
 
+#define CAST_MAX 6
+
 static struct {
 	bool       loaded, configured;
-	char       name[64], ip[48];
+	char       name[64], ip[48];  /* the speaker picked now */
+	char       names[CAST_MAX][64], ips[CAST_MAX][48];   /* cast.txt */
+	int        n, cur;
 	Thread     th;
 	LightEvent wake;
 	volatile native_cast_status state;
@@ -2069,8 +2064,9 @@ static void cast_load(void)
 	FILE *f = fopen(path, "r");
 	if (!f)
 		return;
+	/* One speaker per line: its Cast name, then its address. */
 	char line[160];
-	while (fgets(line, sizeof(line), f)) {
+	while (cast.n < CAST_MAX && fgets(line, sizeof(line), f)) {
 		line[strcspn(line, "\r\n")] = '\0';
 		if (!line[0] || line[0] == '#')
 			continue;
@@ -2079,16 +2075,69 @@ static void cast_load(void)
 		if (!sp)
 			continue;
 		*sp = '\0';
+		const char *ip = sp + 1 + strspn(sp + 1, " ");
 		while (sp > line && sp[-1] == ' ')
 			*--sp = '\0';
-		snprintf(cast.name, sizeof(cast.name), "%s", line);
-		snprintf(cast.ip, sizeof(cast.ip), "%s", sp + 1 + strspn(sp + 1, " "));
-		cast.configured = cast.name[0] && cast.ip[0];
-		break;
+		if (!line[0] || !ip[0])
+			continue;
+		snprintf(cast.names[cast.n], sizeof(cast.names[0]), "%s", line);
+		snprintf(cast.ips[cast.n], sizeof(cast.ips[0]), "%s", ip);
+		nlog("CAST: speaker %s at %s\n", line, ip);
+		cast.n++;
 	}
 	fclose(f);
-	if (cast.configured)
-		nlog("CAST: speaker %s at %s\n", cast.name, cast.ip);
+	cast.configured = cast.n > 0;
+	/* The speaker used last time, by name. */
+	cfg_dir(path, sizeof(path));
+	strncat(path, "cast_last.txt", sizeof(path) - strlen(path) - 1);
+	f = fopen(path, "r");
+	if (f) {
+		if (fgets(line, sizeof(line), f)) {
+			line[strcspn(line, "\r\n")] = '\0';
+			for (int i = 0; i < cast.n; i++)
+				if (strcmp(cast.names[i], line) == 0)
+					cast.cur = i;
+		}
+		fclose(f);
+	}
+	if (cast.configured) {
+		snprintf(cast.name, sizeof(cast.name), "%s", cast.names[cast.cur]);
+		snprintf(cast.ip, sizeof(cast.ip), "%s", cast.ips[cast.cur]);
+	}
+}
+
+int native_cast_count(void)
+{
+	cast_load();
+	return cast.n;
+}
+
+int native_cast_current(void) { return cast.cur; }
+
+/* Steps to the next (+1) or previous (-1) speaker in cast.txt. Only while
+ * not casting: the one playing stays the one the remote talks to. */
+void native_cast_pick(int dir)
+{
+	cast_load();
+	if (cast.n < 2 || cast.state == NATIVE_CAST_STARTING ||
+	    cast.state == NATIVE_CAST_ON)
+		return;
+	LightLock_Lock(&g.lock);
+	cast.cur = (cast.cur + dir + cast.n) % cast.n;
+	snprintf(cast.name, sizeof(cast.name), "%s", cast.names[cast.cur]);
+	snprintf(cast.ip, sizeof(cast.ip), "%s", cast.ips[cast.cur]);
+	cast.dev[0] = '\0';
+	cast.awake = false;
+	cast.last_ctx[0] = cast.last_track[0] = '\0';
+	LightLock_Unlock(&g.lock);
+	char path[320];
+	cfg_dir(path, sizeof(path));
+	strncat(path, "cast_last.txt", sizeof(path) - strlen(path) - 1);
+	FILE *f = fopen(path, "w");
+	if (f) {
+		fprintf(f, "%s\n", cast.name);
+		fclose(f);
+	}
 }
 
 bool native_cast_configured(void)
