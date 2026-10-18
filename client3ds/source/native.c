@@ -99,7 +99,6 @@ static const char *view_name(native_view v)
  * is already on the next track: the skip no longer waits for the file. */
 typedef struct dl_job {
 	track_stream  ts;
-	Thread        th;
 	char          uri[64];   /* the requested track: meta.uri is not
 	                          * filled by single-track metadata, so the
 	                          * queue could not re-ask for it otherwise */
@@ -113,9 +112,6 @@ typedef struct dl_job {
 	bool          from_queue;   /* started by the download queue */
 	int           core;         /* queue jobs: the core it was put on */
 	volatile bool saving;       /* writing the file and its cover to SD */
-	/* Queue jobs: 1 while the pump still fetches the key (the thread
-	 * waits), 2 when that failed (the thread leaves, the pump frees). */
-	volatile int  gate;
 	struct dl_job *next;
 } dl_job;
 
@@ -865,10 +861,6 @@ void native_stop(void)
 static void download_thread(void *arg)
 {
 	dl_job *job = arg;
-	while (job->gate == 1)
-		svcSleepThread(10000000LL);   // 10 ms
-	if (job->gate == 2)
-		return;   /* the pump could not start it and frees the job */
 	const u64 t0 = osGetTime();
 	track_stream_download(&job->ts, &job->stop);
 	/* Throughput tells a slow CDN from a slow console when a song stalls. */
@@ -919,24 +911,100 @@ static void download_thread(void *arg)
 		mem_note("queue done");
 }
 
+/* Download workers: a few long-lived threads that take one job at a time.
+ * A thread per song leaked one of the 32 kernel threads this app may hold
+ * on every download, detached or not (the log counted them up song by
+ * song), until "DLQ: no thread for" ended the queue and any further play.
+ * Workers 0-3 sit on the system core like every network worker; the last
+ * one is on the app core, for the queue's second slot. */
+#define DL_WORKERS 5
+#define DL_APP_WORKER (DL_WORKERS - 1)
+static struct dl_worker {
+	Thread        th;
+	LightEvent    go;
+	dl_job       *volatile job;
+	volatile bool taken;   /* reserved, or running a job */
+} dlw[DL_WORKERS];
+
+static void dl_worker_main(void *arg)
+{
+	struct dl_worker *w = arg;
+	while (!g.quit) {
+		LightEvent_WaitTimeout(&w->go, 500000000LL);   // 0.5 s
+		dl_job *job = w->job;
+		if (!job)
+			continue;
+		download_thread(job);   /* may free the job: not touched after */
+		w->job = NULL;
+		__sync_synchronize();
+		w->taken = false;
+	}
+}
+
+/* Reserves an idle worker on the system core (app_core false) or the app
+ * core, starting its thread the first time. -1 when all are busy. */
+static int dl_reserve(bool app_core)
+{
+	int pick = -1;
+	LightLock_Lock(&g.lock);
+	for (int i = 0; i < DL_WORKERS && pick < 0; i++)
+		if (!dlw[i].taken && (i == DL_APP_WORKER) == app_core)
+			pick = i;
+	if (pick >= 0)
+		dlw[pick].taken = true;
+	LightLock_Unlock(&g.lock);
+	if (pick < 0)
+		return -1;
+	struct dl_worker *w = &dlw[pick];
+	if (!w->th) {
+		LightEvent_Init(&w->go, RESET_ONESHOT);
+		/* The fetch runs a full TLS handshake (cert chain + RSA bignum)
+		 * on this stack; 48 KB was not always enough. */
+		w->th = app_core
+		    ? threadCreate(dl_worker_main, w, 96 * 1024, 0x38, 0, false)
+		    : native_spawn_worker(dl_worker_main, w, 96 * 1024, 0x31);
+		if (!w->th) {
+			w->taken = false;
+			mem_note("no worker");
+			return -1;
+		}
+	}
+	return pick;
+}
+
+static void dl_release(int i)
+{
+	dlw[i].taken = false;
+}
+
+static void dl_run(int i, dl_job *job)
+{
+	dlw[i].job = job;
+	__sync_synchronize();
+	LightEvent_Signal(&dlw[i].go);
+}
+
+/* For the player: a song that was just skipped can hold a worker for the
+ * moment its stop takes to land, so a new one waits a little for it. */
+static int dl_reserve_wait(void)
+{
+	for (int i = 0; i < 40; i++) {
+		const int w = dl_reserve(false);
+		if (w >= 0 || g.quit)
+			return w;
+		svcSleepThread(50000000LL);   // 50 ms
+	}
+	return -1;
+}
+
 /* Leaves a job with its download thread (the player is moving on). When the
  * thread already finished, the job is reclaimed here instead. */
 static void job_detach(dl_job *job)
 {
 	__sync_synchronize();
-	/* Read before the CAS: once it lands, the thread may free the job. */
-	Thread th = job->th;
-	if (__sync_bool_compare_and_swap(&job->handoff, 0, 1)) {
-		/* The thread frees the job when it finishes; libctru frees the
-		 * thread itself only when it is detached. Without this every
-		 * queue download and every skip mid-download leaked a kernel
-		 * thread and its stack, until "DLQ: no thread for" ended the
-		 * queue a handful of songs into a playlist. */
-		threadDetach(th);
-		return;
-	}
-	threadJoin(job->th, U64_MAX);
-	threadFree(job->th);
+	if (__sync_bool_compare_and_swap(&job->handoff, 0, 1))
+		return;   /* the worker frees the job when it finishes */
+	/* Finished already: the worker is done with it, nothing to wait for. */
 	LightLock_Lock(&g.lock);
 	dl_job **p = &g.jobs;
 	while (*p && *p != job)
@@ -1034,19 +1102,13 @@ static void dlq_pump(void)
 		dlq_save();
 		return;
 	}
-	/* The thread comes first and waits at the gate: starting a song asks
-	 * the access point for its key, and a thread that then failed to start
-	 * threw that key away. Forty of those in a row got the account's keys
-	 * refused for every song after. */
-	job->gate = 1;
+	/* A worker is reserved before the key is asked for: starting a song
+	 * fetches its key, and a start that then found no thread threw that
+	 * key away. Forty of those in a row got the account's keys refused
+	 * for every song after. */
 	job->core = slot == 0 ? 1 : 0;
-	/* Slot 0 on the system core like every network worker; slot 1 on the
-	 * app core below the UI and the player (0x30), which idle most of a
-	 * frame, so it soaks up what they leave. */
-	Thread dl = slot == 0
-	    ? native_spawn_worker(download_thread, job, 96 * 1024, 0x31)
-	    : threadCreate(download_thread, job, 96 * 1024, 0x38, 0, false);
-	if (!dl) {
+	const int worker = dl_reserve(slot != 0);
+	if (worker < 0) {
 		nlog("DLQ: no thread for %s\n", e.title);
 		mem_note("no thread");
 		mem_largest();
@@ -1055,7 +1117,6 @@ static void dlq_pump(void)
 		dlq_save();
 		return;
 	}
-	job->th = dl;
 
 	char err[192] = "";
 	snprintf(job->uri, sizeof(job->uri), "%s", e.uri);
@@ -1074,9 +1135,7 @@ static void dlq_pump(void)
 	}
 	if (rc != 0) {
 		nlog("DLQ: could not start %s (%s)\n", e.title, err);
-		job->gate = 2;
-		threadJoin(dl, U64_MAX);
-		threadFree(dl);
+		dl_release(worker);
 		track_stream_free(&job->ts);
 		free(job);
 		const bool refused = strstr(err, "0x0002") != NULL;
@@ -1109,9 +1168,8 @@ static void dlq_pump(void)
 	LightLock_Unlock(&g.lock);
 	nlog("DLQ: downloading %s (slot %d)\n", e.title, slot);
 	mem_note("queue start");
-	__sync_synchronize();
-	job->gate = 0;
-	job_detach(job);   /* the thread frees the job when it is done */
+	job_detach(job);   /* the worker frees the job when it is done */
+	dl_run(worker, job);
 }
 
 /* Decodes one streaming track into the ring until it ends, the download
@@ -1561,11 +1619,8 @@ static void player_thread(void *arg)
 			g.jobs = job;
 			g.job = job;
 			LightLock_Unlock(&g.lock);
-			/* The fetch runs a full TLS handshake (cert chain +
-			 * RSA bignum) on this stack; 48 KB was not always enough. */
-			Thread dl = native_spawn_worker(download_thread, job, 96 * 1024,
-			                                0x31);
-			if (!dl) {
+			const int worker = dl_reserve_wait();
+			if (worker < 0) {
 				snprintf(g.error, sizeof(g.error),
 				         "could not start the download thread");
 				g.state = NATIVE_FAILED;
@@ -1577,14 +1632,14 @@ static void player_thread(void *arg)
 				free(job);
 				continue;
 			}
-			job->th = dl;
+			dl_run(worker, job);
 			play_stream(&job->ts);
 			play_ended_at = osGetTime();
 			if (g.quit) {
 				/* Shutting down: nothing outlives the player. */
 				job->stop = true;
-				threadJoin(dl, U64_MAX);
-				threadFree(dl);
+				while (job->handoff != 2)
+					svcSleepThread(10000000LL);   // 10 ms
 				LightLock_Lock(&g.lock);
 				dl_job **p = &g.jobs;
 				while (*p && *p != job)
@@ -2072,6 +2127,15 @@ void native_exit(void)
 			threadFree(cast.th);
 		cast.th = NULL;
 	}
+	for (int i = 0; i < DL_WORKERS; i++)
+		if (dlw[i].th) {
+			LightEvent_Signal(&dlw[i].go);
+			if (R_SUCCEEDED(threadJoin(dlw[i].th, 3000000000ULL)))
+				threadFree(dlw[i].th);
+			else
+				cast_done = false;   /* still in a socket: no teardown */
+			dlw[i].th = NULL;
+		}
 	bool player_done = cast_done;
 	if (g.player) {
 		player_done = R_SUCCEEDED(threadJoin(g.player, 6000000000ULL));
