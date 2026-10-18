@@ -2,7 +2,6 @@
 #include "ca_bundle.h"
 
 #include <errno.h>
-#include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <poll.h>
@@ -220,37 +219,12 @@ static int bio_recv(void *ctx, unsigned char *buf, size_t len)
 int tls_connect_timeout(int fd, const struct sockaddr *addr,
                         unsigned addrlen, int timeout_ms)
 {
-	const int flags = fcntl(fd, F_GETFL, 0);
-	if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0)
-		return connect(fd, addr, addrlen);   /* the old blocking way */
-	int rc = connect(fd, addr, addrlen);
-	if (rc < 0 && (errno == EINPROGRESS || errno == EWOULDBLOCK ||
-	               errno == EALREADY)) {
-		struct pollfd p = { .fd = fd, .events = POLLOUT };
-		int n = poll(&p, 1, timeout_ms);
-		if (n == 0) {
-			errno = ETIMEDOUT;
-			rc = -1;
-		} else if (n < 0 || (p.revents & (POLLERR | POLLHUP))) {
-			int soerr = 0;
-			socklen_t sl = sizeof(soerr);
-			getsockopt(fd, SOL_SOCKET, SO_ERROR, &soerr, &sl);
-			errno = soerr ? soerr : ECONNREFUSED;
-			rc = -1;
-		} else {
-			int soerr = 0;
-			socklen_t sl = sizeof(soerr);
-			if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &soerr, &sl) == 0 &&
-			    soerr != 0) {
-				errno = soerr;
-				rc = -1;
-			} else {
-				rc = 0;
-			}
-		}
-	}
-	fcntl(fd, F_SETFL, flags);
-	return rc;
+	/* A plain blocking connect. The non-blocking + poll version (1.6 test
+	 * build) made every connection fail on hardware -- sign-in died with
+	 * "no internet connection" -- so the deadline waits for a way that is
+	 * proven on the console. */
+	(void)timeout_ms;
+	return connect(fd, addr, addrlen);
 }
 
 static int dial(const char *host, u16 port, int timeout_ms,
