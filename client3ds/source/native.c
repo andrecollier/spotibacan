@@ -2033,8 +2033,9 @@ int native_init_offline(const native_sink *sink)
 
 /* ---- Casting to a speaker ------------------------------------------------
  *
- * One speaker, named in cast.txt beside the config ("Kitchen 192.168.1.20":
- * the name as the Google Home app shows it, then its address). The work is
+ * The speakers are listed in cast.txt beside the config, one per line
+ * ("Kitchen 192.168.1.20": the name as the Google Home app shows it, then
+ * its address); START picks among them. The work is
  * network and seconds long, so it runs on its own thread; the UI only
  * posts requests and reads the state. Spotify on the speaker does the
  * streaming, so the console's own player just sits paused meanwhile. */
