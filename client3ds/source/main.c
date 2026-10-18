@@ -2675,9 +2675,12 @@ int main(int argc, char **argv)
 				break;
 			case 5:   // queue every track of the list last shown
 				if (list_downloadable()) {
-					native_dl_enqueue_list(nat_rows, nat_count, nat_title);
 					settings_open = false;
-					queue_open = true;   /* show what got queued */
+					if (native_dl_enqueue_list(nat_rows, nat_count,
+					                           nat_title) > 0)
+						queue_open = true;   /* show what got queued */
+					else
+						toast_show(tr(S_DL_ALL_SAVED));   /* nothing new */
 				}
 				break;
 			case 6:   // unlink: wipe the token (and prefs) and leave

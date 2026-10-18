@@ -169,6 +169,8 @@ void native_fetch_cancel(void) { fetch_cancel = true; }
 
 static void save_download(const track_stream *ts);
 static void dlist_write(const char *title, const native_row *rows, int n);
+static void download_path(const char *artist, const char *title,
+                          char *out, size_t outlen);
 static int rootlist_cache_load(native_row *rows, int max);
 
 static struct {
@@ -440,16 +442,27 @@ int native_dl_enqueue_list(const native_row *rows, int n, const char *title)
 	if (!g.ready || g.offline)
 		return 0;
 	dlist_write(title, rows, n);   /* so Downloads can show it as a folder */
-	int added = 0, before = native_dl_queue_count();
+	/* Downloading a list again (songs were added to it since) queues only
+	 * what the card lacks: the rest would be skipped one by one anyway,
+	 * but would still crowd the queue and its "12 / 87" count. */
+	int added = 0, have = 0, before = native_dl_queue_count();
 	for (int i = 0; i < n; i++) {
 		const native_row *r = &rows[i];
 		if (r->is_playlist || strncmp(r->uri, "spotify:track:", 14) != 0)
 			continue;
+		char path[520];
+		struct stat st;
+		download_path(r->sub, r->label, path, sizeof(path));
+		if (stat(path, &st) == 0 && st.st_size > 0) {
+			have++;
+			continue;
+		}
 		if (!dlq_add(r->uri, r->sub, r->label, true))
 			break;   /* full */
 	}
 	added = native_dl_queue_count() - before;
-	nlog("DLQ: %d of %d tracks queued from a list\n", added, n);
+	nlog("DLQ: %d of %d tracks queued from a list (%d already on the card)\n",
+	     added, n, have);
 	dlq_save();
 	return added;
 }
